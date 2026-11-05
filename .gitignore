@@ -1,0 +1,8 @@
+bin/
+obj/
+/app/
+*.user
+.vs/
+.vscode/
+*.suo
+TestResults/

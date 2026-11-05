@@ -1,0 +1,126 @@
+OK   Start ist leer: 0 Eingaenge, 0 Ausgaenge
+OK   Start: keine Matrix-Verbindungen und keine Zuordnungen
+OK   Klick auf '+ Eingang' legt einen Eingang an
+OK   neuer Kanal hat keinen vorbelegten Namen
+OK   Stereo-Paar legt zwei Ausgaenge an
+OK   Kanalzahl-Aenderung erzeugt neue Engine
+OK   Anlegen: 3 Eingaenge, 4 Ausgaenge
+OK   Matrix passt sich an (3x4)
+OK   Doppelklick auf den Namen oeffnet den Editor
+OK   Name per Editor gesetzt
+OK   Editor danach geschlossen
+OK   Esc verwirft die Eingabe
+OK   Fader startet bei 0 dB
+OK   Fader nach oben ziehen erhoeht den Pegel
+OK   Fader begrenzt auf MaxGainDb (+12)
+OK   Ziehen weit ueber das Ende bleibt bei +12
+OK   Doppelklick auf den Fader = 0 dB
+OK   Mausrad: +1 dB
+OK   Strg+Mausrad: fein (0,1 dB)
+OK   Mausrad bis unten ergibt -unendlich
+OK   Mute schaltet
+OK   Mute schaltet zurueck
+OK   Gain-Sperre: Fader zeigt Sperrwert
+OK   Gesperrter Fader laesst sich nicht ueber -13 dB ziehen
+OK   Doppelklick (0 dB) wird auf die Sperre geklemmt
+OK   Mausrad kann die Sperre nicht uebersteigen
+OK   Getippter Wert +5 wird auf die Sperre geklemmt
+OK   Modell klemmt GainDb auf MaxGainDb
+OK   Klick auf das Schloss oeffnet ein Menue
+OK   Matrix-Ansicht sichtbar bei vorhandenen Kanaelen
+OK   Matrix: Klick verbindet bei 0 dB
+OK   Matrix: Ziehen aendert den Pegel
+OK   Matrix: Doppelklick = 0 dB
+OK   Matrix: erneuter Klick trennt
+OK   Matrix: Mausrad auf getrennter Zelle aendert nichts
+OK   Matrix: Mausrad +2 dB
+OK   Matrix: Rechtsklick trennt
+OK   Matrix: geschuetzter Ausgang bleibt <= 0 dB
+OK   Matrix: Mausrad auf geschuetztem Ausgang bleibt <= 0 dB
+OK   Verschieben tauscht die Reihenfolge
+OK   Verschieben tauscht die Matrix-Zeilen mit
+OK   Kanal-Menue oeffnet
+OK   Loeschen entfernt den Kanal
+OK   Loeschen laesst die Matrix passend
+OK   Ausgang loeschen entfernt die Matrix-Spalte
+OK   Neues Projekt: wieder leer
+OK   Zuordnung legt fehlende Engine-Eingaenge an
+OK   Zuordnung legt fehlende Engine-Ausgaenge an
+OK   Gueltige Zuordnung wird akzeptiert
+OK   Zu viele Geraetekanaele werden gemeldet
+OK   Unbekanntes Geraet wird gemeldet
+OK   Start mit Demo-Engine ist nicht moeglich
+OK   Loeschen eines Eingangs schrumpft die Zuordnung
+INFO Audio-Host verfuegbar: True | Echte Engine geladen: False
+OK   JSON enthaelt null fuer -unendlich
+OK   JSON enthaelt kein Infinity/NaN
+OK   Laden: Kanalzahlen
+OK   Laden: -unendlich bleibt -unendlich
+OK   Laden: Matrixwert
+OK   Laden: Umlaute im Namen
+OK   Laden: Gain-Sperre und Limiter
+OK   Laden: Zuordnungen und Fenstergroesse
+OK   Projekt laden ersetzt den Zustand
+OK   Geraete-Seite wechselt
+OK   Projekt-Menue oeffnet
+OK   Esc schliesst das Menue
+OK   Neues Projekt fragt nach
+OK   Abbrechen laesst das Projekt unveraendert
+OK   Bestaetigen leert das Projekt
+OK   App-Links: Stereo-Paar anhand der Namen erkannt
+OK   App-Links: anfangs keine Links, kein Problem
+OK   App-Links: Programmliste fasst Sitzungen je Exe zusammen, spielende zuerst
+OK   Geraete-Zuordnung auf Eingang 3+4 angelegt
+OK   App-Link auf einen Eingang mit Geraete-Zuordnung wird abgelehnt und erklaert
+OK   Auch ein Stereo-Link, der in die Zuordnung ragt, wird abgelehnt
+OK   Klick auf einen belegten Eingang oeffnet das Popup
+OK   Popup an belegtem Eingang bindet nichts
+OK   Esc schliesst das Popup
+OK   Klick auf den Link-Knopf oeffnet das Auswahl-Popup
+OK   Filter 'vlc' + Enter bindet VLC (mono) an Eingang 5
+OK   Popup schliesst nach der Auswahl
+OK   Gebundener Streifen zeigt den Programmnamen
+OK   Handeingabe normalisiert Pfad/Endung: 'Chrome.exe'
+OK   Handeingabe kennt Programme der Liste (Anzeigename)
+OK   Stereo-App-Link auf das benannte Paar 1+2
+OK   Zweite Streifenhaelfte heisst 'Spotify R'
+OK   Dasselbe Programm an zwei Faders wird abgelehnt (ohne Beachtung der Gross-/Kleinschreibung)
+OK   Link ueber einen schon gebundenen Eingang wird abgelehnt
+OK   Ungueltige Programmnamen werden abgelehnt
+OK   Links bleiben nach Eingang sortiert
+OK   Stereo-Link-Eingaenge lassen sich nicht verschieben
+OK   Neue Geraete-Zuordnung auf einen App-Link-Eingang wird abgelehnt
+OK   Zuordnung in einen App-Link verschieben wird abgelehnt und aendert nichts
+OK   Neue Zuordnung wird hinter die Links einsortiert
+OK   Ohne Parkplatz: Start-Problem benennt den Parkplatz
+OK   Das Standardgeraet ist als Parkplatz nicht waehlbar
+OK   Ein Aufnahmegeraet ist als Parkplatz nicht waehlbar
+OK   Parkplatz-Kandidaten: nur Render-Geraete ohne Standardgeraet
+OK   Parkplatz gesetzt, Problem verschwindet
+OK   Parkplatz zugleich als Ausgang zugeordnet: Problem
+OK   Zuordnung entfernt, Problem weg
+OK   Host-Konfiguration: AppBindings (EngineFirstChannel = Eingang) und Parkplatz
+OK   Links ausgeschaltet: keine AppBindings, kein Parkplatz, kein Start-Problem
+OK   Tick meldet geaenderten Link-Status
+OK   Status: verbunden / Fehler mit Meldung / wartet
+OK   Tooltip nennt Programm und Fehlermeldung
+OK   Ohne Host-Status: bereit (Audio gestoppt)
+OK   'Alle Umleitungen zuruecksetzen' ruft RestoreAllKnown
+OK   Einstellungsseite mit App-Link-Abschnitt zeichnet (mit/ohne Parkplatz, niedriges Fenster scrollt)
+OK   JSON enthaelt AppLinks und Parkplatz
+OK   Laden: App-Links, Schalter und Parkplatz kommen zurueck
+OK   Geladener Streifen zeigt den Link
+OK   Alte Projektdatei (ohne App-Link-Felder): keine Links, Schalter an, kein Parkplatz
+OK   Alte Datei geladen: Eingaenge da, keine Links
+OK   Geladener Konflikt: Link zeigt 'Konflikt'
+OK   Geladener Konflikt: Zuordnung meldet den App-Link
+OK   Geladener Konflikt: Start-Problem benennt ihn
+OK   Eingang loeschen: Stereo-Link schrumpft auf mono, folgende Links ruecken auf
+OK   Eingang verschieben: Mono-Link wandert mit
+OK   Eingang mit Mono-Link loeschen entfernt den Link
+OK   Neues Projekt: keine Links, Parkplatz bleibt (Geraeteeinstellung)
+OK   Nicht unterstuetztes Windows: Start-Problem nennt den Grund
+OK   Ohne Umleitungs-Klasse: Start mit Links wird verweigert
+INFO App-Links echt: Restorer=unterstuetzt | Katalog=2 Sitzung(en) | Monitor=AudioHost ja
+OK   Zeichnen in 84 Groessen/Seiten ohne Ausnahme
+ALLE TESTS BESTANDEN
