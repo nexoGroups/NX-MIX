@@ -69,7 +69,8 @@ public class PerformanceTests
         return rtf;
     }
 
-    [Fact]
+    // Misst die Rechenleistung der Maschine: laeuft lokal, auf den wechselnden GitHub-Rechnern nicht (Filter Category!=Performance)
+    [Fact, Trait("Category", "Performance")]
     public void Realtime_factor_16in_12out_6_filters_96k_is_over_20x()
     {
         double typical = Measure("16x12, je 6 Filter (8 Sektionen), dichte Matrix, ohne Limiter-Eingriff", Build(SixFilters(), true), 0.1f);

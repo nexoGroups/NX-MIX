@@ -40,14 +40,17 @@ internal sealed unsafe class MainWindow : IShell
     int _exitAfterMs;
     readonly WindowDto? _initial;
     readonly UiPrefs _prefs;
+    readonly IUpdateBackend _updates;
+    bool _exitPrepared;
     const uint WM_SETTINGCHANGE = 0x001A;
 
-    public MainWindow(AppModel model, WindowDto? initial, int exitAfterMs, UiPrefs prefs)
+    public MainWindow(AppModel model, WindowDto? initial, int exitAfterMs, UiPrefs prefs, IUpdateBackend updates)
     {
         _model = model;
         _initial = initial;
         _exitAfterMs = exitAfterMs;
         _prefs = prefs;
+        _updates = updates;
     }
 
     // ---- IShell --------------------------------------------------------------------------------
@@ -72,6 +75,16 @@ internal sealed unsafe class MainWindow : IShell
             }
             catch { return true; }
         }
+    }
+
+    /// <summary>Beim Schliessen und vor einem Update-Neustart: Projekt speichern, Audio stoppen, Umleitungen zuruecksetzen.</summary>
+    public void PrepareExit()
+    {
+        if (_exitPrepared) return;
+        _exitPrepared = true;
+        _root?.SaveNow();
+        _model.Shutdown();
+        AudioFactory.TryRestoreAll(); // Sicherheit: alle Programm-Umleitungen beim Beenden zuruecksetzen
     }
 
     public void ThemeChanged()
@@ -139,7 +152,7 @@ internal sealed unsafe class MainWindow : IShell
         DwmExtendFrameIntoClientArea(_hwnd, in margins);
 
         _model.Post = a => { _posted.Enqueue(a); PostMessage(_hwnd, WM_APP, 0, 0); };
-        _root = new UiRoot(_model, this, _prefs);
+        _root = new UiRoot(_model, this, _prefs, _updates);
         ApplyFrameTheme();
 
         // Groesse und Lage
@@ -158,6 +171,7 @@ internal sealed unsafe class MainWindow : IShell
         UpdateWindow(_hwnd);
         _lastTick = _clock.Elapsed.TotalSeconds;
         _model.RefreshDevices();
+        _root.StartUpdateCheck();
 
         while (GetMessage(out var msg, 0, 0, 0) > 0)
         {
@@ -402,9 +416,7 @@ internal sealed unsafe class MainWindow : IShell
                 break;
 
             case WM_CLOSE:
-                _root?.SaveNow();
-                _model.Shutdown();
-                AudioFactory.TryRestoreAll(); // Sicherheit: alle Programm-Umleitungen beim Beenden zuruecksetzen
+                PrepareExit();
                 DestroyWindow(hwnd);
                 return 0;
             case WM_DESTROY:

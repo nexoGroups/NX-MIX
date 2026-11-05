@@ -235,7 +235,8 @@ internal sealed class ModalDialog : Overlay
     public override void Layout()
     {
         var b = Bounds;
-        float w = Math.Min(Theme.Touch ? 500 : 460, b.W - 40);
+        float btnSum = _buttons.Sum(t => Math.Max(96, Renderer.MeasureWidth(t, Theme.BodyMedium) + 32) + 10) + 38;
+        float w = Math.Min(Math.Max(Theme.Touch ? 500 : 460, btnSum), b.W - 40);
         float textW = w - 48;
         float mh = Renderer.TextHeight(_message, Theme.Body, textW);
         float bh = Theme.ControlH;

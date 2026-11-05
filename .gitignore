@@ -6,3 +6,5 @@ obj/
 .vscode/
 *.suo
 TestResults/
+artifacts/
+Releases/

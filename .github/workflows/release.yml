@@ -1,0 +1,52 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the installer and update packages and publishes them as a GitHub release.
+# Installed copies find that release through Velopack and offer the update.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      VPK_VERSION: 1.2.161   # keep in step with the Velopack package in the app csproj
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Version from tag
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Test
+        run: dotnet test NxMix.slnx -c Release --filter "Category!=Performance"
+
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk --version $env:VPK_VERSION
+
+      # Previous releases make Velopack create small delta packages. The first release has none, so this may fail.
+      - name: Download previous releases
+        continue-on-error: true
+        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} --outputDir Releases
+
+      - name: Pack
+        shell: pwsh
+        run: ./tools/pack.ps1 -Version $env:VERSION
+
+      - name: Publish release
+        run: >
+          vpk upload github
+          --repoUrl https://github.com/${{ github.repository }}
+          --token ${{ secrets.GITHUB_TOKEN }}
+          --outputDir Releases
+          --tag v${{ env.VERSION }}
+          --releaseName "NX-MIX ${{ env.VERSION }}"
+          --publish

@@ -14,6 +14,8 @@ internal sealed class UiPrefs
     public Density Density { get; set; } = Density.Mouse;
     /// <summary>Vorgabe wie bei UniFi: schmale Symbolleiste, Texte als Tooltip.</summary>
     public bool SidebarExpanded { get; set; }
+    /// <summary>Beim Start im Hintergrund nach einer neuen Version suchen (installiert wird nur auf Klick).</summary>
+    public bool AutoUpdateCheck { get; set; } = true;
 
     static readonly JsonSerializerOptions s_json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 

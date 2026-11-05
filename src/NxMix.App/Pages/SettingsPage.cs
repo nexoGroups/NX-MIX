@@ -19,6 +19,8 @@ internal sealed class SettingsPage : Page
     readonly Button _new = new("Neues leeres Projekt", ButtonStyle.DestructiveTinted, Icon.Document);
     public readonly Switch LinksSw = new() { Tooltip = "Aus: Programme laufen normal, die Links bleiben im Projekt gespeichert" };
     public readonly Dropdown Parking = new();
+    public readonly Switch AutoUpdateSw = new();
+    public readonly Button UpdateButton = new("Jetzt suchen", ButtonStyle.Gray, Icon.Refresh);
     readonly Button _reset = new("Alle Umleitungen zurücksetzen", ButtonStyle.Gray, Icon.Refresh) { Tooltip = "Setzt jedes umgeleitete Programm zurück auf „System-Standard“" };
     readonly VScroll _sc = new();
     readonly List<Action<Renderer>> _painters = new();
@@ -38,6 +40,9 @@ internal sealed class SettingsPage : Page
         Add(ThemeSeg); Add(DensitySeg); Add(SidebarSw);
         Add(_export); Add(_import); Add(_new);
         Add(LinksSw); Add(Parking); Add(_reset);
+        Add(AutoUpdateSw); Add(UpdateButton);
+        AutoUpdateSw.Changed += on => Root?.SetAutoUpdateCheck(on);
+        UpdateButton.Clicked += () => Root?.ShowUpdate();
         ThemeSeg.Changed += i => Root?.SetThemeMode(i switch { 1 => ThemeMode.Light, 2 => ThemeMode.Dark, _ => ThemeMode.System });
         DensitySeg.Changed += i => Root?.SetDensity(i == 1 ? Density.Touch : Density.Mouse);
         SidebarSw.Changed += on => Root?.SetSidebarExpanded(on);
@@ -112,6 +117,16 @@ internal sealed class SettingsPage : Page
             ThemeSeg.SetSelected(root.Prefs.Theme switch { ThemeMode.Light => 1, ThemeMode.Dark => 2, _ => 0 });
             DensitySeg.SetSelected(root.Prefs.Density == Density.Touch ? 1 : 0);
             SidebarSw.SetOn(root.Prefs.SidebarExpanded);
+            AutoUpdateSw.SetOn(root.Prefs.AutoUpdateCheck);
+            var u = root.Updater;
+            (UpdateButton.Text, UpdateButton.Style, UpdateButton.Icon) = u.Stage switch
+            {
+                UpdateStage.Available => ($"{u.Offer?.Version} laden …", ButtonStyle.Filled, Icon.Import),
+                UpdateStage.Ready => ("Installieren …", ButtonStyle.Filled, Icon.Import),
+                UpdateStage.Downloading => ($"Lädt … {u.Progress} %", ButtonStyle.Gray, Icon.Import),
+                _ => ("Jetzt suchen", ButtonStyle.Gray, Icon.Refresh),
+            };
+            UpdateButton.Enabled = u.Stage is not (UpdateStage.Checking or UpdateStage.Downloading or UpdateStage.NotInstalled);
         }
         bool run = _m.HostRunning || _m.HostBusy;
         Parking.Enabled = !run;
@@ -142,6 +157,27 @@ internal sealed class SettingsPage : Page
         y = Row(x, y, colW, rowH, Icon.Palette, Theme.Purple, "Farbmodus", "System folgt der Windows-Einstellung", ThemeSeg, 270);
         y = Row(x, y, colW, rowH, Icon.Hand, Theme.Orange, "Bedienung", "Touch: größere Tasten, Fader und Zeilen", DensitySeg, 190, sep: true);
         y = Row(x, y, colW, rowH, Icon.Sidebar, Theme.Teal, "Seitenleiste ausgeklappt", null, SidebarSw, 60, sep: true);
+        Group(x, g0, colW, y - g0);
+        y += 28;
+
+        // ---- Updates ----
+        y = Section(x, y, colW, "UPDATES");
+        g0 = y;
+        var up = Root?.Updater;
+        string ver = up?.CurrentVersion ?? AppVersion.Build;
+        string upState = up == null ? "" : up.Stage switch
+        {
+            UpdateStage.NotInstalled => "Updates gibt es nur für die installierte Version (Setup.exe von GitHub).",
+            UpdateStage.Checking => "Suche nach einer neuen Version …",
+            UpdateStage.UpToDate => "Du hast die neueste Version.",
+            UpdateStage.Available => $"Version {up.Offer?.Version} ist verfügbar.",
+            UpdateStage.Downloading => $"Version {up.Offer?.Version} wird geladen …",
+            UpdateStage.Ready => up.InstallOnExitPending ? $"Version {up.Offer?.Version} wird beim Beenden installiert." : $"Version {up.Offer?.Version} ist geladen und bereit.",
+            UpdateStage.Failed => "Suche fehlgeschlagen: " + up.Error,
+            _ => "Noch nicht gesucht.",
+        };
+        y = Row(x, y, colW, rowH, Icon.Import, Theme.Green, $"NX-MIX {ver}", upState, UpdateButton, Math.Max(150, UpdateButton.PreferredWidth));
+        y = Row(x, y, colW, rowH, Icon.Refresh, Theme.Accent, "Beim Start nach Updates suchen", "Installiert wird nie von selbst – nur auf Klick", AutoUpdateSw, 60, sep: true);
         Group(x, g0, colW, y - g0);
         y += 28;
 

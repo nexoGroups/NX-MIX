@@ -103,6 +103,21 @@ OK   Einstellungen: 'Touch' vergroessert Fader-Kappen und Streifen
 OK   Einstellungen: 'Maus' wieder kompakt
 OK   Seitenleiste einklappen macht den Inhalt breiter
 OK   Knopf unten klappt die Seitenleiste wieder aus
+OK   Update: Build aus dem Quellcode meldet 'nicht installiert'
+OK   Update: Suche beim Start findet 9.9.0
+OK   Update: Kopfleiste zeigt die Update-Pille
+OK   Update: nichts wird von selbst geladen oder installiert
+OK   Update: Klick auf die Pille zeigt Neuigkeiten und fragt
+OK   Update: 'Spaeter' laedt nichts
+OK   Update: 'Herunterladen' laedt das Update (bereit, 100 %)
+OK   Update: geladen, aber noch nicht installiert
+OK   Update: bereit-Dialog bietet Neustart oder 'beim Beenden'
+OK   Update: 'Jetzt neu starten' speichert/stoppt zuerst und installiert dann
+OK   Update: 'Beim Beenden installieren' meldet sich beim Updater an, ohne Neustart
+OK   Update: Suche beim Start abschaltbar
+OK   Update: Netzwerkfehler wird gemeldet, nicht geworfen
+OK   Update: aktuelle Version = 'neueste Version'
+OK   Update: Einstellungen zeigen Version und Update-Knopf
 OK   App-Links: Stereo-Paar anhand der Namen erkannt
 OK   App-Links: anfangs keine Links, kein Problem
 OK   App-Links: Programmliste fasst Sitzungen je Exe zusammen, spielende zuerst

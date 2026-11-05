@@ -1,0 +1,66 @@
+NX-MIX – Lizenz für nichtkommerzielle Nutzung
+Version 1.0 · 5. November 2026
+
+Copyright (c) 2026 nexoGroups. Alle Rechte vorbehalten,
+soweit diese Lizenz oder Lizenzen von Fremdkomponenten nichts anderes vorsehen.
+
+1. Geltungsbereich
+Diese Lizenz gilt für den eigenen Programmcode, die Gestaltung und die
+Dokumentation von NX-MIX. Sie ist keine MIT-, GPL- oder sonstige freie
+Open-Source-Lizenz. Fremdkomponenten sind von den Einschränkungen dieser
+Lizenz ausgenommen; für sie gelten ausschließlich ihre eigenen Lizenzen.
+Siehe THIRD-PARTY.md und die mitgelieferten Lizenztexte.
+
+2. Erlaubte Nutzung
+Der Download von der offiziellen Projektseite und die nichtkommerzielle
+Nutzung von NX-MIX sind kostenlos erlaubt. Erlaubt sind die Installation,
+das Ausführen, erforderliche private Sicherungskopien sowie lokale Anpassungen
+und lokale Builds für die eigene nichtkommerzielle Nutzung. Urheber- und
+Lizenzhinweise dürfen nicht entfernt werden.
+
+Nichtkommerziell bedeutet, dass die Nutzung nicht auf eine Vergütung oder
+einen geschäftlichen bzw. kommerziellen Vorteil gerichtet ist. Insbesondere
+die Nutzung als Bestandteil bezahlter Dienstleistungen, für kommerzielle
+Veranstaltungsangebote oder zur betrieblichen Verkaufsförderung ist ohne
+gesonderte Zustimmung nicht erlaubt.
+
+3. Nicht erlaubte Nutzung und Weitergabe
+Ohne vorherige gesonderte Zustimmung des Rechteinhabers sind kommerzielle
+Nutzung, Verkauf, Vermietung, Unterlizenzierung, das Weitergeben der
+Programmdateien und das Anbieten eigener Downloads, Mirrors oder modifizierter
+Programm-Veröffentlichungen nicht erlaubt. Dies gilt auch für kostenlose
+Re-Uploads. Stattdessen darf und soll auf den offiziellen Download verlinkt
+werden. Ein eigener Build hebt diese Einschränkungen nicht auf.
+
+4. Ausnahme für GitHub
+Das Anzeigen und plattforminterne Forken des öffentlichen Repositorys ist
+im Umfang der einschlägigen GitHub-Nutzungsbedingungen erlaubt. Diese
+Ausnahme erlaubt weder kommerzielle Nutzung noch eigene veröffentlichte
+Programm-Downloads. Öffentlich sichtbarer Quellcode ist keine darüber
+hinausgehende Freigabe zur Weiterverbreitung des Programms.
+
+5. Fremdkomponenten und zwingende Rechte
+Die Rechte aus den Lizenzen von Fremdkomponenten, insbesondere MIT und
+SIL Open Font License, bleiben vollständig erhalten. Sie dürfen diese
+Komponenten nach deren jeweiligen Lizenzbedingungen verwenden, austauschen,
+verändern und weitergeben. Zwingende gesetzliche Rechte bleiben unberührt.
+
+6. Zustand und Haftung
+NX-MIX wird im jeweils vorhandenen Zustand bereitgestellt. Soweit
+rechtlich zulässig, werden keine Garantien für Fehlerfreiheit, Eignung für
+einen bestimmten Zweck oder unterbrechungsfreien Betrieb übernommen.
+Gesetzlich nicht ausschließbare Haftung, insbesondere wegen Vorsatz,
+grober Fahrlässigkeit oder Verletzung von Leben, Körper oder Gesundheit,
+bleibt unberührt.
+
+NX-MIX steuert Audiopegel, die an Verstärker und Lautsprecher gehen. Prüfe
+vor dem Start von Audio die Lautstärke deiner Geräte und setze für
+empfindliche Lautsprecher (z. B. Hochtöner) eine Gain-Sperre.
+
+7. Rechtevorbehalt
+Alle nicht ausdrücklich eingeräumten Rechte bleiben beim Rechteinhaber.
+Gesonderte Erlaubnisse können über die offizielle Projektseite angefragt
+werden. Für die Weitergabe von Fremdkomponenten gelten ausschließlich
+deren jeweilige Lizenzbedingungen.
+
+Offizielle Projektseite: https://github.com/nexoGroups/NX-MIX

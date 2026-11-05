@@ -18,6 +18,8 @@ internal interface IShell
     bool SystemPrefersDark { get; }
     /// <summary>Farbmodus hat gewechselt (Fensterrahmen anpassen).</summary>
     void ThemeChanged();
+    /// <summary>Wie beim Schliessen: Projekt speichern, Audio stoppen, Programm-Umleitungen zuruecksetzen (vor einem Update-Neustart).</summary>
+    void PrepareExit();
 }
 
 internal sealed class NullShell : IShell
@@ -35,6 +37,8 @@ internal sealed class NullShell : IShell
     public WindowDto? WindowState => null;
     public bool SystemPrefersDark => SystemDark;
     public void ThemeChanged() { }
+    public int ExitPrepared;
+    public void PrepareExit() => ExitPrepared++;
 }
 
 /// <summary>Wurzel der Oberflaeche: Seitenleiste, Kopfleiste, Seiten, Ueberlagerungen (Stapel), Meldungen, Eingabeverteilung.</summary>
@@ -70,11 +74,15 @@ internal sealed class UiRoot : Widget
     bool _tipVisible;
     double _saveDue = -1;
 
-    public UiRoot(AppModel model, IShell shell, UiPrefs? prefs = null)
+    public AppUpdater Updater { get; }
+
+    public UiRoot(AppModel model, IShell shell, UiPrefs? prefs = null, IUpdateBackend? updates = null)
     {
         Model = model;
         Shell = shell;
         Prefs = prefs ?? new UiPrefs();
+        Updater = new AppUpdater(updates ?? new FakeUpdateBackend { IsInstalled = false }, () => Model.Post);
+        Updater.Changed += OnUpdaterChanged;
         ApplyThemeFromPrefs(false);
         Pages = new Page[] { new MixerPage(model), new MatrixPage(model), new DevicesPage(model), new SettingsPage(model) };
         foreach (var p in Pages) Add(p);
@@ -427,6 +435,89 @@ internal sealed class UiRoot : Widget
                 });
         }
         catch (Exception ex) { Notify.Flash("Import fehlgeschlagen: " + ex.Message, true); }
+    }
+
+    // ---- Updates ------------------------------------------------------------------------------
+    UpdateStage _lastStage;
+
+    /// <summary>Beim Start im Hintergrund suchen, wenn in den Einstellungen erlaubt.</summary>
+    public void StartUpdateCheck() { if (Prefs.AutoUpdateCheck) Updater.Check(); }
+
+    public void SetAutoUpdateCheck(bool on) { Prefs.AutoUpdateCheck = on; Prefs.Save(); Dirty = true; }
+
+    void OnUpdaterChanged()
+    {
+        var st = Updater.Stage;
+        if (st != _lastStage)
+        {
+            if (st == UpdateStage.Ready) Notify.Flash($"Update {Updater.Offer?.Version} ist geladen – oben auf „Update bereit“ klicken.");
+            else if (st == UpdateStage.Failed && _lastStage == UpdateStage.Downloading) Notify.Flash("Update konnte nicht geladen werden: " + Updater.Error, true);
+            _lastStage = st;
+        }
+        Top.Layout();
+        Dirty = true;
+    }
+
+    /// <summary>Was ein Klick auf die Update-Pille / "Update installieren" tut - abhaengig vom Stand.</summary>
+    public void ShowUpdate()
+    {
+        var u = Updater;
+        switch (u.Stage)
+        {
+            case UpdateStage.Available:
+                {
+                    string notes = PlainNotes(u.Offer?.Notes);
+                    ModalDialog.Show(this, $"NX-MIX {u.Offer!.Version} ist verfügbar",
+                        $"Installiert ist {u.CurrentVersion}. Das Update wird im Hintergrund geladen; installiert wird erst, wenn du es sagst."
+                        + (notes.Length > 0 ? "\n\n" + notes : ""),
+                        new[] { "Später", "Herunterladen" }, 1, -1, i => { if (i == 1) u.Download(); }, Icon.Import);
+                    break;
+                }
+            case UpdateStage.Downloading:
+                Notify.Flash($"Update {u.Offer?.Version} wird geladen … {u.Progress} %");
+                break;
+            case UpdateStage.Ready:
+                {
+                    if (u.InstallOnExitPending) { Notify.Flash($"Update {u.Offer?.Version} wird beim Beenden installiert."); break; }
+                    bool live = Model.HostRunning;
+                    string msg = $"Version {u.Offer!.Version} ist geladen. „Jetzt neu starten“ speichert das Projekt, stoppt Audio, setzt alle Programm-Umleitungen zurück und startet die neue Version."
+                        + (live ? "\n\nAchtung: Audio läuft gerade – ein Neustart unterbricht es. Im laufenden Betrieb besser „Beim Beenden installieren“ wählen." : "");
+                    ModalDialog.Show(this, "Update bereit", msg, new[] { "Später", "Beim Beenden installieren", "Jetzt neu starten" }, live ? 1 : 2, -1, i =>
+                    {
+                        if (i == 1) { u.InstallOnExit(); Notify.Flash($"Update {u.Offer?.Version} wird beim Beenden installiert."); }
+                        else if (i == 2) RestartForUpdate();
+                    }, Icon.Import);
+                    break;
+                }
+            case UpdateStage.Failed:
+                Notify.Flash("Update-Suche fehlgeschlagen: " + u.Error, true);
+                break;
+            case UpdateStage.NotInstalled:
+                Notify.Flash("Updates gibt es nur für die installierte Version (Setup.exe von GitHub).");
+                break;
+            default:
+                u.Check();
+                break;
+        }
+    }
+
+    void RestartForUpdate()
+    {
+        SaveNow();
+        Shell.PrepareExit();
+        Updater.InstallNow();
+    }
+
+    /// <summary>Release-Notizen (Markdown) als schlichter Text, gekuerzt.</summary>
+    static string PlainNotes(string? md)
+    {
+        if (string.IsNullOrWhiteSpace(md)) return "";
+        var lines = md.Replace("\r", "").Split('\n')
+            .Select(l => l.Trim().TrimStart('#').Trim().Replace("**", "").Replace("`", ""))
+            .Select(l => l.StartsWith("- ") ? "• " + l[2..] : l);
+        var text = string.Join("\n", lines).Trim();
+        while (text.Contains("\n\n\n")) text = text.Replace("\n\n\n", "\n\n");
+        return text.Length > 700 ? text[..700].TrimEnd() + " …" : text;
     }
 
     public void ShowProjectMenu(RectF anchor)

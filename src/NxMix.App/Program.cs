@@ -10,6 +10,7 @@ using Vortice.Direct2D1;
 using Vortice.DXGI;
 using Vortice.Mathematics;
 using Vortice.WIC;
+using Velopack;
 
 namespace NxMix.App;
 
@@ -17,7 +18,7 @@ internal static class Program
 {
     sealed class Options
     {
-        public string? Shot, SelfTest, DataDir, Show;
+        public string? Shot, SelfTest, DataDir, Show, UpdateTest;
         public string Page = "mixer";
         public int W = 1600, H = 900;
         public float Scale = 1f;
@@ -27,6 +28,8 @@ internal static class Program
         /// <summary>Screenshots: --theme light|dark, --touch, --expanded (Seitenleiste ausgeklappt).</summary>
         public string Theme = "dark";
         public bool Touch, Expanded;
+        /// <summary>Screenshots: --update available|ready (Update-Pille mit Attrappe).</summary>
+        public string? Update;
         public double T = 4.2;
         public int ExitAfterMs;
     }
@@ -54,6 +57,7 @@ internal static class Program
                 case "--host-running": o.HostRunning = true; break;
                 case "--show": o.Show = Next(ref i); break;
                 case "--selftest": o.SelfTest = Next(ref i); break;
+                case "--update-check-test": o.UpdateTest = Next(ref i); break;
                 case "--data-dir": o.DataDir = Next(ref i); break;
                 case "--exit-after": int.TryParse(Next(ref i), out o.ExitAfterMs); break;
                 case "--engine": o.ForceDemoEngine = string.Equals(Next(ref i), "demo", StringComparison.OrdinalIgnoreCase); break;
@@ -61,6 +65,7 @@ internal static class Program
                 case "--theme": o.Theme = (Next(ref i) ?? "dark").ToLowerInvariant(); break;
                 case "--touch": o.Touch = true; break;
                 case "--expanded": o.Expanded = true; break;
+                case "--update": o.Update = Next(ref i); break;
             }
         }
         return o;
@@ -71,10 +76,13 @@ internal static class Program
     {
         try
         {
+            // Muss zuerst laufen: Installer und Updater starten die Exe mit eigenen Argumenten, die hier behandelt werden.
+            VelopackApp.Build().Run();
             var o = Parse(args);
             if (o.DataDir != null) ProjectStore.Directory = o.DataDir;
             if (o.Shot != null) return RunShot(o);
             if (o.SelfTest != null) return SelfTest.Run(o.SelfTest);
+            if (o.UpdateTest != null) return RunUpdateTest(o.UpdateTest);
             return RunWindow(o);
         }
         catch (Exception ex)
@@ -82,6 +90,37 @@ internal static class Program
             LogCrash(ex);
             return 1;
         }
+    }
+
+    // ---- Update-Pruefung ohne Fenster ----------------------------------------------------------
+    /// <summary>
+    /// Nur fuer den Test eines Releases: sucht in NXMIX_UPDATE_SOURCE (Ordner mit Velopack-Paketen) nach einer neueren Version,
+    /// laedt sie ueber denselben Weg wie die Oberflaeche und laesst sie nach dem Beenden installieren (ohne Neustart,
+    /// beruehrt keine Projektdaten). Schreibt das Ergebnis in outFile. Ohne die Variable passiert nichts.
+    /// </summary>
+    static int RunUpdateTest(string outFile)
+    {
+        var log = new System.Text.StringBuilder();
+        int code = 1;
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(VelopackUpdateBackend.SourceOverrideVariable)))
+            log.AppendLine($"ABBRUCH: {VelopackUpdateBackend.SourceOverrideVariable} ist nicht gesetzt");
+        else
+        {
+            var updater = new AppUpdater(new VelopackUpdateBackend(), () => a => a()) { RunInline = true };
+            log.AppendLine($"Installiert: {updater.IsInstalled}  Version: {updater.CurrentVersion}");
+            updater.Check();
+            log.AppendLine($"Suche: {updater.Stage} {updater.Offer?.Version} {updater.Error}");
+            if (updater.Stage == UpdateStage.Available)
+            {
+                updater.Download();
+                log.AppendLine($"Laden: {updater.Stage} {updater.Progress} % {updater.Error}");
+                updater.InstallOnExit();
+                log.AppendLine($"Beim Beenden installieren: {updater.InstallOnExitPending}");
+                if (updater.InstallOnExitPending) code = 0;
+            }
+        }
+        File.WriteAllText(outFile, log.ToString());
+        return code;
     }
 
     // ---- normaler Start ------------------------------------------------------------------------
@@ -105,7 +144,7 @@ internal static class Program
             model.InitOptions(dto.BlockFrames, dto.Exclusive);
             model.InitAppLinks(ProjectStore.AppLinksFromDto(dto)); // fehlendes Feld in alten Dateien = keine Links
         }
-        var win = new MainWindow(model, dto?.Window, o.ExitAfterMs, UiPrefs.Load());
+        var win = new MainWindow(model, dto?.Window, o.ExitAfterMs, UiPrefs.Load(), new VelopackUpdateBackend());
         return win.Run();
     }
 
@@ -140,7 +179,10 @@ internal static class Program
             Density = o.Touch ? Density.Touch : Density.Mouse,
             SidebarExpanded = o.Expanded,
         };
-        var root = new UiRoot(model, new NullShell(), prefs);
+        var fake = new FakeUpdateBackend { Offer = o.Update != null ? new UpdateOffer("0.2.0", "## NX-MIX 0.2.0\n\n- Beispiel") : null };
+        var root = new UiRoot(model, new NullShell(), prefs, fake);
+        root.Updater.RunInline = true;
+        if (o.Update != null) { root.Updater.Check(); if (o.Update == "ready") root.Updater.Download(); }
         float dipW = o.W / o.Scale, dipH = o.H / o.Scale;
         root.Resize(dipW, dipH);
         int page = o.Page switch { "matrix" => 1, "devices" => 2, "settings" => 3, _ => 0 };
@@ -239,6 +281,7 @@ internal static class Program
                 Picker(root, 10);
                 foreach (char c in "ch") root.Char(c);
                 break;
+            case "update": root.ShowUpdate(); break;   // mit --update available|ready
             case "tooltip":
                 {
                     var strips = ((MixerPage)root.Pages[0]).Outputs.Strips;

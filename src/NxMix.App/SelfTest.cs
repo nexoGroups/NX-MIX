@@ -49,7 +49,7 @@ internal static class SelfTest
     static void Settle(UiRoot r, int frames = 20) { for (int i = 0; i < frames; i++) r.Tick(1f / 60f); }
     static void CloseAll(UiRoot r) { while (r.Modal != null) r.CloseOverlay(r.Modal); }
 
-    static UiRoot NewRoot(out AppModel model, float w = 1600, float h = 900, UiPrefs? prefs = null)
+    static UiRoot NewRoot(out AppModel model, float w = 1600, float h = 900, UiPrefs? prefs = null, IUpdateBackend? updates = null)
     {
         EngineFactory.ForceDemo = true;
         model = new AppModel(AppModel.EmptySettings(), new List<DeviceBinding>(), EngineFactory.Create, () => new DemoCatalog(), () => new DemoHost(false), true, null)
@@ -58,7 +58,8 @@ internal static class SelfTest
         model.RunInline = true;
         model.AppCatalogFactory = () => new DemoAppCatalog();
         model.RestorerFactory = () => new DemoRestorer();
-        var r = new UiRoot(model, new NullShell(), prefs ?? new UiPrefs { Theme = ThemeMode.Dark });
+        var r = new UiRoot(model, new NullShell(), prefs ?? new UiPrefs { Theme = ThemeMode.Dark }, updates);
+        r.Updater.RunInline = true;
         r.Resize(w, h);
         return r;
     }
@@ -328,6 +329,7 @@ internal static class SelfTest
 
         // ---- Darstellung: Farbmodus, Touch, Seitenleiste ------------------------------------------
         DisplayTests();
+        UpdateTests();
 
         AppLinkTests(outFile);
         try
@@ -374,6 +376,55 @@ internal static class SelfTest
         }
         Theme.Apply(true, Density.Mouse);
         Check($"Zeichnen in {drawn} Groessen/Seiten/Modi ohne Ausnahme", true);
+    }
+
+    // ================================================================================================
+    // Updates (Attrappe statt GitHub): finden, laden, nie von selbst installieren, sicher neu starten
+    // ================================================================================================
+    static void UpdateTests()
+    {
+        var r0 = NewRoot(out _);
+        r0.StartUpdateCheck();
+        Check("Update: Build aus dem Quellcode meldet 'nicht installiert'", r0.Updater.Stage == UpdateStage.NotInstalled && r0.Top.UpdateRect.IsEmpty);
+
+        var fake = new FakeUpdateBackend { Offer = new UpdateOffer("9.9.0", "## NX-MIX 9.9.0: Test\n\n### Neu\n\n- **Etwas:** neu") };
+        var root = NewRoot(out _, updates: fake);
+        var shell = (NullShell)root.Shell;
+        root.StartUpdateCheck();
+        Check("Update: Suche beim Start findet 9.9.0", root.Updater.Stage == UpdateStage.Available && root.Updater.Offer?.Version == "9.9.0");
+        Check("Update: Kopfleiste zeigt die Update-Pille", !root.Top.UpdateRect.IsEmpty);
+        Check("Update: nichts wird von selbst geladen oder installiert", fake.Restarts == 0 && fake.ExitInstalls == 0 && root.Modal == null);
+        var ur = root.Top.UpdateRect;
+        Click(root, ur.CX, ur.CY);
+        Check("Update: Klick auf die Pille zeigt Neuigkeiten und fragt", root.Modal is ModalDialog d && d.TitleText.Contains("9.9.0"));
+        Key(root, Win32.VK_ESCAPE);
+        Check("Update: 'Spaeter' laedt nichts", root.Updater.Stage == UpdateStage.Available && root.Modal == null);
+        root.ShowUpdate();
+        Key(root, Win32.VK_RETURN);
+        Check("Update: 'Herunterladen' laedt das Update (bereit, 100 %)", root.Updater.Stage == UpdateStage.Ready && root.Updater.Progress == 100);
+        Check("Update: geladen, aber noch nicht installiert", fake.Restarts == 0 && fake.ExitInstalls == 0);
+        root.ShowUpdate();
+        Check("Update: bereit-Dialog bietet Neustart oder 'beim Beenden'", root.Modal is ModalDialog d2 && d2.TitleText == "Update bereit");
+        Key(root, Win32.VK_RETURN);
+        Check("Update: 'Jetzt neu starten' speichert/stoppt zuerst und installiert dann", shell.ExitPrepared == 1 && fake.Restarts == 1);
+
+        var fake2 = new FakeUpdateBackend { Offer = new UpdateOffer("9.9.0", null) };
+        var root2 = NewRoot(out _, updates: fake2);
+        root2.Updater.Check(); root2.Updater.Download(); root2.Updater.InstallOnExit();
+        Check("Update: 'Beim Beenden installieren' meldet sich beim Updater an, ohne Neustart", fake2.ExitInstalls == 1 && fake2.Restarts == 0 && root2.Updater.InstallOnExitPending);
+
+        var root3 = NewRoot(out _, prefs: new UiPrefs { AutoUpdateCheck = false }, updates: new FakeUpdateBackend { Offer = new UpdateOffer("9.9.0", null) });
+        root3.StartUpdateCheck();
+        Check("Update: Suche beim Start abschaltbar", root3.Updater.Stage == UpdateStage.Idle);
+        var root4 = NewRoot(out _, updates: new FakeUpdateBackend { FailWith = "offline" });
+        root4.Updater.Check();
+        Check("Update: Netzwerkfehler wird gemeldet, nicht geworfen", root4.Updater.Stage == UpdateStage.Failed && root4.Updater.Error == "offline");
+        var root5 = NewRoot(out _, updates: new FakeUpdateBackend());
+        root5.Updater.Check();
+        Check("Update: aktuelle Version = 'neueste Version'", root5.Updater.Stage == UpdateStage.UpToDate && root5.Top.UpdateRect.IsEmpty);
+        root.SwitchPage(3);
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        Check("Update: Einstellungen zeigen Version und Update-Knopf", ((SettingsPage)root.Pages[3]).UpdateButton.Visible);
     }
 
     // ================================================================================================

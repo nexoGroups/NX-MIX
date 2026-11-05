@@ -3,7 +3,7 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Ui;
 
-internal enum TitleHit { None, Drag, Nav, Collapse, Audio, Menu, Min, Max, Close }
+internal enum TitleHit { None, Drag, Nav, Collapse, Update, Audio, Menu, Min, Max, Close }
 
 /// <summary>Seitenleiste wie im UniFi-Webinterface: Logo, Seiten als Symbole (ausgeklappt mit Text), unten Einstellungen und Einklappen.</summary>
 internal sealed class Sidebar : Widget
@@ -165,6 +165,31 @@ internal sealed class TopBar : Widget
         }
     }
 
+    /// <summary>Text der Update-Pille oder null, wenn nichts anzuzeigen ist.</summary>
+    string? UpdateText()
+    {
+        var u = Root?.Updater;
+        if (u == null) return null;
+        return u.Stage switch
+        {
+            Model.UpdateStage.Available => $"Update {u.Offer?.Version}",
+            Model.UpdateStage.Downloading => $"Update lädt … {u.Progress} %",
+            Model.UpdateStage.Ready => u.InstallOnExitPending ? "Update beim Beenden" : "Update bereit",
+            _ => null,
+        };
+    }
+
+    public RectF UpdateRect
+    {
+        get
+        {
+            string? t = UpdateText();
+            if (t == null) return default;
+            float w = Renderer.MeasureWidth(t, Theme.CalloutStrong) + 44;
+            return new RectF(AudioRect.X - 8 - w, Bounds.CY - ButtonH / 2, w, ButtonH);
+        }
+    }
+
     public (TitleHit Kind, int Index) HitAt(float x, float y)
     {
         if (!Bounds.Contains(x, y) || Root == null) return (TitleHit.None, -1);
@@ -173,6 +198,7 @@ internal sealed class TopBar : Widget
         if (MinRect.Contains(x, y)) return (TitleHit.Min, -1);
         if (MenuRect.Contains(x, y)) return (TitleHit.Menu, -1);
         if (AudioRect.Contains(x, y)) return (TitleHit.Audio, -1);
+        if (UpdateRect.Contains(x, y)) return (TitleHit.Update, -1);
         return (TitleHit.Drag, -1);
     }
 
@@ -203,6 +229,7 @@ internal sealed class TopBar : Widget
         {
             case TitleHit.Menu: Root.ShowProjectMenu(MenuRect); break;
             case TitleHit.Audio: Root.SwitchPage(2); break;
+            case TitleHit.Update: Root.ShowUpdate(); break;
             case TitleHit.Min: Root.Shell.Minimize(); break;
             case TitleHit.Max: Root.Shell.ToggleMaximize(); break;
             case TitleHit.Close: Root.Shell.Close(); break;
@@ -210,7 +237,7 @@ internal sealed class TopBar : Widget
     }
 
     public override CursorKind CursorAt(float x, float y) =>
-        HitAt(x, y).Kind is TitleHit.Menu or TitleHit.Audio or TitleHit.Min or TitleHit.Max or TitleHit.Close ? CursorKind.Hand : CursorKind.Arrow;
+        HitAt(x, y).Kind is TitleHit.Menu or TitleHit.Audio or TitleHit.Update or TitleHit.Min or TitleHit.Max or TitleHit.Close ? CursorKind.Hand : CursorKind.Arrow;
 
     public override string? TooltipAt(float x, float y)
     {
@@ -222,6 +249,7 @@ internal sealed class TopBar : Widget
             TitleHit.Close => "Schließen",
             TitleHit.Menu => "Projekt: neu, exportieren, importieren",
             TitleHit.Audio => "Audio-Engine: starten, stoppen, Geräte (Strg+3)",
+            TitleHit.Update => "Neue Version von NX-MIX: Klick zeigt, was neu ist, und lädt sie auf Wunsch",
             _ => null,
         };
     }
@@ -238,6 +266,17 @@ internal sealed class TopBar : Widget
         float tw = Renderer.MeasureWidth(page.Title, Theme.LargeTitle);
         g.Text(page.Title, new RectF(tx, b.Y, tw + 4, b.H), Theme.LargeTitle, Theme.Text, HAlign.Left, VAlign.Middle, false);
         float right = AudioRect.X - 12;
+
+        // Update-Pille (Akzent), nur wenn es etwas gibt
+        var ur = UpdateRect;
+        if (!ur.IsEmpty)
+        {
+            bool hot = _hoverKind == TitleHit.Update;
+            g.FillPill(ur, hot ? Theme.AccentHover : Theme.Accent);
+            Icons.Draw(g, Icon.Import, ur.X + 18, ur.CY, 15, Theme.OnAccent);
+            g.Text(UpdateText(), new RectF(ur.X + 32, ur.Y, ur.W - 36, ur.H), Theme.CalloutStrong, Theme.OnAccent, HAlign.Left, VAlign.Middle, false);
+            right = ur.X - 12;
+        }
 
         // Hinweis-Chips (Demo, Limiter)
         var m = root.Model;
