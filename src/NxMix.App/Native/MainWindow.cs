@@ -39,12 +39,15 @@ internal sealed unsafe class MainWindow : IShell
     double _normalW = Theme.DefaultWindowWidth, _normalH = Theme.DefaultWindowHeight;
     int _exitAfterMs;
     readonly WindowDto? _initial;
+    readonly UiPrefs _prefs;
+    const uint WM_SETTINGCHANGE = 0x001A;
 
-    public MainWindow(AppModel model, WindowDto? initial, int exitAfterMs)
+    public MainWindow(AppModel model, WindowDto? initial, int exitAfterMs, UiPrefs prefs)
     {
         _model = model;
         _initial = initial;
         _exitAfterMs = exitAfterMs;
+        _prefs = prefs;
     }
 
     // ---- IShell --------------------------------------------------------------------------------
@@ -56,6 +59,39 @@ internal sealed unsafe class MainWindow : IShell
     public string? ShowSaveDialog(string title, string filter, string defaultName) => FileDialogs.Save(_hwnd, title, filter, defaultName);
     public string? ShowOpenDialog(string title, string filter) => FileDialogs.Open(_hwnd, title, filter);
     public WindowDto? WindowState => new() { Width = Math.Round(_normalW), Height = Math.Round(_normalH), Maximized = IsMaximized };
+
+    /// <summary>Windows-Einstellung "Standard-App-Modus" (Registry: AppsUseLightTheme = 0 heisst dunkel).</summary>
+    public bool SystemPrefersDark
+    {
+        get
+        {
+            try
+            {
+                using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+                return k?.GetValue("AppsUseLightTheme") is int v ? v == 0 : true;
+            }
+            catch { return true; }
+        }
+    }
+
+    public void ThemeChanged()
+    {
+        if (_hwnd == 0) return;
+        ApplyFrameTheme();
+        InvalidateRect(_hwnd, 0, false);
+    }
+
+    /// <summary>Fensterrahmen passend zum Farbmodus: dunkler/heller Rahmen, runde Ecken, Randfarbe.</summary>
+    void ApplyFrameTheme()
+    {
+        int dark = Theme.IsDark ? 1 : 0;
+        DwmSetWindowAttribute(_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+        int corner = 2;
+        DwmSetWindowAttribute(_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref corner, sizeof(int));
+        var bc = Theme.Border;
+        int border = ((int)(bc.B * 255) << 16) | ((int)(bc.G * 255) << 8) | (int)(bc.R * 255);
+        DwmSetWindowAttribute(_hwnd, DWMWA_BORDER_COLOR, ref border, sizeof(int));
+    }
 
     // ---- Start ---------------------------------------------------------------------------------
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
@@ -98,19 +134,13 @@ internal sealed unsafe class MainWindow : IShell
         if (_dpi == 0) _dpi = 96;
         _scale = _dpi / 96f;
 
-        // Dunkle Rahmenfarbe, runde Ecken, Schatten fuer den rahmenlosen Stil
-        int on = 1;
-        DwmSetWindowAttribute(_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref on, sizeof(int));
-        int corner = 2;
-        DwmSetWindowAttribute(_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref corner, sizeof(int));
-        var bc = Theme.Border;
-        int border = ((int)(bc.B * 255) << 16) | ((int)(bc.G * 255) << 8) | (int)(bc.R * 255);
-        DwmSetWindowAttribute(_hwnd, DWMWA_BORDER_COLOR, ref border, sizeof(int));
+        // Schatten fuer den rahmenlosen Stil; Rahmenfarbe und Ecken folgen dem Farbmodus
         var margins = new MARGINS { Top = 1 };
         DwmExtendFrameIntoClientArea(_hwnd, in margins);
 
         _model.Post = a => { _posted.Enqueue(a); PostMessage(_hwnd, WM_APP, 0, 0); };
-        _root = new UiRoot(_model, this);
+        _root = new UiRoot(_model, this, _prefs);
+        ApplyFrameTheme();
 
         // Groesse und Lage
         double wDip = _initial?.Width > 300 ? _initial.Width : Theme.DefaultWindowWidth;
@@ -225,20 +255,20 @@ internal sealed unsafe class MainWindow : IShell
                         TrackMouseEvent(ref t); _trackNcLeave = true;
                     }
                     _root?.MouseLeave();
-                    _root?.Title.SetNcHover(wParam == HTMAXBUTTON ? TitleHit.Max : TitleHit.None);
+                    _root?.Top.SetNcHover(wParam == HTMAXBUTTON ? TitleHit.Max : TitleHit.None);
                     break;
                 }
             case WM_NCMOUSELEAVE:
                 _trackNcLeave = false;
-                _root?.Title.SetNcHover(TitleHit.None);
+                _root?.Top.SetNcHover(TitleHit.None);
                 return 0;
             case WM_NCLBUTTONDOWN:
-                if (wParam == HTMAXBUTTON) { _root?.Title.SetNcHover(TitleHit.Max, true); return 0; }
+                if (wParam == HTMAXBUTTON) { _root?.Top.SetNcHover(TitleHit.Max, true); return 0; }
                 break;
             case WM_NCLBUTTONUP:
                 if (wParam == HTMAXBUTTON)
                 {
-                    _root?.Title.SetNcHover(TitleHit.Max, false);
+                    _root?.Top.SetNcHover(TitleHit.Max, false);
                     SendMessage(hwnd, WM_SYSCOMMAND, (nint)(IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE), 0);
                     return 0;
                 }
@@ -308,7 +338,7 @@ internal sealed unsafe class MainWindow : IShell
                         var t = new TRACKMOUSEEVENT { cbSize = (uint)sizeof(TRACKMOUSEEVENT), dwFlags = TME_LEAVE, hwndTrack = hwnd };
                         TrackMouseEvent(ref t); _trackLeave = true;
                     }
-                    _root?.Title.SetNcHover(TitleHit.None);
+                    _root?.Top.SetNcHover(TitleHit.None);
                     _root?.MouseMove(LoWord(lParam) / _scale, HiWord(lParam) / _scale, Ctrl, Shift, Alt);
                     return 0;
                 }
@@ -363,6 +393,14 @@ internal sealed unsafe class MainWindow : IShell
                 _root?.Char((char)wParam);
                 return 0;
 
+            case WM_SETTINGCHANGE:
+                if (lParam != 0 && Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
+                {
+                    _root?.SystemThemeChanged();
+                    InvalidateRect(hwnd, 0, false);
+                }
+                break;
+
             case WM_CLOSE:
                 _root?.SaveNow();
                 _model.Shutdown();
@@ -400,7 +438,7 @@ internal sealed unsafe class MainWindow : IShell
         }
         var c = pt;
         ScreenToClient(hwnd, ref c);
-        var (kind, _) = _root.Title.HitAt(c.X / _scale, c.Y / _scale);
+        var kind = _root.CaptionHit(c.X / _scale, c.Y / _scale);
         return kind switch
         {
             TitleHit.Drag => HTCAPTION,

@@ -1,15 +1,29 @@
+OK   Schrift Inter wird aus dem App-Ordner geladen
 OK   Start ist leer: 0 Eingaenge, 0 Ausgaenge
 OK   Start: keine Matrix-Verbindungen und keine Zuordnungen
-OK   Klick auf '+ Eingang' legt einen Eingang an
+OK   Leerzustand zeigt die Anlegen-Tasten
+OK   Klick auf 'Eingang' legt einen Eingang an
 OK   neuer Kanal hat keinen vorbelegten Namen
 OK   Stereo-Paar legt zwei Ausgaenge an
 OK   Kanalzahl-Aenderung erzeugt neue Engine
+OK   'Hinzufuegen' oeffnet ein Menue
+OK   Menue 'Ausgang (mono)' legt einen Ausgang an und schliesst
 OK   Anlegen: 3 Eingaenge, 4 Ausgaenge
 OK   Matrix passt sich an (3x4)
-OK   Doppelklick auf den Namen oeffnet den Editor
+OK   Streifen ohne Namen zeigt den Platzhalter
+OK   Klick auf den Kanalkopf oeffnet das Kanal-Blatt
+OK   Klick auf den Namen oeffnet den Editor
 OK   Name per Editor gesetzt
-OK   Editor danach geschlossen
+OK   Editor danach geschlossen, Blatt bleibt offen
 OK   Esc verwirft die Eingabe
+OK   Streifen zeigt den neuen Namen
+OK   Blatt: Stumm-Schalter schaltet den Kanal stumm
+OK   Blatt: Stumm-Schalter wieder aus
+OK   Blatt: Phase invertieren
+OK   Blatt: Laufzeit per Eingabe (1,5 ms)
+OK   Blatt: Doppelklick auf den Laufzeit-Regler = 0
+OK   Pfeil rechts wechselt zum naechsten Kanal
+OK   Esc schliesst das Blatt
 OK   Fader startet bei 0 dB
 OK   Fader nach oben ziehen erhoeht den Pegel
 OK   Fader begrenzt auf MaxGainDb (+12)
@@ -20,13 +34,21 @@ OK   Strg+Mausrad: fein (0,1 dB)
 OK   Mausrad bis unten ergibt -unendlich
 OK   Mute schaltet
 OK   Mute schaltet zurueck
+OK   Solo schaltet
 OK   Gain-Sperre: Fader zeigt Sperrwert
+OK   Gain-Sperre: Streifen markiert den Kanal orange
 OK   Gesperrter Fader laesst sich nicht ueber -13 dB ziehen
 OK   Doppelklick (0 dB) wird auf die Sperre geklemmt
 OK   Mausrad kann die Sperre nicht uebersteigen
 OK   Getippter Wert +5 wird auf die Sperre geklemmt
 OK   Modell klemmt GainDb auf MaxGainDb
-OK   Klick auf das Schloss oeffnet ein Menue
+OK   Kanal-Blatt des Hochtoeners offen
+OK   Blatt: Segment zeigt keine Standardsperre bei -13 dB
+OK   Sperre lockern fragt nach
+OK   Abbrechen laesst die Sperre bei -13 dB
+OK   Strengere Sperre gilt sofort (-20 dB)
+OK   Blatt: Limiter-Grenze -6 dBFS
+OK   Blatt: getippter Gain wird auf die Sperre geklemmt
 OK   Matrix-Ansicht sichtbar bei vorhandenen Kanaelen
 OK   Matrix: Klick verbindet bei 0 dB
 OK   Matrix: Ziehen aendert den Pegel
@@ -39,7 +61,10 @@ OK   Matrix: geschuetzter Ausgang bleibt <= 0 dB
 OK   Matrix: Mausrad auf geschuetztem Ausgang bleibt <= 0 dB
 OK   Verschieben tauscht die Reihenfolge
 OK   Verschieben tauscht die Matrix-Zeilen mit
-OK   Kanal-Menue oeffnet
+OK   Blatt scrollt bis 'Kanal loeschen'
+OK   Kanal loeschen fragt nach
+OK   Abbrechen behaelt den Kanal
+OK   Bestaetigen loescht den Kanal und schliesst das Blatt
 OK   Loeschen entfernt den Kanal
 OK   Loeschen laesst die Matrix passend
 OK   Ausgang loeschen entfernt die Matrix-Spalte
@@ -61,29 +86,43 @@ OK   Laden: Umlaute im Namen
 OK   Laden: Gain-Sperre und Limiter
 OK   Laden: Zuordnungen und Fenstergroesse
 OK   Projekt laden ersetzt den Zustand
-OK   Geraete-Seite wechselt
+OK   Seitenleiste: Klick auf 'Geraete' wechselt die Seite
+OK   Strg+2 wechselt zur Matrix
 OK   Projekt-Menue oeffnet
 OK   Esc schliesst das Menue
+OK   Audio-Pille fuehrt zur Seite Geraete
 OK   Neues Projekt fragt nach
 OK   Abbrechen laesst das Projekt unveraendert
 OK   Bestaetigen leert das Projekt
+OK   Farbmodus 'System' folgt Windows (hell)
+OK   Windows wechselt auf dunkel: Oberflaeche folgt
+OK   Einstellungen: 'Hell' schaltet auf hell und merkt es
+OK   Einstellungen: 'Dunkel' schaltet auf dunkel
+OK   Fester Farbmodus ignoriert den Windows-Wechsel
+OK   Einstellungen: 'Touch' vergroessert Fader-Kappen und Streifen
+OK   Einstellungen: 'Maus' wieder kompakt
+OK   Seitenleiste einklappen macht den Inhalt breiter
+OK   Knopf unten klappt die Seitenleiste wieder aus
 OK   App-Links: Stereo-Paar anhand der Namen erkannt
 OK   App-Links: anfangs keine Links, kein Problem
 OK   App-Links: Programmliste fasst Sitzungen je Exe zusammen, spielende zuerst
 OK   Geraete-Zuordnung auf Eingang 3+4 angelegt
 OK   App-Link auf einen Eingang mit Geraete-Zuordnung wird abgelehnt und erklaert
 OK   Auch ein Stereo-Link, der in die Zuordnung ragt, wird abgelehnt
-OK   Klick auf einen belegten Eingang oeffnet das Popup
+OK   Programm binden an einem belegten Eingang oeffnet das Popup
 OK   Popup an belegtem Eingang bindet nichts
-OK   Esc schliesst das Popup
-OK   Klick auf den Link-Knopf oeffnet das Auswahl-Popup
+OK   Esc schliesst das Popup, das Kanal-Blatt bleibt
+OK   Zweites Esc schliesst das Blatt
+OK   Blatt eines freien Eingangs bietet 'Programm binden'
+OK   Klick auf 'Programm binden' oeffnet das Auswahl-Popup
 OK   Filter 'vlc' + Enter bindet VLC (mono) an Eingang 5
-OK   Popup schliesst nach der Auswahl
+OK   Popup schliesst nach der Auswahl, Blatt bleibt
+OK   Blatt bietet danach 'Loesen' an
 OK   Gebundener Streifen zeigt den Programmnamen
 OK   Handeingabe normalisiert Pfad/Endung: 'Chrome.exe'
 OK   Handeingabe kennt Programme der Liste (Anzeigename)
 OK   Stereo-App-Link auf das benannte Paar 1+2
-OK   Zweite Streifenhaelfte heisst 'Spotify R'
+OK   Ohne eigenen Namen: Streifen heissen 'Spotify L' / 'Spotify R'
 OK   Dasselbe Programm an zwei Faders wird abgelehnt (ohne Beachtung der Gross-/Kleinschreibung)
 OK   Link ueber einen schon gebundenen Eingang wird abgelehnt
 OK   Ungueltige Programmnamen werden abgelehnt
@@ -104,6 +143,7 @@ OK   Links ausgeschaltet: keine AppBindings, kein Parkplatz, kein Start-Problem
 OK   Tick meldet geaenderten Link-Status
 OK   Status: verbunden / Fehler mit Meldung / wartet
 OK   Tooltip nennt Programm und Fehlermeldung
+OK   Streifen mit Fehler-Link bekommt eine rote Marke
 OK   Ohne Host-Status: bereit (Audio gestoppt)
 OK   'Alle Umleitungen zuruecksetzen' ruft RestoreAllKnown
 OK   Einstellungsseite mit App-Link-Abschnitt zeichnet (mit/ohne Parkplatz, niedriges Fenster scrollt)
@@ -121,6 +161,6 @@ OK   Eingang mit Mono-Link loeschen entfernt den Link
 OK   Neues Projekt: keine Links, Parkplatz bleibt (Geraeteeinstellung)
 OK   Nicht unterstuetztes Windows: Start-Problem nennt den Grund
 OK   Ohne Umleitungs-Klasse: Start mit Links wird verweigert
-INFO App-Links echt: Restorer=unterstuetzt | Katalog=2 Sitzung(en) | Monitor=AudioHost ja
-OK   Zeichnen in 84 Groessen/Seiten ohne Ausnahme
+INFO App-Links echt: Restorer=unterstuetzt | Katalog=0 Sitzung(en) | Monitor=AudioHost ja
+OK   Zeichnen in 161 Groessen/Seiten/Modi ohne Ausnahme
 ALLE TESTS BESTANDEN

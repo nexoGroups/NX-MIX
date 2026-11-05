@@ -1,178 +1,243 @@
+using System.Numerics;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Ui;
 
-/// <summary>Kleine, selbst gezeichnete Symbole (Linien/Formen, keine Icon-Schrift noetig).</summary>
+/// <summary>Alle Symbole der Oberflaeche. Gezeichnet im Stil des UniFi-Webinterface: duenne Umrisslinien, runde Enden.</summary>
+internal enum Icon
+{
+    None, Mixer, Matrix, Devices, Settings, Sidebar, Plus, Minus, Close, ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
+    Check, Lock, LockOpen, Link, Trash, Refresh, Warn, Info, Search, More, Play, Stop, Mic, Speaker, Loopback,
+    Export, Import, Document, Clock, Shield, Keyboard, Phase, Bars, Edit, ArrowRight, UpDown, Palette, Hand,
+}
+
+/// <summary>
+/// Zeichnet Symbole auf einem 24er-Raster (wie gaengige Icon-Sets), skaliert auf die gewuenschte Groesse s (DIPs).
+/// </summary>
 internal static class Icons
 {
-    /// <summary>Schloss: geschlossen (Sperre aktiv) oder offen.</summary>
-    public static void Lock(Renderer g, float cx, float cy, float s, Color4 c, bool closed = true)
+    [ThreadStatic] static Vector2[]? t_buf;
+
+    static float W(float s) => Math.Max(1.25f, s * 0.075f);
+
+    public static void Draw(Renderer g, Icon icon, float cx, float cy, float s, Color4 c)
     {
-        float bw = s * 0.86f, bh = s * 0.52f;
-        float top = cy - s * 0.52f;
-        var body = new RectF(cx - bw / 2, cy + s * 0.50f - bh, bw, bh);
-        float r = bw * 0.30f;                      // Radius des Buegels
-        float lw = Math.Max(1.4f, s * 0.15f);
-        float legTop = top + r;
-        float legBot = body.Y + 0.5f;
-        float ax = cx - r;                         // linkes Buegelbein
-        float bx = cx + r;                         // rechtes Buegelbein
-        if (closed)
+        if (icon == Icon.None || c.A <= 0) return;
+        float k = s / 24f;
+        Vector2 P(float x, float y) => new(cx + (x - 12) * k, cy + (y - 12) * k);
+        float w = W(s);
+        void L(float x1, float y1, float x2, float y2) { var a = P(x1, y1); var b = P(x2, y2); g.Line(a.X, a.Y, b.X, b.Y, c, w, true); }
+        void Poly(bool closed, params float[] xy)
         {
-            g.Arc(cx, legTop, r, 180, 180, c, lw);
-            g.Line(ax, legTop, ax, legBot, c, lw);
-            g.Line(bx, legTop, bx, legBot, c, lw);
+            int n = xy.Length / 2;
+            var buf = t_buf is { Length: >= 64 } ? t_buf : (t_buf = new Vector2[64]);
+            for (int i = 0; i < n; i++) buf[i] = P(xy[2 * i], xy[2 * i + 1]);
+            g.Polyline(buf.AsSpan(0, n), c, w, closed);
         }
-        else
+        void FillPoly(params float[] xy)
         {
-            // offen: der Buegel ist rechts angehoben
-            float dy = -s * 0.16f;
-            g.Arc(cx, legTop + dy, r, 180, 180, c, lw);
-            g.Line(ax, legTop + dy, ax, legBot, c, lw);
-            g.Line(bx, legTop + dy, bx, legTop + dy + r * 0.9f, c, lw);
+            int n = xy.Length / 2;
+            var buf = t_buf is { Length: >= 64 } ? t_buf : (t_buf = new Vector2[64]);
+            for (int i = 0; i < n; i++) buf[i] = P(xy[2 * i], xy[2 * i + 1]);
+            g.Polyline(buf.AsSpan(0, n), c, w, true, fill: true);
         }
-        g.FillRound(body, Math.Max(1.8f, s * 0.14f), c);
-        g.FillCircle(cx, body.CY, Math.Max(1.0f, s * 0.085f), Theme.Card);
-    }
-
-    /// <summary>Pfeil in eine Wand hinein (Eingang / Aufnahme).</summary>
-    public static void InArrow(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float h = s / 2;
-        g.Line(cx - h, cy, cx + h * 0.55f, cy, c, 1.6f, true);
-        g.Line(cx + h * 0.55f, cy, cx - h * 0.1f, cy - h * 0.55f, c, 1.6f, true);
-        g.Line(cx + h * 0.55f, cy, cx - h * 0.1f, cy + h * 0.55f, c, 1.6f, true);
-        g.Line(cx + h, cy - h * 0.7f, cx + h, cy + h * 0.7f, c, 1.6f, true);
-    }
-
-    /// <summary>Pfeil aus einer Wand heraus (Ausgang / Wiedergabe).</summary>
-    public static void OutArrow(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float h = s / 2;
-        g.Line(cx - h, cy - h * 0.7f, cx - h, cy + h * 0.7f, c, 1.6f, true);
-        g.Line(cx - h * 0.55f, cy, cx + h, cy, c, 1.6f, true);
-        g.Line(cx + h, cy, cx + h * 0.35f, cy - h * 0.55f, c, 1.6f, true);
-        g.Line(cx + h, cy, cx + h * 0.35f, cy + h * 0.55f, c, 1.6f, true);
-    }
-
-    public static void Dots(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float r = Math.Max(1.2f, s * 0.11f), d = s * 0.32f;
-        g.FillCircle(cx - d, cy, r, c); g.FillCircle(cx, cy, r, c); g.FillCircle(cx + d, cy, r, c);
-    }
-
-    public static void Plus(Renderer g, float cx, float cy, float s, Color4 c, float w = 1.7f)
-    {
-        float h = s / 2;
-        g.Line(cx - h, cy, cx + h, cy, c, w, true);
-        g.Line(cx, cy - h, cx, cy + h, c, w, true);
-    }
-
-    public static void Minus(Renderer g, float cx, float cy, float s, Color4 c, float w = 1.7f) =>
-        g.Line(cx - s / 2, cy, cx + s / 2, cy, c, w, true);
-
-    public static void Cross(Renderer g, float cx, float cy, float s, Color4 c, float w = 1.4f)
-    {
-        float h = s / 2;
-        g.Line(cx - h, cy - h, cx + h, cy + h, c, w, true);
-        g.Line(cx - h, cy + h, cx + h, cy - h, c, w, true);
-    }
-
-    /// <summary>dir: 0 = unten, 1 = oben, 2 = links, 3 = rechts</summary>
-    public static void Chevron(Renderer g, float cx, float cy, float s, Color4 c, int dir, float w = 1.5f)
-    {
-        float h = s / 2, q = s / 4;
-        switch (dir)
+        void Circle(float x, float y, float r) { var p = P(x, y); g.StrokeCircle(p.X, p.Y, r * k, c, w); }
+        void Dot(float x, float y, float r) { var p = P(x, y); g.FillCircle(p.X, p.Y, r * k, c); }
+        void Arc(float x, float y, float r, float start, float sweep) { var p = P(x, y); g.Arc(p.X, p.Y, r * k, start, sweep, c, w); }
+        void RRect(float x1, float y1, float x2, float y2, float r)
         {
-            case 0: g.Line(cx - h, cy - q, cx, cy + q, c, w, true); g.Line(cx, cy + q, cx + h, cy - q, c, w, true); break;
-            case 1: g.Line(cx - h, cy + q, cx, cy - q, c, w, true); g.Line(cx, cy - q, cx + h, cy + q, c, w, true); break;
-            case 2: g.Line(cx + q, cy - h, cx - q, cy, c, w, true); g.Line(cx - q, cy, cx + q, cy + h, c, w, true); break;
-            default: g.Line(cx - q, cy - h, cx + q, cy, c, w, true); g.Line(cx + q, cy, cx - q, cy + h, c, w, true); break;
+            var a = P(x1, y1); var b = P(x2, y2);
+            var rect = RectF.FromLTRB(a.X, a.Y, b.X, b.Y);
+            g.StrokeRound(rect.Inflate(w / 2), r * k + w / 2, c, w);
         }
-    }
 
-    public static void Hamburger(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float h = s / 2, d = s * 0.32f;
-        g.Line(cx - h, cy - d, cx + h, cy - d, c, 1.5f, true);
-        g.Line(cx - h, cy, cx + h, cy, c, 1.5f, true);
-        g.Line(cx - h, cy + d, cx + h, cy + d, c, 1.5f, true);
-    }
-
-    public static void Trash(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float w = s * 0.62f, top = cy - s * 0.30f, bot = cy + s * 0.5f;
-        g.Line(cx - s * 0.5f, top, cx + s * 0.5f, top, c, 1.4f, true);
-        g.Line(cx - s * 0.16f, top, cx - s * 0.16f, top - s * 0.16f, c, 1.4f, true);
-        g.Line(cx + s * 0.16f, top, cx + s * 0.16f, top - s * 0.16f, c, 1.4f, true);
-        g.Line(cx - s * 0.16f, top - s * 0.16f, cx + s * 0.16f, top - s * 0.16f, c, 1.4f, true);
-        g.StrokeRound(new RectF(cx - w / 2, top + 1.5f, w, bot - top - 1.5f), 2, c, 1.4f);
-    }
-
-    public static void Play(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        // Dreieck ueber drei Linien (gefuellt durch viele Linien waere unnoetig): gefuelltes Dreieck per Linienschar
-        float h = s / 2;
-        float x0 = cx - h * 0.6f, x1 = cx + h * 0.8f;
-        for (float y = -h; y <= h; y += 0.5f)
+        switch (icon)
         {
-            float t = 1 - Math.Abs(y) / h;
-            g.Line(x0, cy + y, x0 + (x1 - x0) * t, cy + y, c, 0.9f);
+            case Icon.Mixer:
+                {
+                    float[] xs = { 6, 12, 18 }, ks = { 14.5f, 8.5f, 16 };
+                    for (int i = 0; i < 3; i++)
+                    {
+                        L(xs[i], 3.5f, xs[i], ks[i] - 2.6f);
+                        L(xs[i], ks[i] + 2.6f, xs[i], 20.5f);
+                        Circle(xs[i], ks[i], 2.4f);
+                    }
+                    break;
+                }
+            case Icon.Matrix:
+                RRect(4, 4, 10.5f, 10.5f, 2); RRect(13.5f, 4, 20, 10.5f, 2);
+                RRect(4, 13.5f, 10.5f, 20, 2); RRect(13.5f, 13.5f, 20, 20, 2);
+                break;
+            case Icon.Devices:
+                RRect(3, 7, 21, 17, 2.5f);
+                Circle(8, 12, 2.2f); Circle(13.5f, 12, 2.2f);
+                L(17.5f, 10, 17.5f, 14);
+                break;
+            case Icon.Settings:
+                {
+                    // Zahnrad: Polygon mit 8 Zaehnen + Nabe
+                    var buf = t_buf is { Length: >= 64 } ? t_buf : (t_buf = new Vector2[64]);
+                    int n = 48;
+                    for (int i = 0; i < n; i++)
+                    {
+                        float a = i * MathF.PI * 2 / n;
+                        float phase = (i % 6);
+                        float r = phase is 0 or 1 or 2 ? 9.2f : 7.0f;
+                        buf[i] = P(12 + MathF.Cos(a + 0.065f) * r, 12 + MathF.Sin(a + 0.065f) * r);
+                    }
+                    g.Polyline(buf.AsSpan(0, n), c, w, true);
+                    Circle(12, 12, 3);
+                    break;
+                }
+            case Icon.Sidebar:
+                RRect(3, 4.5f, 21, 19.5f, 3);
+                L(9.5f, 4.5f, 9.5f, 19.5f);
+                break;
+            case Icon.Plus: L(12, 5, 12, 19); L(5, 12, 19, 12); break;
+            case Icon.Minus: L(5, 12, 19, 12); break;
+            case Icon.Close: L(6, 6, 18, 18); L(6, 18, 18, 6); break;
+            case Icon.ChevronDown: Poly(false, 6, 9, 12, 15, 18, 9); break;
+            case Icon.ChevronUp: Poly(false, 6, 15, 12, 9, 18, 15); break;
+            case Icon.ChevronLeft: Poly(false, 15, 6, 9, 12, 15, 18); break;
+            case Icon.ChevronRight: Poly(false, 9, 6, 15, 12, 9, 18); break;
+            case Icon.UpDown: Poly(false, 8, 9.5f, 12, 5.5f, 16, 9.5f); Poly(false, 8, 14.5f, 12, 18.5f, 16, 14.5f); break;
+            case Icon.Check: Poly(false, 5, 12.5f, 10, 17.5f, 19.5f, 7); break;
+            case Icon.Lock:
+            case Icon.LockOpen:
+                {
+                    RRect(5, 11, 19, 20.5f, 2.5f);
+                    if (icon == Icon.Lock)
+                    {
+                        L(8, 11, 8, 8); L(16, 11, 16, 8);
+                        Arc(12, 8, 4, 180, 180);
+                    }
+                    else
+                    {
+                        L(8, 11, 8, 6.5f); L(16, 6.5f, 16, 7.5f);
+                        Arc(12, 6.5f, 4, 180, 180);
+                    }
+                    Dot(12, 15.75f, 1.3f);
+                    break;
+                }
+            case Icon.Link:
+                RRect(2.5f, 8.5f, 13, 15.5f, 3.5f);
+                RRect(11, 8.5f, 21.5f, 15.5f, 3.5f);
+                break;
+            case Icon.Trash:
+                L(4, 6.5f, 20, 6.5f);
+                Poly(false, 9, 6.5f, 9, 4, 15, 4, 15, 6.5f);
+                Poly(false, 6, 6.5f, 7, 20, 17, 20, 18, 6.5f);
+                L(10, 10.5f, 10, 16); L(14, 10.5f, 14, 16);
+                break;
+            case Icon.Refresh:
+                Arc(12, 12, 7.5f, -50, 300);
+                Poly(false, 16.4f, 3.6f, 17.2f, 6.3f, 14.4f, 7.2f);
+                break;
+            case Icon.Warn:
+                Poly(true, 12, 3.5f, 21.5f, 19.5f, 2.5f, 19.5f);
+                L(12, 9.5f, 12, 13.5f);
+                Dot(12, 16.5f, 1.2f);
+                break;
+            case Icon.Info:
+                Circle(12, 12, 9);
+                L(12, 11, 12, 16.5f);
+                Dot(12, 7.8f, 1.2f);
+                break;
+            case Icon.Search:
+                Circle(10.5f, 10.5f, 6.5f);
+                L(15.5f, 15.5f, 20, 20);
+                break;
+            case Icon.More:
+                Dot(5.5f, 12, 1.8f); Dot(12, 12, 1.8f); Dot(18.5f, 12, 1.8f);
+                break;
+            case Icon.Play:
+                FillPoly(7.5f, 4.5f, 19.5f, 12, 7.5f, 19.5f);
+                break;
+            case Icon.Stop:
+                {
+                    var a = P(6, 6); var b = P(18, 18);
+                    g.FillRound(RectF.FromLTRB(a.X, a.Y, b.X, b.Y), 2.5f * k, c);
+                    break;
+                }
+            case Icon.Mic:
+                RRect(9, 3, 15, 14, 3);
+                Arc(12, 11, 6, 0, 180);
+                L(12, 17, 12, 21); L(9, 21, 15, 21);
+                break;
+            case Icon.Speaker:
+                Poly(true, 3.5f, 9, 7.5f, 9, 12.5f, 4.5f, 12.5f, 19.5f, 7.5f, 15, 3.5f, 15);
+                Arc(13, 12, 4, -45, 90);
+                Arc(13, 12, 7.5f, -50, 100);
+                break;
+            case Icon.Loopback:
+                Poly(false, 5, 11, 5, 8, 18.5f, 8);
+                Poly(false, 15.5f, 5, 18.5f, 8, 15.5f, 11);
+                Poly(false, 19, 13, 19, 16, 5.5f, 16);
+                Poly(false, 8.5f, 13, 5.5f, 16, 8.5f, 19);
+                break;
+            case Icon.Export:
+                Poly(false, 4, 14, 4, 20, 20, 20, 20, 14);
+                L(12, 15, 12, 4);
+                Poly(false, 7.5f, 8.5f, 12, 4, 16.5f, 8.5f);
+                break;
+            case Icon.Import:
+                Poly(false, 4, 14, 4, 20, 20, 20, 20, 14);
+                L(12, 4, 12, 15);
+                Poly(false, 7.5f, 10.5f, 12, 15, 16.5f, 10.5f);
+                break;
+            case Icon.Document:
+                Poly(true, 6, 3, 14, 3, 19, 8, 19, 21, 6, 21);
+                Poly(false, 14, 3, 14, 8, 19, 8);
+                break;
+            case Icon.Clock:
+                Circle(12, 12, 9);
+                Poly(false, 12, 7, 12, 12, 15.5f, 14);
+                break;
+            case Icon.Shield:
+                Poly(true, 12, 3, 19.5f, 6, 19.5f, 11.5f, 17.5f, 16, 12, 21, 6.5f, 16, 4.5f, 11.5f, 4.5f, 6);
+                break;
+            case Icon.Keyboard:
+                RRect(2.5f, 6, 21.5f, 18, 2.5f);
+                Dot(6.5f, 10, 1); Dot(10, 10, 1); Dot(13.5f, 10, 1); Dot(17, 10, 1);
+                L(8, 14.5f, 16, 14.5f);
+                break;
+            case Icon.Phase:
+                Circle(12, 12, 6.5f);
+                L(6, 18, 18, 6);
+                break;
+            case Icon.Bars:
+                {
+                    float[] hs = { 9, 15, 11 };
+                    for (int i = 0; i < 3; i++)
+                    {
+                        var a = P(5 + i * 5.5f, 20 - hs[i]); var b = P(8.5f + i * 5.5f, 20);
+                        g.FillRound(RectF.FromLTRB(a.X, a.Y, b.X, b.Y), 1 * k, c);
+                    }
+                    break;
+                }
+            case Icon.Edit:
+                Poly(true, 5, 19, 5, 15.5f, 15, 5.5f, 18.5f, 9, 8.5f, 19);
+                L(13, 7.5f, 16.5f, 11);
+                break;
+            case Icon.ArrowRight:
+                L(4, 12, 20, 12);
+                Poly(false, 14, 6, 20, 12, 14, 18);
+                break;
+            case Icon.Palette:
+                Circle(12, 12, 9);
+                Dot(8, 10, 1.4f); Dot(12, 7.5f, 1.4f); Dot(16, 10, 1.4f); Dot(10, 15.5f, 1.4f);
+                break;
+            case Icon.Hand:
+                RRect(8, 3, 12, 14, 2);
+                Poly(false, 12, 9, 17.5f, 10, 19, 12, 18, 18, 15, 21, 9.5f, 21, 5, 15, 6.5f, 13.5f, 8, 14);
+                break;
         }
     }
 
-    public static void Stop(Renderer g, float cx, float cy, float s, Color4 c) =>
-        g.FillRound(RectF.Centered(cx, cy, s * 0.8f, s * 0.8f), 2f, c);
-
-    public static void Refresh(Renderer g, float cx, float cy, float s, Color4 c)
+    /// <summary>Kleiner Statuspunkt (z. B. "laeuft") mit weichem Hof.</summary>
+    public static void StatusDot(Renderer g, float cx, float cy, Color4 c, float r = 3.5f, bool halo = true)
     {
-        g.Arc(cx, cy, s * 0.42f, -60, 280, c, 1.5f);
-        float a = (-60) * MathF.PI / 180f;
-        float ax = cx + MathF.Cos(a) * s * 0.42f, ay = cy + MathF.Sin(a) * s * 0.42f;
-        g.Line(ax, ay, ax + s * 0.28f, ay + s * 0.02f, c, 1.5f, true);
-        g.Line(ax, ay, ax - 0.5f, ay - s * 0.28f, c, 1.5f, true);
-    }
-
-    /// <summary>Pfeil nach rechts (Eingang -> Mixer) oder links.</summary>
-    public static void Arrow(Renderer g, float cx, float cy, float s, Color4 c, bool right = true)
-    {
-        float h = s / 2;
-        g.Line(cx - h, cy, cx + h, cy, c, 1.5f, true);
-        if (right) { g.Line(cx + h, cy, cx + h * 0.35f, cy - h * 0.55f, c, 1.5f, true); g.Line(cx + h, cy, cx + h * 0.35f, cy + h * 0.55f, c, 1.5f, true); }
-        else { g.Line(cx - h, cy, cx - h * 0.35f, cy - h * 0.55f, c, 1.5f, true); g.Line(cx - h, cy, cx - h * 0.35f, cy + h * 0.55f, c, 1.5f, true); }
-    }
-
-    /// <summary>Kette aus zwei eckigen Gliedern (App-Link).</summary>
-    public static void Link(Renderer g, float cx, float cy, float s, Color4 c, float w = 1.4f)
-    {
-        float lw = s * 0.62f, lh = s * 0.42f, ov = s * 0.26f;
-        float total = 2 * lw - ov;
-        float x0 = MathF.Round(cx - total / 2), y0 = MathF.Round(cy - lh / 2);
-        g.StrokeRect(new RectF(x0, y0, lw, lh), c, w);
-        g.StrokeRect(new RectF(x0 + lw - ov, y0, lw, lh), c, w);
-        g.Fill(new RectF(x0 + lw - ov, MathF.Round(cy - w / 2), ov, w), c); // Glied-Steg durch die Ueberlappung
-    }
-
-    /// <summary>Drei Balken wie ein Pegelanzeiger ("spielt gerade").</summary>
-    public static void EqBars(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float bw = MathF.Max(2f, s * 0.2f), gap = bw * 0.7f, h = s;
-        float x = cx - (3 * bw + 2 * gap) / 2;
-        float[] hs = { 0.55f, 1f, 0.7f };
-        for (int i = 0; i < 3; i++)
-        {
-            float bh = h * hs[i];
-            g.Fill(new RectF(MathF.Round(x + i * (bw + gap)), MathF.Round(cy + h / 2 - bh), bw, bh), c);
-        }
-    }
-
-    public static void Warn(Renderer g, float cx, float cy, float s, Color4 c)
-    {
-        float h = s / 2;
-        g.Line(cx, cy - h, cx - h, cy + h * 0.8f, c, 1.5f, true);
-        g.Line(cx, cy - h, cx + h, cy + h * 0.8f, c, 1.5f, true);
-        g.Line(cx - h, cy + h * 0.8f, cx + h, cy + h * 0.8f, c, 1.5f, true);
-        g.Line(cx, cy - h * 0.25f, cx, cy + h * 0.25f, c, 1.5f, true);
-        g.FillCircle(cx, cy + h * 0.52f, 0.9f, c);
+        if (halo) g.FillCircle(cx, cy, r + 2.5f, c.With(0.22f));
+        g.FillCircle(cx, cy, r, c);
     }
 }

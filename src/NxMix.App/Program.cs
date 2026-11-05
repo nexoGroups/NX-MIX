@@ -24,6 +24,9 @@ internal static class Program
         public bool Demo, HostRunning, ForceDemoEngine;
         /// <summary>--restorer unsupported: Screenshot mit "Windows unterstuetzt es nicht".</summary>
         public string? Restorer;
+        /// <summary>Screenshots: --theme light|dark, --touch, --expanded (Seitenleiste ausgeklappt).</summary>
+        public string Theme = "dark";
+        public bool Touch, Expanded;
         public double T = 4.2;
         public int ExitAfterMs;
     }
@@ -55,6 +58,9 @@ internal static class Program
                 case "--exit-after": int.TryParse(Next(ref i), out o.ExitAfterMs); break;
                 case "--engine": o.ForceDemoEngine = string.Equals(Next(ref i), "demo", StringComparison.OrdinalIgnoreCase); break;
                 case "--restorer": o.Restorer = Next(ref i); break;
+                case "--theme": o.Theme = (Next(ref i) ?? "dark").ToLowerInvariant(); break;
+                case "--touch": o.Touch = true; break;
+                case "--expanded": o.Expanded = true; break;
             }
         }
         return o;
@@ -99,7 +105,7 @@ internal static class Program
             model.InitOptions(dto.BlockFrames, dto.Exclusive);
             model.InitAppLinks(ProjectStore.AppLinksFromDto(dto)); // fehlendes Feld in alten Dateien = keine Links
         }
-        var win = new MainWindow(model, dto?.Window, o.ExitAfterMs);
+        var win = new MainWindow(model, dto?.Window, o.ExitAfterMs, UiPrefs.Load());
         return win.Run();
     }
 
@@ -128,7 +134,13 @@ internal static class Program
         }
         if (o.HostRunning) model.AttachHostForShot(new DemoHost(true));
 
-        var root = new UiRoot(model, new NullShell());
+        var prefs = new UiPrefs
+        {
+            Theme = o.Theme == "light" ? ThemeMode.Light : ThemeMode.Dark,
+            Density = o.Touch ? Density.Touch : Density.Mouse,
+            SidebarExpanded = o.Expanded,
+        };
+        var root = new UiRoot(model, new NullShell(), prefs);
         float dipW = o.W / o.Scale, dipH = o.H / o.Scale;
         root.Resize(dipW, dipH);
         int page = o.Page switch { "matrix" => 1, "devices" => 2, "settings" => 3, _ => 0 };
@@ -174,41 +186,59 @@ internal static class Program
         enc.Commit();
     }
 
+    /// <summary>Kanal-Blatt oeffnen (Mixer-Seite) - fuer Screenshots und Selbsttest.</summary>
+    public static ChannelSheet? Sheet(UiRoot root, bool input, int index)
+    {
+        root.SwitchPage(0);
+        return ((MixerPage)root.Pages[0]).OpenSheet(input, Math.Clamp(index, 0, Math.Max(0, (input ? root.Model.InputCount : root.Model.OutputCount) - 1)));
+    }
+
+    /// <summary>App-Link-Auswahl fuer einen Eingang oeffnen (ueber dessen Kanal-Blatt).</summary>
+    public static void Picker(UiRoot root, int input, bool manual = false)
+    {
+        var s = Sheet(root, true, input);
+        for (int i = 0; i < 20; i++) root.Tick(1f / 60f);
+        s?.OpenPicker(manual);
+    }
+
     static void ShowOverlay(UiRoot root, string what)
     {
         switch (what)
         {
-            case "project-menu": root.ShowProjectMenu(root.Title.MenuRect); break;
+            case "project-menu": root.ShowProjectMenu(root.Top.MenuRect); break;
             case "new-dialog": root.NewProjectWithConfirm(); break;
             case "start-dialog": ((DevicesPage)root.Pages[2]).ShowStartDialog(); break;
-            case "lock-menu": ((MixerPage)root.Pages[0]).DebugOpen(false, Math.Min(2, root.Model.OutputCount - 1), "lock"); break;
-            case "channel-menu": ((MixerPage)root.Pages[0]).DebugOpen(false, Math.Min(1, root.Model.OutputCount - 1), "channel"); break;
-            case "rename": ((MixerPage)root.Pages[0]).DebugOpen(true, 0, "rename"); break;
-            case "applink-picker": ((MixerPage)root.Pages[0]).DebugOpen(true, 10, "applink"); break;        // freier Eingang: Liste + Mono/Stereo
-            case "applink-picker-linked": ((MixerPage)root.Pages[0]).DebugOpen(true, 8, "applink"); break;  // Chrome gebunden: Haken + "Verknuepfung loesen"
-            case "applink-picker-pair": ((MixerPage)root.Pages[0]).DebugOpen(true, 7, "applink"); break;    // Stereo-Link (zweite Haelfte angeklickt)
-            case "applink-conflict": ((MixerPage)root.Pages[0]).DebugOpen(true, 2, "applink"); break;       // haengt an einer Geraete-Zuordnung
-            case "applink-manual": ((MixerPage)root.Pages[0]).DebugOpen(true, 10, "applink-manual"); break;
+            case "sheet-out": Sheet(root, false, 2); break;                 // Hochtoener mit Gain-Sperre
+            case "sheet-in": Sheet(root, true, 6); break;                   // Spotify (Stereo-Link)
+            case "sheet-scroll":
+                {
+                    var s = Sheet(root, false, 5);
+                    for (int i = 0; i < 20; i++) root.Tick(1f / 60f);
+                    if (s != null) root.MouseWheel(root.W - 100, root.H - 200, -12f, false, false, false);
+                    break;
+                }
+            case "add-menu":
+                {
+                    var b = ((MixerPage)root.Pages[0]).Inputs.AddButton;
+                    root.MouseDown(b.Bounds.CX, b.Bounds.CY, 0, 1, false, false, false);
+                    root.MouseUp(b.Bounds.CX, b.Bounds.CY, 0, false, false, false);
+                    break;
+                }
+            case "rename": Sheet(root, true, 0)?.BeginRename(); break;
+            case "applink-picker": Picker(root, 10); break;          // freier Eingang: Liste + Mono/Stereo
+            case "applink-picker-linked": Picker(root, 8); break;    // Chrome gebunden: "Verknuepfung loesen"
+            case "applink-picker-pair": Picker(root, 7); break;      // Stereo-Link (zweite Haelfte)
+            case "applink-conflict": Picker(root, 2); break;         // haengt an einer Geraete-Zuordnung
+            case "applink-manual": Picker(root, 10, true); break;
             case "applink-problem": // Start mit App-Links, aber ohne Parkplatz: Erklaerung + Alternativen
                 root.Model.SetParking(null);
                 root.SwitchPage(2);
                 ((DevicesPage)root.Pages[2]).ShowLinkProblemDialog(root.Model.AppLinkProblem() ?? "");
                 break;
             case "applink-filter":
-                ((MixerPage)root.Pages[0]).DebugOpen(true, 10, "applink");
+                Picker(root, 10);
                 foreach (char c in "ch") root.Char(c);
                 break;
-            case "applink-tooltip":
-                {
-                    var strips = ((MixerPage)root.Pages[0]).Inputs.Strips;
-                    if (strips.Count > 9)
-                    {
-                        var lr = strips[9].LinkRect;
-                        root.MouseMove(lr.CX, lr.CY, false, false, false);
-                        for (int i = 0; i < 60; i++) root.Tick(1f / 60f);
-                    }
-                    break;
-                }
             case "tooltip":
                 {
                     var strips = ((MixerPage)root.Pages[0]).Outputs.Strips;

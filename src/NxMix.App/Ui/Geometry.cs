@@ -14,6 +14,7 @@ internal readonly record struct RectF(float X, float Y, float W, float H)
     public bool Contains(float px, float py) => px >= X && px < X + W && py >= Y && py < Y + H;
 
     public RectF Inflate(float d) => new(X - d, Y - d, Math.Max(0, W + 2 * d), Math.Max(0, H + 2 * d));
+    public RectF Inflate(float h, float v) => new(X - h, Y - v, Math.Max(0, W + 2 * h), Math.Max(0, H + 2 * v));
     public RectF Deflate(float l, float t, float r, float b) => new(X + l, Y + t, Math.Max(0, W - l - r), Math.Max(0, H - t - b));
     public RectF Deflate(float d) => Deflate(d, d, d, d);
     public RectF Deflate(float h, float v) => Deflate(h, v, h, v);

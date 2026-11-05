@@ -5,7 +5,7 @@ using Vortice.Mathematics;
 namespace NxMix.App.Ui;
 
 /// <summary>
-/// Auswahl-Popup fuer App-Links: Liste der Programme mit Audio (aus IAppCatalog), Filterfeld, "Programm per Name hinzufuegen ...",
+/// Auswahl-Popup fuer App-Links: Liste der Programme mit Audio (aus IAppCatalog), Suchfeld, "Programm per Name hinzufuegen ...",
 /// "Verknuepfung loesen", Mono/Stereo-Wahl. Verweigert (mit Erklaerung) alles, was mit einer Geraete-Zuordnung oder einem anderen Link kollidiert.
 /// </summary>
 internal sealed class AppLinkPicker : Overlay
@@ -13,15 +13,18 @@ internal sealed class AppLinkPicker : Overlay
     enum K { None, Row, Close, Refresh, Mono, Stereo, Manual, Unlink, Back, Ok, Field }
     readonly record struct Hit(K Kind, int Index = -1);
 
-    const float BoxW = 404f, RowH = 46f, FootH = 34f, Pad = 14f;
+    const float BoxW = 420f, Pad = 16f;
+    static float RowH => Theme.Touch ? 58f : 50f;
+    static float FootH => Theme.Touch ? 44f : 36f;
 
     readonly AppModel _m;
     readonly RectF _anchor;
-    readonly TextEditor _edit = new();
+    readonly TextEditor _edit = new() { Bare = true };
     readonly VScroll _sc = new();
 
     bool _manual;
-    int _first, _count;
+    readonly int _first;
+    int _count;
     readonly bool _namedPair;
     List<AppProgram> _all = new();
     List<AppProgram> _filtered = new();
@@ -29,8 +32,8 @@ internal sealed class AppLinkPicker : Overlay
     string? _loadError, _manualError, _actionError;
     int _sel = -1;
     Hit _hot, _press;
+    float _t;
 
-    // Geometrie (absolute Fensterkoordinaten, bei jedem Relayout neu)
     RectF _box, _rClose, _rRefresh, _rTarget, _rSegMono, _rSegStereo, _rNote, _rBanner, _rFieldLabel, _rField, _rList, _rManual, _rUnlink, _rHelp, _rErr, _rBack, _rOk;
 
     AppLinkPicker(AppModel m, int clickedInput, RectF anchor, bool startManual)
@@ -42,8 +45,8 @@ internal sealed class AppLinkPicker : Overlay
         _manual = startManual;
     }
 
-    /// <summary>Oeffnet das Popup fuer den Eingangsstreifen clickedInput (der Link sitzt am Anfang des Paares).</summary>
-    public static AppLinkPicker? Show(UiRoot root, AppModel m, int clickedInput, RectF anchor, bool startManual = false, string? prefill = null)
+    /// <summary>Oeffnet das Popup fuer den Eingang clickedInput (der Link sitzt am Anfang des Paares).</summary>
+    public static AppLinkPicker Show(UiRoot root, AppModel m, int clickedInput, RectF anchor, bool startManual = false, string? prefill = null)
     {
         var p = new AppLinkPicker(m, clickedInput, anchor, startManual);
         root.ShowOverlay(p);
@@ -70,7 +73,6 @@ internal sealed class AppLinkPicker : Overlay
     void RefreshFilter(bool keepSel = false)
     {
         string f = _manual ? "" : _edit.Text.Trim();
-        // freie Programme vor solchen, die schon an einem anderen Fader haengen (stabil: spielende zuerst, dann alphabetisch)
         _filtered = _all.Where(p => f.Length == 0 || p.DisplayName.Contains(f, StringComparison.CurrentCultureIgnoreCase)
             || p.ExeName.Contains(f, StringComparison.OrdinalIgnoreCase)).OrderBy(p => LinkedElsewhere(p) != null).ToList();
         if (!keepSel || _sel >= _filtered.Count) _sel = f.Length > 0 ? FirstEnabledRow() : -1;
@@ -112,18 +114,20 @@ internal sealed class AppLinkPicker : Overlay
     void StartEditor(string text)
     {
         _edit.Parent = this;
-        _edit.Begin(_rField, text, Theme.Body, _ => { }, 80, null);
+        _edit.Begin(FieldTextRect, text, Theme.Body, _ => { }, 80, null);
         RefreshFilter();
         Changed();
     }
 
+    RectF FieldTextRect => _manual ? _rField.Deflate(12, 0) : RectF.FromLTRB(_rField.X + 34, _rField.Y, _rField.Right - 10, _rField.Bottom);
+
     void EnsureEditor()
     {
         if (_rField.IsEmpty) return;
-        if (!_edit.Active || _edit.Bounds != _rField)
+        if (!_edit.Active || _edit.Bounds != FieldTextRect)
         {
             _edit.Parent = this;
-            _edit.Begin(_rField, _edit.Text, Theme.Body, _ => { }, 80, null);
+            _edit.Begin(FieldTextRect, _edit.Text, Theme.Body, _ => { }, 80, null);
         }
     }
 
@@ -159,7 +163,7 @@ internal sealed class AppLinkPicker : Overlay
         var why = _m.SetLink(_first, _count, exe, display);
         if (why != null) { _actionError = why; Changed(); return; }
         Close();
-        root?.Status.Flash($"{display ?? AppLinkRules.PrettyName(exe)} ist an {(_count == 2 ? $"Eingang {_first + 1:00} + {_first + 2:00}" : $"Eingang {_first + 1:00}")} gebunden – die Verknüpfung wird beim Start von Audio aktiv.");
+        root?.Notify.Flash($"{display ?? AppLinkRules.PrettyName(exe)} ist an {(_count == 2 ? $"Eingang {_first + 1:00} + {_first + 2:00}" : $"Eingang {_first + 1:00}")} gebunden – aktiv ab dem nächsten Audio-Start.");
     }
 
     void ClickRow(int i)
@@ -167,7 +171,7 @@ internal sealed class AppLinkPicker : Overlay
         if (i < 0 || i >= _filtered.Count) return;
         var p = _filtered[i];
         var other = LinkedElsewhere(p);
-        if (BlockMessage(out _) != null) return; // Hinweis steht schon im Banner
+        if (BlockMessage(out _) != null) return;
         if (other != null)
         {
             _actionError = $"{p.ExeName} ist schon an Eingang {other.FirstChannel + 1:00} gebunden – ein Programm kann nur an einen Fader. Löse dort zuerst die Verknüpfung.";
@@ -193,7 +197,7 @@ internal sealed class AppLinkPicker : Overlay
         if (cur == null) return;
         if (!_m.RemoveLink(_first)) return;
         Close();
-        root?.Status.Flash($"Verknüpfung mit {cur.Title} gelöst.");
+        root?.Notify.Flash($"Verknüpfung mit {cur.Title} gelöst.");
     }
 
     void Activate(Hit h)
@@ -217,9 +221,9 @@ internal sealed class AppLinkPicker : Overlay
 
     string TargetText()
     {
-        if (_count == 2) return $"Ziel: Eingänge {_first + 1:00} + {_first + 2:00} · Stereo-Paar";
+        if (_count == 2) return $"Eingänge {_first + 1:00} + {_first + 2:00} · Stereo-Paar";
         string nm = _first < _m.InputCount ? _m.Settings.Inputs[_first].Name : "";
-        return $"Ziel: Eingang {_first + 1:00}" + (string.IsNullOrWhiteSpace(nm) ? "" : " · " + nm) + " · mono";
+        return $"Eingang {_first + 1:00}" + (string.IsNullOrWhiteSpace(nm) ? "" : " · " + nm) + " · mono";
     }
 
     string? NoteText()
@@ -229,7 +233,7 @@ internal sealed class AppLinkPicker : Overlay
         return null;
     }
 
-    const string ManualHelp = "Gib den Dateinamen des Programms ein, z. B. spotify.exe oder chrome.exe. Es muss noch nicht laufen – NX-MIX bindet es, sobald es startet.";
+    const string ManualHelp = "Dateiname des Programms, z. B. spotify.exe oder chrome.exe. Es muss noch nicht laufen – NX-MIX bindet es, sobald es startet.";
 
     void Relayout()
     {
@@ -239,7 +243,9 @@ internal sealed class AppLinkPicker : Overlay
         float maxH = b.H - 16;
         float h = Build(0, 0, w, maxH);
         float x = Math.Clamp(_anchor.X - 4, 8, Math.Max(8, b.W - w - 8));
-        float y = _anchor.Bottom + 6;
+        // links neben einem rechten Seitenblatt bleiben, wenn der Anker darin liegt
+        if (_anchor.Right > b.W - Theme.SheetW - 20) x = Math.Max(8, Math.Min(x, b.W - Theme.SheetW - 24 - w));
+        float y = _anchor.Bottom + 8;
         if (y + h > b.H - 8) y = Math.Max(8, b.H - 8 - h);
         Build(x, y, w, maxH);
         _box = new RectF(x, y, w, h);
@@ -250,60 +256,62 @@ internal sealed class AppLinkPicker : Overlay
     float Build(float ox, float oy, float w, float maxH)
     {
         float cw = w - 2 * Pad, x = ox + Pad, y = oy + Pad;
-        _rClose = new RectF(ox + w - Pad - 22, y - 3, 24, 24);
-        _rRefresh = _manual ? default : new RectF(_rClose.X - 28, y - 3, 24, 24);
-        y += 24;
-        _rTarget = new RectF(x, y, cw, 16); y += 22;
+        _rClose = new RectF(ox + w - Pad - 26, y - 4, 28, 28);
+        _rRefresh = _manual ? default : new RectF(_rClose.X - 32, y - 4, 28, 28);
+        y += 26;
+        _rTarget = new RectF(x, y, cw, 18); y += 26;
         _rSegMono = _rSegStereo = _rNote = default;
+        float segH = Theme.ControlHSmall + 2;
         if (!_manual && !_namedPair)
         {
-            float sw = (cw - 4) / 2;
-            _rSegMono = new RectF(x, y, sw, 26);
-            _rSegStereo = new RectF(x + sw + 4, y, sw, 26);
-            y += 30;
-            if (NoteText() != null) { _rNote = new RectF(x, y, cw, 14); y += 18; } else y += 4;
+            _rSegMono = new RectF(x, y, cw / 2, segH);
+            _rSegStereo = new RectF(x + cw / 2, y, cw / 2, segH);
+            y += segH + 6;
+            if (NoteText() != null) { _rNote = new RectF(x, y, cw, 16); y += 20; } else y += 4;
         }
         var bt = BannerText(out _);
         if (bt != null)
         {
-            float bh = Renderer.TextHeight(bt, Theme.Small, cw - 36) + 16;
-            _rBanner = new RectF(x, y, cw, bh); y += bh + 8;
+            float bh = Renderer.TextHeight(bt, Theme.Callout, cw - 40) + 20;
+            _rBanner = new RectF(x, y, cw, bh); y += bh + 10;
         }
         else _rBanner = default;
 
         _rFieldLabel = _rList = _rManual = _rUnlink = _rHelp = _rErr = _rBack = _rOk = default;
+        float fh = Theme.ControlH + 2;
         if (_manual)
         {
-            _rFieldLabel = new RectF(x, y, cw, 14); y += 17;
-            _rField = new RectF(x, y, cw, 32); y += 40;
-            float hh = Renderer.TextHeight(ManualHelp, Theme.Small, cw);
-            _rHelp = new RectF(x, y, cw, hh + 2); y += hh + 10;
+            _rFieldLabel = new RectF(x, y, cw, 16); y += 20;
+            _rField = new RectF(x, y, cw, fh); y += fh + 10;
+            float hh = Renderer.TextHeight(ManualHelp, Theme.Callout, cw);
+            _rHelp = new RectF(x, y, cw, hh + 2); y += hh + 12;
             if (_manualError != null && BannerText(out _) == null)
             {
-                float eh = Renderer.TextHeight(_manualError, Theme.Small, cw);
-                _rErr = new RectF(x, y, cw, eh + 2); y += eh + 10;
+                float eh = Renderer.TextHeight(_manualError, Theme.Callout, cw);
+                _rErr = new RectF(x, y, cw, eh + 2); y += eh + 12;
             }
-            _rOk = new RectF(ox + w - Pad - 110, y, 110, 32);
-            _rBack = new RectF(_rOk.X - 8 - 90, y, 90, 32);
-            y += 32 + Pad;
+            float bh = Theme.ControlH;
+            _rOk = new RectF(ox + w - Pad - 110, y, 110, bh);
+            _rBack = new RectF(_rOk.X - 8 - 96, y, 96, bh);
+            y += bh + Pad;
         }
         else
         {
-            _rField = new RectF(x, y, cw, 32); y += 40;
-            float after = 8 + 1 + FootH * 2 + 6;                       // Abstand + Trennlinie + zwei Fusszeilen + Rand
+            _rField = new RectF(x, y, cw, fh); y += fh + 10;
+            float after = 8 + 1 + FootH * 2 + 8;
             float want = Math.Clamp(Math.Max(_all.Count, 3), 3, 6) * RowH;
             float maxList = maxH - (y - oy) - after;
             float listH = Math.Max(RowH * 2, Math.Min(want, maxList));
-            _rList = new RectF(x, y, cw, listH);
+            _rList = new RectF(x - 6, y, cw + 12, listH);
             y += listH + 8 + 1;
-            _rManual = new RectF(x, y, cw, FootH); y += FootH;
-            _rUnlink = new RectF(x, y, cw, FootH); y += FootH + 6;
+            _rManual = new RectF(x - 6, y, cw + 12, FootH); y += FootH;
+            _rUnlink = new RectF(x - 6, y, cw + 12, FootH); y += FootH + 8;
             _sc.Update(_rList, _filtered.Count * RowH);
         }
         return y - oy;
     }
 
-    RectF RowRect(int i) => new(_rList.X, _rList.Y + i * RowH - _sc.Offset, _rList.W - (_sc.Needed ? 12 : 0), RowH - 3);
+    RectF RowRect(int i) => new(_rList.X, _rList.Y + i * RowH - _sc.Offset, _rList.W - (_sc.Needed ? 12 : 0), RowH - 2);
 
     Hit HitAt(float x, float y)
     {
@@ -335,12 +343,13 @@ internal sealed class AppLinkPicker : Overlay
         K.Row => h.Index >= 0 && h.Index < _filtered.Count && !RowDisabled(_filtered[h.Index]),
         K.Manual => BlockMessage(out _) == null,
         K.Unlink => Current != null,
-        K.Stereo => true,
         K.None => false,
         _ => true,
     };
 
     // ---- Eingabe ---------------------------------------------------------------------------------
+    public override Widget? HitTest(float x, float y) => this;
+
     public override CursorKind CursorAt(float x, float y)
     {
         var h = HitAt(x, y);
@@ -351,6 +360,7 @@ internal sealed class AppLinkPicker : Overlay
     public override void OnMouseMove(in MouseEvent e)
     {
         if (_sc.Dragging) { _sc.Drag(e.Y); Invalidate(); return; }
+        if (IsPressed && _press.Kind == K.Field) { _edit.DragTo(e.X); Invalidate(); return; }
         var h = HitAt(e.X, e.Y);
         if (h.Kind == K.Row && HitEnabled(h) && h.Index != _sel) { _sel = h.Index; Invalidate(); }
         if (h != _hot) { _hot = h; Invalidate(); }
@@ -382,7 +392,12 @@ internal sealed class AppLinkPicker : Overlay
         return true;
     }
 
-    public override bool Tick(float dt) => _edit.Active && _edit.Tick(dt);
+    public override bool Tick(float dt)
+    {
+        bool d = _edit.Active && _edit.Tick(dt);
+        if (_t < 1) { _t = Math.Min(1, _t + dt / 0.14f); d = true; }
+        return d;
+    }
 
     void EnsureVisible(int i)
     {
@@ -446,90 +461,94 @@ internal sealed class AppLinkPicker : Overlay
     }
 
     // ---- Zeichnen --------------------------------------------------------------------------------
-    static void Btn(Renderer g, RectF r, bool hot, bool enabled = true)
-    {
-        if (hot && enabled) g.Fill(r, Theme.Raised);
-    }
-
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        g.Fill(b, new Color4(0, 0, 0, 0.4f));
+        float a = 1 - MathF.Pow(1 - _t, 3);
+        g.Fill(b, Theme.Scrim.With(Theme.Scrim.A * 0.5f * a));
         if (_box.IsEmpty) return;
-        g.Fill(_box, Theme.Popup);
-        g.StrokeRect(_box, Theme.BorderStrong);
+        g.Shadow(_box, 16, 22, 1.5f * a, 8);
+        g.FillRound(_box, 16, Theme.Elevated);
+        g.StrokeRound(_box, 16, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         float x = _box.X + Pad, cw = _box.W - 2 * Pad;
 
         // Kopf
-        g.Text(_manual ? "PROGRAMM PER NAME HINZUFÜGEN" : "PROGRAMM AN EINGANG BINDEN", new RectF(x, _box.Y + Pad - 2, cw - 60, 20), Theme.Caps, Theme.TextDim, HAlign.Left, VAlign.Middle, true);
-        Btn(g, _rClose, _hot.Kind == K.Close);
-        Icons.Cross(g, _rClose.CX, _rClose.CY, 11, _hot.Kind == K.Close ? Theme.Text : Theme.TextDim, 1.4f);
-        if (!_rRefresh.IsEmpty)
-        {
-            Btn(g, _rRefresh, _hot.Kind == K.Refresh);
-            Icons.Refresh(g, _rRefresh.CX, _rRefresh.CY, 14, _hot.Kind == K.Refresh ? Theme.Text : Theme.TextDim);
-        }
-        g.Text(TargetText(), _rTarget, Theme.Small, Theme.TextDim, HAlign.Left, VAlign.Middle, true);
+        g.Text(_manual ? "Programm per Name hinzufügen" : "Programm an Eingang binden", new RectF(x, _box.Y + Pad - 4, cw - 70, 26), Theme.Headline, Theme.Text, HAlign.Left, VAlign.Middle, true);
+        IconBtn(g, _rClose, Icon.Close, _hot.Kind == K.Close);
+        if (!_rRefresh.IsEmpty) IconBtn(g, _rRefresh, Icon.Refresh, _hot.Kind == K.Refresh);
+        g.Text(TargetText(), _rTarget, Theme.Callout, Theme.TextSecondary, HAlign.Left, VAlign.Middle, true);
 
-        // Mono / Stereo
+        // Mono / Stereo als Segment-Schalter
         if (!_rSegMono.IsEmpty)
         {
             bool stereoOk = _m.LinkConflict(_first, 2, null, _first) == null;
-            PaintSeg(g, _rSegMono, "Mono · 1 Kanal", _count == 1, true, _hot.Kind == K.Mono);
-            PaintSeg(g, _rSegStereo, "Stereo · 2 Kanäle", _count == 2, stereoOk, _hot.Kind == K.Stereo);
+            var track = RectF.FromLTRB(_rSegMono.X, _rSegMono.Y, _rSegStereo.Right, _rSegMono.Bottom);
+            g.FillRound(track, Theme.RadiusControl + 1, Theme.Control);
+            PaintSeg(g, _rSegMono.Deflate(2), "Mono · 1 Kanal", _count == 1, true, _hot.Kind == K.Mono);
+            PaintSeg(g, _rSegStereo.Deflate(2), "Stereo · 2 Kanäle", _count == 2, stereoOk, _hot.Kind == K.Stereo);
             var note = NoteText();
-            if (note != null) g.Text(note, _rNote, Theme.Tiny, Theme.TextFaint, HAlign.Left, VAlign.Middle, true);
+            if (note != null) g.Text(note, _rNote, Theme.Caption, Theme.TextTertiary, HAlign.Left, VAlign.Middle, true);
         }
 
         // Hinweis / Konflikt
         var bt = BannerText(out bool hard);
         if (bt != null)
         {
-            var col = hard ? Theme.Mute : Theme.Solo;
-            g.Fill(_rBanner, col.With(0.12f));
-            g.StrokeRect(_rBanner, col.With(0.55f));
-            Icons.Warn(g, _rBanner.X + 15, _rBanner.Y + 15, 13, col);
-            g.Text(bt, new RectF(_rBanner.X + 30, _rBanner.Y + 8, _rBanner.W - 38, _rBanner.H - 12), Theme.Small, Theme.Text, HAlign.Left, VAlign.Top, false, true);
+            var col = hard ? Theme.Red : Theme.Orange;
+            g.FillRound(_rBanner, 10, Theme.Soft(col));
+            Icons.Draw(g, Icon.Warn, _rBanner.X + 18, _rBanner.Y + 18, 16, col);
+            g.Text(bt, new RectF(_rBanner.X + 34, _rBanner.Y + 10, _rBanner.W - 44, _rBanner.H - 16), Theme.Callout, Theme.Text, HAlign.Left, VAlign.Top, false, true);
         }
 
-        if (_manual) PaintManual(g, x, cw); else PaintList(g, x, cw);
+        if (_manual) PaintManual(g); else PaintList(g, x, cw);
 
-        // Texteditor ganz oben (zeichnet nur, wenn aktiv)
         _edit.Paint(g);
         if (_edit.Active && _edit.Text.Length == 0)
-            g.Text(_manual ? "z. B. spotify.exe" : "Programm suchen …", new RectF(_rField.X + 10, _rField.Y, _rField.W - 20, _rField.H), Theme.Body, Theme.TextFaint, HAlign.Left, VAlign.Middle, false);
+            g.Text(_manual ? "z. B. spotify.exe" : "Programm suchen …", FieldTextRect, Theme.Body, Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
     }
 
-    void PaintSeg(Renderer g, RectF r, string text, bool on, bool enabled, bool hot)
+    static void IconBtn(Renderer g, RectF r, Icon icon, bool hot)
     {
-        if (on) { g.Fill(r, Theme.AccentDim); g.StrokeRect(r, Theme.Accent.With(0.8f)); }
-        else { g.Fill(r, enabled ? (hot ? Theme.RaisedHi : Theme.Raised) : Theme.Card); g.StrokeRect(r, Theme.BorderStrong.With(enabled ? 0.8f : 0.4f)); }
-        g.Text(text, r, Theme.SmallBold, on ? Theme.AccentHi : enabled ? Theme.Text : Theme.TextFaint, HAlign.Center, VAlign.Middle, false);
+        if (hot) g.FillPill(r, Theme.ControlHover);
+        Icons.Draw(g, icon, r.CX, r.CY, 16, hot ? Theme.Text : Theme.TextSecondary);
     }
 
-    void PaintManual(Renderer g, float x, float cw)
+    static void PaintSeg(Renderer g, RectF r, string text, bool on, bool enabled, bool hot)
     {
-        g.Text("EXE-NAME", _rFieldLabel, Theme.Tiny, Theme.TextFaint, HAlign.Left, VAlign.Middle, false);
-        g.Text(ManualHelp, _rHelp, Theme.Small, Theme.TextDim, HAlign.Left, VAlign.Top, false, true);
-        if (_manualError != null && _rBanner.IsEmpty) g.Text(_manualError, _rErr, Theme.Small, Theme.Mute, HAlign.Left, VAlign.Top, false, true);
-        PaintButton(g, _rBack, "Zurück", false, _hot.Kind == K.Back);
-        PaintButton(g, _rOk, "Binden", true, _hot.Kind == K.Ok);
+        if (on)
+        {
+            if (!Theme.IsDark) g.Shadow(r, Theme.RadiusControl - 1, 2.5f, 0.7f, 1);
+            g.FillRound(r, Theme.RadiusControl - 1, Theme.SegmentThumb);
+        }
+        else if (hot && enabled) g.FillRound(r, Theme.RadiusControl - 1, Theme.ControlHover);
+        g.Text(text, r, on ? Theme.CalloutStrong : Theme.CalloutMedium, on ? Theme.Text : enabled ? Theme.TextSecondary : Theme.TextTertiary, HAlign.Center, VAlign.Middle, false);
     }
 
-    static void PaintButton(Renderer g, RectF r, string text, bool primary, bool hot)
+    void PaintField(Renderer g)
     {
-        Color4 bg = primary ? (hot ? Theme.AccentHi : Theme.Accent) : (hot ? Theme.RaisedHi : Theme.Raised);
-        g.Fill(r, bg);
-        if (!primary) g.StrokeRect(r, Theme.BorderStrong);
-        g.Text(text, r, Theme.BodyBold, primary ? Theme.OnAccent : Theme.Text, HAlign.Center, VAlign.Middle, false);
+        bool focus = _edit.Active;
+        if (focus) g.FillRound(_rField.Inflate(3), Theme.RadiusControl + 3, Theme.Accent.With(0.22f));
+        g.FillRound(_rField, Theme.RadiusControl, Theme.IsDark ? Theme.Well : Theme.Surface2);
+        g.StrokeRound(_rField, Theme.RadiusControl, focus ? Theme.Accent : Theme.Border, focus ? 1.5f : 1f);
+        if (!_manual) Icons.Draw(g, Icon.Search, _rField.X + 18, _rField.CY, 15, Theme.TextTertiary);
+    }
+
+    void PaintManual(Renderer g)
+    {
+        g.Text("EXE-NAME", _rFieldLabel, Theme.Overline, Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
+        PaintField(g);
+        g.Text(ManualHelp, _rHelp, Theme.Callout, Theme.TextSecondary, HAlign.Left, VAlign.Top, false, true);
+        if (_manualError != null && _rBanner.IsEmpty) g.Text(_manualError, _rErr, Theme.Callout, Theme.Red, HAlign.Left, VAlign.Top, false, true);
+        Draw.ButtonLook(g, _rBack, "Zurück", ButtonStyle.Gray, true, _hot.Kind == K.Back, font: Theme.BodyMedium);
+        Draw.ButtonLook(g, _rOk, "Binden", ButtonStyle.Filled, true, _hot.Kind == K.Ok, font: Theme.BodyMedium);
     }
 
     void PaintList(Renderer g, float x, float cw)
     {
-        // Liste
+        PaintField(g);
         g.PushClip(_rList);
         if (_loading && _all.Count == 0)
-            g.Text("Lese Programme ein …", _rList, Theme.Body, Theme.TextDim, HAlign.Center);
+            g.Text("Lese Programme ein …", _rList, Theme.Body, Theme.TextSecondary, HAlign.Center);
         else if (_filtered.Count == 0)
         {
             string head, body = "";
@@ -537,8 +556,8 @@ internal sealed class AppLinkPicker : Overlay
             if (_loadError != null && _all.Count == 0) { head = "Programmliste nicht verfügbar"; body = _loadError; }
             else if (_all.Count == 0) { head = "Gerade nutzt kein Programm Audio"; body = "Starte das Programm und klicke oben auf Aktualisieren – oder füge es per Name hinzu."; }
             else { head = $"Kein Treffer für „{f}“"; body = "Enter: als Programmname hinzufügen."; }
-            g.Text(head, new RectF(_rList.X + 10, _rList.Y + 18, _rList.W - 20, 22), Theme.BodyBold, Theme.TextDim, HAlign.Center, VAlign.Middle, true);
-            g.Text(body, new RectF(_rList.X + 20, _rList.Y + 44, _rList.W - 40, _rList.H - 50), Theme.Small, _loadError != null && _all.Count == 0 ? Theme.Solo : Theme.TextFaint, HAlign.Center, VAlign.Top, false, true);
+            g.Text(head, new RectF(_rList.X + 10, _rList.Y + 16, _rList.W - 20, 22), Theme.BodyStrong, Theme.TextSecondary, HAlign.Center, VAlign.Middle, true);
+            g.Text(body, new RectF(_rList.X + 20, _rList.Y + 42, _rList.W - 40, _rList.H - 48), Theme.Callout, _loadError != null && _all.Count == 0 ? Theme.Orange : Theme.TextTertiary, HAlign.Center, VAlign.Top, false, true);
         }
         else
         {
@@ -553,26 +572,26 @@ internal sealed class AppLinkPicker : Overlay
         _sc.Paint(g);
 
         // Fusszeilen
-        g.Fill(new RectF(x, _rManual.Y - 1, cw, 1), Theme.Border);
+        g.Fill(new RectF(x, _rManual.Y - 5, cw, 1), Theme.Separator);
         bool blocked = BlockMessage(out _) != null;
         bool hm = _hot.Kind == K.Manual && !blocked;
-        if (hm) g.Fill(_rManual, Theme.Raised);
-        Icons.Plus(g, _rManual.X + 18, _rManual.CY, 11, blocked ? Theme.TextFaint : Theme.Accent, 1.6f);
-        g.Text("Programm per Name hinzufügen …", new RectF(_rManual.X + 36, _rManual.Y, _rManual.W - 44, _rManual.H), Theme.Body, blocked ? Theme.TextFaint : Theme.Text, HAlign.Left, VAlign.Middle, true);
+        if (hm) g.FillRound(_rManual, 8, Theme.ControlHover);
+        Icons.Draw(g, Icon.Plus, _rManual.X + 20, _rManual.CY, 16, blocked ? Theme.TextTertiary : Theme.AccentText);
+        g.Text("Programm per Name hinzufügen …", new RectF(_rManual.X + 40, _rManual.Y, _rManual.W - 48, _rManual.H), Theme.Body, blocked ? Theme.TextTertiary : Theme.AccentText, HAlign.Left, VAlign.Middle, true);
 
         var cur = Current;
         bool hu = _hot.Kind == K.Unlink && cur != null;
-        if (hu) g.Fill(_rUnlink, Theme.Mute.With(0.18f));
-        Color4 uc = cur != null ? Theme.Mute : Theme.TextFaint;
-        Icons.Cross(g, _rUnlink.X + 18, _rUnlink.CY, 9, uc, 1.6f);
+        if (hu) g.FillRound(_rUnlink, 8, Theme.Soft(Theme.Red));
+        Color4 uc = cur != null ? Theme.Red : Theme.TextTertiary;
+        Icons.Draw(g, Icon.Close, _rUnlink.X + 20, _rUnlink.CY, 15, uc);
         float rw = 0;
         if (cur != null)
         {
             string t = cur.Title + " · " + (cur.Count == 2 ? "Stereo" : "mono");
-            rw = Math.Min(190, Renderer.MeasureWidth(t, Theme.Small) + 8);
-            g.Text(t, new RectF(_rUnlink.Right - rw - 8, _rUnlink.Y, rw, _rUnlink.H), Theme.Small, Theme.TextFaint, HAlign.Right, VAlign.Middle, true);
+            rw = Math.Min(190, Renderer.MeasureWidth(t, Theme.Callout) + 8);
+            g.Text(t, new RectF(_rUnlink.Right - rw - 10, _rUnlink.Y, rw, _rUnlink.H), Theme.Callout, Theme.TextTertiary, HAlign.Right, VAlign.Middle, true);
         }
-        g.Text("Verknüpfung lösen", new RectF(_rUnlink.X + 36, _rUnlink.Y, _rUnlink.W - 44 - (rw > 0 ? rw + 8 : 0), _rUnlink.H), Theme.Body, uc, HAlign.Left, VAlign.Middle, true);
+        g.Text("Verknüpfung lösen", new RectF(_rUnlink.X + 40, _rUnlink.Y, _rUnlink.W - 48 - (rw > 0 ? rw + 8 : 0), _rUnlink.H), Theme.Body, uc, HAlign.Left, VAlign.Middle, true);
     }
 
     void PaintRow(Renderer g, RectF r, AppProgram p, bool sel)
@@ -582,31 +601,29 @@ internal sealed class AppLinkPicker : Overlay
         var other = LinkedElsewhere(p);
         bool dis = BlockMessage(out _) != null || other != null;
         bool hot = sel && !dis;
-        g.Fill(r, hot ? Theme.Raised : Theme.Card);
-        g.StrokeRect(r, here ? Theme.Accent.With(0.8f) : hot ? Theme.BorderStrong : Theme.Border);
-        if (here) g.Fill(new RectF(r.X, r.Y, 3, r.H), Theme.Accent);
+        if (here) g.FillRound(r, 10, Theme.AccentSoft);
+        else if (hot) g.FillRound(r, 10, Theme.ControlHover);
 
-        var tile = new RectF(r.X + 12, r.CY - 14, 28, 28);
-        g.Fill(tile, p.IsPlaying && !dis ? Theme.AccentDim : Theme.Well);
-        g.StrokeRect(tile, p.IsPlaying && !dis ? Theme.Accent.With(0.6f) : Theme.Border);
+        var tile = new RectF(r.X + 10, r.CY - 16, 32, 32);
+        var tc = dis ? Theme.TextTertiary : p.IsPlaying ? Theme.AccentText : Theme.TextSecondary;
+        g.FillRound(tile, 9, dis ? Theme.Control.With(0.6f) : p.IsPlaying ? Theme.AccentSoft : Theme.Control);
         string letter = p.DisplayName.Length > 0 ? p.DisplayName[..1].ToUpperInvariant() : "?";
-        g.Text(letter, tile, Theme.BodyBold, dis ? Theme.TextFaint : p.IsPlaying ? Theme.AccentHi : Theme.TextDim, HAlign.Center, VAlign.Middle, false);
+        g.Text(letter, tile, Theme.BodyStrong, tc, HAlign.Center, VAlign.Middle, false);
 
-        float rightW = 84;
-        float tx = r.X + 50, tw = Math.Max(10, r.W - 50 - rightW - 10);
-        g.Text(p.DisplayName, new RectF(tx, r.Y + 6, tw, 18), Theme.Body, dis ? Theme.TextFaint : Theme.Text, HAlign.Left, VAlign.Middle, true);
+        float rightW = 92;
+        float tx = r.X + 54, tw = Math.Max(10, r.W - 54 - rightW - 10);
+        g.Text(p.DisplayName, new RectF(tx, r.CY - 17, tw, 18), Theme.BodyMedium, dis ? Theme.TextTertiary : Theme.Text, HAlign.Left, VAlign.Middle, true);
         string sub = p.ExeName + (p.Instances > 1 ? $" · {p.Instances} Sitzungen" : "");
-        g.Text(sub, new RectF(tx, r.Y + 25, tw, 16), Theme.Small, Theme.TextFaint, HAlign.Left, VAlign.Middle, true);
+        g.Text(sub, new RectF(tx, r.CY + 1, tw, 16), Theme.Caption, Theme.TextTertiary, HAlign.Left, VAlign.Middle, true);
 
-        // rechts: spielt / offen, darunter Zuordnung
-        var rr = new RectF(r.Right - rightW - 10, r.Y + 7, rightW, 17);
+        var rr = new RectF(r.Right - rightW - 10, r.CY - 17, rightW, 17);
         if (p.IsPlaying)
         {
-            Icons.EqBars(g, rr.Right - Renderer.MeasureWidth("spielt", Theme.Small) - 14, rr.CY, 9, dis ? Theme.TextFaint : Theme.Accent);
-            g.Text("spielt", rr, Theme.Small, dis ? Theme.TextFaint : Theme.AccentHi, HAlign.Right, VAlign.Middle, false);
+            Icons.Draw(g, Icon.Bars, rr.Right - Renderer.MeasureWidth("spielt", Theme.CaptionMedium) - 12, rr.CY, 12, dis ? Theme.TextTertiary : Theme.Green);
+            g.Text("spielt", rr, Theme.CaptionMedium, dis ? Theme.TextTertiary : Theme.Green, HAlign.Right, VAlign.Middle, false);
         }
-        else g.Text("offen", rr, Theme.Small, Theme.TextFaint, HAlign.Right, VAlign.Middle, false);
+        else g.Text("offen", rr, Theme.CaptionMedium, Theme.TextTertiary, HAlign.Right, VAlign.Middle, false);
         string? tag = here ? "gebunden" : other != null ? $"an Eingang {other.FirstChannel + 1:00}" : null;
-        if (tag != null) g.Text(tag, new RectF(r.Right - rightW - 10, r.Y + 26, rightW, 14), Theme.Tiny, here ? Theme.Accent : Theme.TextDim, HAlign.Right, VAlign.Middle, false);
+        if (tag != null) g.Text(tag, new RectF(r.Right - rightW - 10, r.CY + 1, rightW, 16), Theme.Caption, here ? Theme.AccentText : Theme.TextSecondary, HAlign.Right, VAlign.Middle, false);
     }
 }

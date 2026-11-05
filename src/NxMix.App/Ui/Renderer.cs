@@ -10,11 +10,12 @@ namespace NxMix.App.Ui;
 /// <summary>
 /// Duenne Zeichenschicht ueber Direct2D/DirectWrite. Gleiche API fuer das Fenster (HwndRenderTarget) und fuer
 /// den Offscreen-Screenshot (WIC-Bitmap). Alle Koordinaten sind DIPs; das Ziel-DPI wird am Rendertarget gesetzt.
+/// Schrift: Inter aus dem Ordner "Fonts" neben der Exe (eigene Schriftsammlung); fehlt sie, Segoe UI.
 /// </summary>
 internal sealed class Renderer : IDisposable
 {
     public static readonly ID2D1Factory1 D2D = D2D1.D2D1CreateFactory<ID2D1Factory1>(D2DFactoryType.SingleThreaded);
-    public static readonly IDWriteFactory DW = DWrite.DWriteCreateFactory<IDWriteFactory>();
+    public static readonly IDWriteFactory5 DW = DWrite.DWriteCreateFactory<IDWriteFactory5>();
 
     public ID2D1RenderTarget Rt { get; }
     /// <summary>Physische Pixel je DIP (DPI / 96).</summary>
@@ -24,10 +25,13 @@ internal sealed class Renderer : IDisposable
     readonly ID2D1StrokeStyle _round;
     ID2D1LinearGradientBrush? _meterBrush;
     ID2D1GradientStopCollection? _meterStops;
-    static readonly Dictionary<(float, FontWeight, int, int, bool, bool), IDWriteTextFormat> s_formats = new();
+    static readonly Dictionary<(float, FontWeight, int, bool, bool), IDWriteTextFormat> s_formats = new();
     static readonly Dictionary<(string, float, FontWeight), float> s_widths = new();
     readonly Dictionary<(int, int, int), ID2D1PathGeometry> _arcs = new();
-    static readonly string s_family = ResolveFamily();
+    static readonly (string Family, IDWriteFontCollection? Collection) s_font = ResolveFont();
+
+    /// <summary>Name der tatsaechlich benutzten Schrift (Inter oder Ersatz) - fuer Einstellungen/Selbsttest.</summary>
+    public static string FontName => s_font.Family;
 
     public Renderer(ID2D1RenderTarget rt, float scale, bool clearType = true)
     {
@@ -44,15 +48,36 @@ internal sealed class Renderer : IDisposable
         });
     }
 
-    static string ResolveFamily()
+    /// <summary>Laedt Inter (vier Schnitte) als eigene Schriftsammlung; sonst die erste vorhandene Systemschrift.</summary>
+    static (string, IDWriteFontCollection?) ResolveFont()
     {
         try
         {
-            using var coll = DW.GetSystemFontCollection(false);
-            if (coll.FindFamilyName(Theme.FontFamily, out _)) return Theme.FontFamily;
+            string dir = Path.Combine(AppContext.BaseDirectory, "Fonts");
+            var files = Directory.Exists(dir) ? Directory.GetFiles(dir, "Inter-*.ttf") : Array.Empty<string>();
+            if (files.Length > 0)
+            {
+                using var builder = DW.CreateFontSetBuilder();
+                foreach (var f in files)
+                {
+                    using var file = DW.CreateFontFileReference(f, null);
+                    builder.AddFontFile(file);
+                }
+                using var set = builder.CreateFontSet();
+                var coll = DW.CreateFontCollectionFromFontSet(set);
+                if (coll.FindFamilyName(Theme.FontFamily, out _)) return (Theme.FontFamily, coll);
+                coll.Dispose();
+            }
         }
-        catch { /* faellt auf Segoe UI zurueck */ }
-        return Theme.FontFamilyFallback;
+        catch { /* Ersatzschrift */ }
+        try
+        {
+            using var sys = DW.GetSystemFontCollection(false);
+            foreach (var f in Theme.FontFallbacks)
+                if (sys.FindFamilyName(f, out _)) return (f, null);
+        }
+        catch { /* letzte Rueckfallebene */ }
+        return ("Segoe UI", null);
     }
 
     // ---- Zeichnen: Flaechen ------------------------------------------------------------------
@@ -64,15 +89,15 @@ internal sealed class Renderer : IDisposable
 
     public void Fill(RectF r, Color4 c)
     {
-        if (r.IsEmpty) return;
+        if (r.IsEmpty || c.A <= 0) return;
         _solid.Color = c;
         Rt.FillRectangle(Raw(r), _solid);
     }
 
     public void FillRound(RectF r, float radius, Color4 c)
     {
-        if (r.IsEmpty) return;
-        radius = Math.Min(Math.Min(radius, Theme.MaxCorner), Math.Min(r.W, r.H) / 2);
+        if (r.IsEmpty || c.A <= 0) return;
+        radius = Math.Min(radius, Math.Min(r.W, r.H) / 2);
         _solid.Color = c;
         if (radius < 0.5f) { Rt.FillRectangle(Raw(r), _solid); return; }
         var rr = new RoundedRectangle(new System.Drawing.RectangleF(r.X, r.Y, r.W, r.H), radius, radius);
@@ -82,25 +107,21 @@ internal sealed class Renderer : IDisposable
     /// <summary>Rand INNEN an der Rechteckkante (der Strich bleibt in r).</summary>
     public void StrokeRound(RectF r, float radius, Color4 c, float width = 1f)
     {
-        if (r.IsEmpty) return;
+        if (r.IsEmpty || c.A <= 0) return;
         var i = r.Deflate(width / 2);
-        radius = Math.Max(0, Math.Min(Math.Min(radius, Theme.MaxCorner) - width / 2, Math.Min(i.W, i.H) / 2));
+        radius = Math.Max(0, Math.Min(radius - width / 2, Math.Min(i.W, i.H) / 2));
         _solid.Color = c;
         if (radius < 0.5f) { Rt.DrawRectangle(Raw(i), _solid, width); return; }
         var rr = new RoundedRectangle(new System.Drawing.RectangleF(i.X, i.Y, i.W, i.H), radius, radius);
         Rt.DrawRoundedRectangle(rr, _solid, width);
     }
 
-    public void StrokeRect(RectF r, Color4 c, float width = 1f)
-    {
-        if (r.IsEmpty) return;
-        var i = r.Deflate(width / 2);
-        _solid.Color = c;
-        Rt.DrawRectangle(Raw(i), _solid, width);
-    }
+    /// <summary>Pillenform (Radius = halbe Hoehe).</summary>
+    public void FillPill(RectF r, Color4 c) => FillRound(r, Math.Min(r.W, r.H) / 2, c);
 
     public void Line(float x1, float y1, float x2, float y2, Color4 c, float width = 1f, bool roundCaps = false)
     {
+        if (c.A <= 0) return;
         _solid.Color = c;
         if (roundCaps) Rt.DrawLine(new Vector2(x1, y1), new Vector2(x2, y2), _solid, width, _round);
         else Rt.DrawLine(new Vector2(x1, y1), new Vector2(x2, y2), _solid, width);
@@ -108,37 +129,55 @@ internal sealed class Renderer : IDisposable
 
     public void FillCircle(float cx, float cy, float r, Color4 c)
     {
+        if (c.A <= 0) return;
         _solid.Color = c;
-        // Kleine Punkte (LEDs, Status) sind eckig; nur Drehregler bleiben rund
-        if (Theme.SquareDots && r <= 5f) { Rt.FillRectangle(new RawRectF(cx - r, cy - r, cx + r, cy + r), _solid); return; }
         Rt.FillEllipse(new Ellipse(new Vector2(cx, cy), r, r), _solid);
     }
 
     public void StrokeCircle(float cx, float cy, float r, Color4 c, float width = 1f)
     {
+        if (c.A <= 0) return;
         _solid.Color = c;
         Rt.DrawEllipse(new Ellipse(new Vector2(cx, cy), r, r), _solid, width);
+    }
+
+    /// <summary>Linienzug (Symbole): Punkte in DIPs, runde Enden und Ecken.</summary>
+    public void Polyline(ReadOnlySpan<Vector2> pts, Color4 c, float width, bool closed = false, bool fill = false)
+    {
+        if (pts.Length < 2 || c.A <= 0) return;
+        using var geo = D2D.CreatePathGeometry();
+        using (var sink = geo.Open())
+        {
+            sink.BeginFigure(pts[0], fill ? FigureBegin.Filled : FigureBegin.Hollow);
+            for (int i = 1; i < pts.Length; i++) sink.AddLine(pts[i]);
+            sink.EndFigure(closed || fill ? FigureEnd.Closed : FigureEnd.Open);
+            sink.Close();
+        }
+        _solid.Color = c;
+        if (fill) Rt.FillGeometry(geo, _solid);
+        else Rt.DrawGeometry(geo, _solid, width, _round);
     }
 
     public void PushClip(RectF r) => Rt.PushAxisAlignedClip(Raw(r), AntialiasMode.Aliased);
     public void PopClip() => Rt.PopAxisAlignedClip();
 
-    /// <summary>Weicher Schatten: mehrere abgestufte transparente Rundrechtecke.</summary>
-    public void Shadow(RectF r, float radius, float spread, float alpha, float dy = 2f)
+    /// <summary>Weicher Schatten: mehrere abgestufte transparente Rundrechtecke unter r.</summary>
+    public void Shadow(RectF r, float radius, float blur, float strength = 1f, float dy = 2f)
     {
-        if (!Theme.Shadows) return;
-        const int steps = 4;
+        var baseC = Theme.ShadowColor;
+        const int steps = 6;
         for (int i = steps; i >= 1; i--)
         {
-            float g = spread * i / steps;
-            FillRound(r.Inflate(g).Offset(0, dy), radius + g, new Color4(0, 0, 0, alpha / steps * 0.9f));
+            float g = blur * i / steps;
+            float a = baseC.A * strength * 0.22f * (1f - (i - 1f) / steps);
+            FillRound(r.Inflate(g).Offset(0, dy), radius + g, baseC.With(a));
         }
     }
 
     /// <summary>Zeichnet einen Bogen (Grad, 0 = rechts, im Uhrzeigersinn positiv) als Linienzug; Geometrie wird zwischengespeichert.</summary>
     public void Arc(float cx, float cy, float radius, float startDeg, float sweepDeg, Color4 c, float width)
     {
-        if (MathF.Abs(sweepDeg) < 0.5f) return;
+        if (MathF.Abs(sweepDeg) < 0.5f || c.A <= 0) return;
         var key = ((int)MathF.Round(radius * 8), (int)MathF.Round(startDeg * 4), (int)MathF.Round(sweepDeg * 4));
         if (!_arcs.TryGetValue(key, out var geo))
         {
@@ -164,7 +203,7 @@ internal sealed class Renderer : IDisposable
     }
 
     /// <summary>Senkrechter Meter-Balken mit dem Verlauf aus <see cref="Theme.MeterStops"/> (unten = Pos 0).</summary>
-    public void FillMeterGradient(RectF bar, float bottom, float fullHeight, float opacity = 1f)
+    public void FillMeterGradient(RectF bar, float bottom, float fullHeight, float radius = 0f)
     {
         if (bar.IsEmpty) return;
         if (_meterBrush == null)
@@ -175,24 +214,21 @@ internal sealed class Renderer : IDisposable
             _meterBrush = Rt.CreateLinearGradientBrush(new LinearGradientBrushProperties(new Vector2(0, 0), new Vector2(0, 1)), _meterStops);
         }
         _meterBrush.Transform = Matrix3x2.CreateScale(1f, -fullHeight) * Matrix3x2.CreateTranslation(0, bottom);
-        _meterBrush.Opacity = opacity;
-        Rt.FillRectangle(Raw(bar), _meterBrush);
-        if (Theme.MeterSegmentPx > 0)
+        radius = Math.Min(radius, Math.Min(bar.W, bar.H) / 2);
+        if (radius < 0.5f) Rt.FillRectangle(Raw(bar), _meterBrush);
+        else
         {
-            // LED-Leiter: duenne schwarze Trennstriche ueber den Balken
-            _solid.Color = Theme.Well;
-            float step = Theme.MeterSegmentPx;
-            for (float y = bottom - step; y > bar.Y; y -= step)
-                if (y < bar.Bottom) Rt.FillRectangle(new RawRectF(bar.X, y - 0.75f, bar.Right, y + 0.75f), _solid);
+            var rr = new RoundedRectangle(new System.Drawing.RectangleF(bar.X, bar.Y, bar.W, bar.H), radius, radius);
+            Rt.FillRoundedRectangle(ref rr, _meterBrush);
         }
     }
 
     // ---- Text --------------------------------------------------------------------------------
     static IDWriteTextFormat GetFormat(TextStyle st, HAlign h, VAlign v, bool ellipsis, bool wrap)
     {
-        var key = (st.Size, st.Weight, (int)h * 3 + (int)v, 0, ellipsis, wrap);
+        var key = (st.Size, st.Weight, (int)h * 3 + (int)v, ellipsis, wrap);
         if (s_formats.TryGetValue(key, out var f)) return f;
-        f = DW.CreateTextFormat(s_family, null, st.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, st.Size, "de-de");
+        f = DW.CreateTextFormat(s_font.Family, s_font.Collection, st.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, st.Size, "de-de");
         f.TextAlignment = h switch { HAlign.Left => TextAlignment.Leading, HAlign.Center => TextAlignment.Center, _ => TextAlignment.Trailing };
         f.ParagraphAlignment = v switch { VAlign.Top => ParagraphAlignment.Near, VAlign.Middle => ParagraphAlignment.Center, _ => ParagraphAlignment.Far };
         f.WordWrapping = wrap ? WordWrapping.Wrap : WordWrapping.NoWrap;
@@ -208,7 +244,7 @@ internal sealed class Renderer : IDisposable
     public void Text(string? s, RectF r, TextStyle st, Color4 c, HAlign h = HAlign.Left, VAlign v = VAlign.Middle,
         bool ellipsis = true, bool wrap = false)
     {
-        if (string.IsNullOrEmpty(s) || r.W < 1 || r.H < 1) return;
+        if (string.IsNullOrEmpty(s) || r.W < 1 || r.H < 1 || c.A <= 0) return;
         var fmt = GetFormat(st, h, v, ellipsis, wrap);
         _solid.Color = c;
         Rt.DrawText(s, fmt, new Rect(r.X, r.Y, r.W, r.H), _solid, DrawTextOptions.Clip);
@@ -221,8 +257,8 @@ internal sealed class Renderer : IDisposable
         if (s_widths.TryGetValue(key, out var w)) return w;
         var fmt = GetFormat(st, HAlign.Left, VAlign.Top, false, false);
         using var layout = DW.CreateTextLayout(s, fmt, 4096f, 256f);
-        w = layout.Metrics.Width;
-        if (s_widths.Count > 2000) s_widths.Clear();
+        w = layout.Metrics.WidthIncludingTrailingWhitespace;
+        if (s_widths.Count > 4000) s_widths.Clear();
         s_widths[key] = w;
         return w;
     }

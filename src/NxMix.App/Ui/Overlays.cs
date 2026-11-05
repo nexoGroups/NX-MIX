@@ -3,225 +3,6 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Ui;
 
-/// <summary>Eigener Mini-Texteditor (eine Zeile): Caret, Auswahl, Maus, Zwischenablage. Ohne Windows-Edit-Steuerelement.</summary>
-internal sealed class TextEditor : Widget
-{
-    string _text = "";
-    int _caret, _anchor;
-    float _scroll;
-    Action<string>? _commit;
-    TextStyle _style = Theme.Body;
-    HAlign _align;
-    int _maxLen = 40;
-    Func<char, bool>? _filter;
-    double _blink;
-    bool _caretOn = true;
-
-    public bool Active { get; private set; }
-    /// <summary>Aktueller Inhalt (fuer Filterfelder, die bei jeder Taste mitlesen).</summary>
-    public string Text => _text;
-    public override bool AcceptsMouse => Active;
-    public override CursorKind CursorAt(float x, float y) => CursorKind.IBeam;
-
-    public void Begin(RectF bounds, string text, TextStyle style, Action<string> commit, int maxLen, Func<char, bool>? filter, HAlign align = HAlign.Left)
-    {
-        if (Active) Commit();
-        Bounds = bounds;
-        _text = text ?? "";
-        _style = style; _commit = commit; _maxLen = maxLen; _filter = filter; _align = align;
-        _anchor = 0; _caret = _text.Length;
-        _scroll = 0; _blink = 0; _caretOn = true;
-        Active = true;
-        Visible = true;
-        Invalidate();
-    }
-
-    public void Commit()
-    {
-        if (!Active) return;
-        Active = false;
-        var cb = _commit; _commit = null;
-        Invalidate();
-        cb?.Invoke(_text);
-    }
-
-    public void Cancel()
-    {
-        if (!Active) return;
-        Active = false; _commit = null;
-        Invalidate();
-    }
-
-    /// <summary>Caret-Blinken. true = neu zeichnen.</summary>
-    public bool Tick(float dt)
-    {
-        _blink += dt;
-        bool on = ((int)(_blink / 0.53)) % 2 == 0;
-        if (on != _caretOn) { _caretOn = on; return true; }
-        return false;
-    }
-
-    bool HasSel => _caret != _anchor;
-    int SelStart => Math.Min(_caret, _anchor);
-    int SelEnd => Math.Max(_caret, _anchor);
-
-    void DeleteSel()
-    {
-        if (!HasSel) return;
-        int s = SelStart, e = SelEnd;
-        _text = _text.Remove(s, e - s);
-        _caret = _anchor = s;
-    }
-
-    void Insert(string s)
-    {
-        DeleteSel();
-        var sb = new System.Text.StringBuilder();
-        foreach (char c in s) if (c >= ' ' && (_filter == null || _filter(c))) sb.Append(c);
-        string ins = sb.ToString();
-        int room = _maxLen - _text.Length;
-        if (room <= 0) return;
-        if (ins.Length > room) ins = ins[..room];
-        _text = _text.Insert(_caret, ins);
-        _caret = _anchor = _caret + ins.Length;
-        ResetBlink();
-    }
-
-    void ResetBlink() { _blink = 0; _caretOn = true; }
-
-    public void OnChar(char c)
-    {
-        if (c < ' ' || c == 0x7F) return;
-        Insert(c.ToString());
-    }
-
-    public void OnKeyDown(int vk, bool ctrl, bool shift)
-    {
-        ResetBlink();
-        switch (vk)
-        {
-            case Win32.VK_RETURN: Commit(); return;
-            case Win32.VK_TAB: Commit(); return;
-            case Win32.VK_ESCAPE: Cancel(); return;
-            case Win32.VK_LEFT:
-                if (HasSel && !shift) _caret = _anchor = SelStart;
-                else { _caret = ctrl ? WordLeft(_caret) : Math.Max(0, _caret - 1); if (!shift) _anchor = _caret; }
-                return;
-            case Win32.VK_RIGHT:
-                if (HasSel && !shift) _caret = _anchor = SelEnd;
-                else { _caret = ctrl ? WordRight(_caret) : Math.Min(_text.Length, _caret + 1); if (!shift) _anchor = _caret; }
-                return;
-            case Win32.VK_HOME: _caret = 0; if (!shift) _anchor = 0; return;
-            case Win32.VK_END: _caret = _text.Length; if (!shift) _anchor = _caret; return;
-            case Win32.VK_BACK:
-                if (HasSel) DeleteSel();
-                else if (_caret > 0) { _text = _text.Remove(_caret - 1, 1); _caret = _anchor = _caret - 1; }
-                return;
-            case Win32.VK_DELETE:
-                if (HasSel) DeleteSel();
-                else if (_caret < _text.Length) _text = _text.Remove(_caret, 1);
-                return;
-            case 'A' when ctrl: _anchor = 0; _caret = _text.Length; return;
-            case 'C' when ctrl: if (HasSel) Win32.SetClipboardText(_text[SelStart..SelEnd]); return;
-            case 'X' when ctrl:
-                if (HasSel) { Win32.SetClipboardText(_text[SelStart..SelEnd]); DeleteSel(); }
-                return;
-            case 'V' when ctrl:
-                { var t = Win32.GetClipboardText(); if (!string.IsNullOrEmpty(t)) Insert(t.Replace("\r", "").Replace("\n", " ")); }
-                return;
-        }
-    }
-
-    int WordLeft(int p)
-    {
-        while (p > 0 && _text[p - 1] == ' ') p--;
-        while (p > 0 && _text[p - 1] != ' ') p--;
-        return p;
-    }
-
-    int WordRight(int p)
-    {
-        while (p < _text.Length && _text[p] != ' ') p++;
-        while (p < _text.Length && _text[p] == ' ') p++;
-        return p;
-    }
-
-    // ---- Maus ----------------------------------------------------------------------------------
-    int HitIndex(float x)
-    {
-        var g = LastRenderer;
-        if (g == null) return _text.Length;
-        using var layout = g.CreateLayout(_text, _style);
-        float lx = x - (Bounds.X + 7) + _scroll - AlignOffset(layout);
-        layout.HitTestPoint(Math.Max(0, lx), 1, out var trailing, out _, out var m);
-        int idx = (int)m.TextPosition + (trailing ? 1 : 0);
-        return Math.Clamp(idx, 0, _text.Length);
-    }
-
-    float AlignOffset(Vortice.DirectWrite.IDWriteTextLayout layout)
-    {
-        float inner = Bounds.W - 14;
-        float w = layout.Metrics.Width;
-        if (w >= inner) return 0;
-        return _align switch { HAlign.Center => (inner - w) / 2, HAlign.Right => inner - w, _ => 0 };
-    }
-
-    Renderer? LastRenderer;
-
-    public override void OnMouseDown(in MouseEvent e)
-    {
-        if (e.Clicks >= 2) { _anchor = 0; _caret = _text.Length; return; }
-        _caret = HitIndex(e.X);
-        if (!e.Shift) _anchor = _caret;
-        ResetBlink();
-    }
-
-    public override void OnMouseMove(in MouseEvent e)
-    {
-        if (!IsPressed) return;
-        _caret = HitIndex(e.X);
-        ResetBlink();
-        Invalidate();
-    }
-
-    // ---- Zeichnen ------------------------------------------------------------------------------
-    public override void Paint(Renderer g)
-    {
-        if (!Active) return;
-        LastRenderer = g;
-        var b = Bounds;
-        g.Shadow(b, 6, 8, 0.45f, 2);
-        g.FillRound(b, 6, Theme.Well);
-        g.StrokeRound(b, 6, Theme.Accent, 1.5f);
-        var inner = new RectF(b.X + 7, b.Y + 1, b.W - 14, b.H - 2);
-
-        using var layout = g.CreateLayout(_text, _style);
-        float textH = layout.Metrics.Height;
-        float textW = _text.Length == 0 ? 0 : layout.Metrics.Width;
-        float ty = inner.Y + (inner.H - textH) / 2;
-
-        layout.HitTestTextPosition((uint)_caret, false, out float cx, out _, out _);
-        if (cx - _scroll > inner.W - 2) _scroll = cx - inner.W + 2;
-        if (cx - _scroll < 0) _scroll = cx;
-        if (textW <= inner.W) _scroll = 0;
-        float off = textW < inner.W ? AlignOffset(layout) : 0;
-        float x0 = inner.X - _scroll + off;
-
-        g.PushClip(inner);
-        if (HasSel)
-        {
-            layout.HitTestTextPosition((uint)SelStart, false, out float sx, out _, out _);
-            layout.HitTestTextPosition((uint)SelEnd, false, out float ex, out _, out _);
-            g.Fill(new RectF(x0 + sx, inner.Y + 3, ex - sx, inner.H - 6), Theme.Accent.With(0.38f));
-        }
-        if (_text.Length > 0) g.DrawLayout(layout, x0, ty, Theme.Text);
-        if (_caretOn) g.Fill(new RectF(MathF.Floor((x0 + cx) * g.Scale) / g.Scale, inner.Y + 4, 1.4f, inner.H - 8), Theme.AccentHi);
-        g.PopClip();
-    }
-}
-
-// ================================================================================================
-
 internal sealed class MenuItem
 {
     public string Text;
@@ -229,64 +10,80 @@ internal sealed class MenuItem
     public Action? Action;
     public bool Enabled = true;
     public bool IsSeparator;
+    /// <summary>Graue Zwischenueberschrift (nicht waehlbar).</summary>
+    public bool IsHeader;
     public bool Checked;
     public bool Danger;
+    public Icon Icon;
 
     public MenuItem(string text, string? shortcut, Action? action, bool enabled = true) { Text = text; Shortcut = shortcut; Action = action; Enabled = enabled; }
     public static MenuItem Sep => new("", null, null) { IsSeparator = true };
+    public static MenuItem Header(string text) => new(text, null, null, false) { IsHeader = true };
 }
 
-/// <summary>Aufklappmenue (Kontextmenue, Auswahlliste). Schliesst bei Klick daneben oder Esc.</summary>
+/// <summary>Aufklappmenue (Apple-Stil, schwebend mit Schatten). Schliesst bei Klick daneben oder Esc.</summary>
 internal sealed class PopupMenu : Overlay
 {
     readonly List<MenuItem> _items;
-    RectF _anchor;
+    readonly RectF _anchor;
+    readonly float _minWidth;
     RectF _box;
     int _hover = -1;
-    float _minWidth;
-    const float ItemH = 30f, SepH = 9f, Pad = 6f;
+    float _t;
+    static float ItemH => Theme.MenuItemH;
+    const float SepH = 9f, Pad = 5f;
+    float HeaderH => Theme.Touch ? 30 : 24;
 
     PopupMenu(RectF anchor, List<MenuItem> items, float minWidth) { _anchor = anchor; _items = items; _minWidth = minWidth; }
 
-    public static void Show(UiRoot root, RectF anchor, List<MenuItem> items, float minWidth = 0)
+    public static PopupMenu Show(UiRoot root, RectF anchor, List<MenuItem> items, float minWidth = 0)
     {
         var m = new PopupMenu(anchor, items, minWidth);
         root.ShowOverlay(m);
+        return m;
     }
+
+    public IReadOnlyList<MenuItem> Items => _items;
+
+    float H(MenuItem it) => it.IsSeparator ? SepH : it.IsHeader ? HeaderH : ItemH;
+    bool HasIcons => _items.Any(i => i.Icon != Icon.None || i.Checked);
 
     public override void Layout()
     {
-        float w = Math.Max(_minWidth, 150);
+        float w = Math.Max(_minWidth, 180);
         foreach (var it in _items)
         {
-            float tw = Renderer.MeasureWidth(it.Text, Theme.Body) + 36;
-            if (it.Shortcut != null) tw += Renderer.MeasureWidth(it.Shortcut, Theme.Small) + 28;
+            float tw = Renderer.MeasureWidth(it.Text, it.IsHeader ? Theme.CaptionStrong : Theme.Body) + 24 + (HasIcons ? 26 : 0);
+            if (it.Shortcut != null) tw += Renderer.MeasureWidth(it.Shortcut, Theme.Callout) + 28;
             w = Math.Max(w, tw);
         }
-        float h = Pad * 2 + _items.Sum(i => i.IsSeparator ? SepH : ItemH);
-        float x = _anchor.X, y = _anchor.Bottom + 4;
+        float h = Pad * 2 + _items.Sum(H);
+        float x = _anchor.X, y = _anchor.Bottom + 6;
         if (x + w > Bounds.W - 8) x = Bounds.W - 8 - w;
         if (x < 8) x = 8;
-        if (y + h > Bounds.H - 8) y = Math.Max(8, _anchor.Y - 4 - h);
+        if (y + h > Bounds.H - 8) y = Math.Max(8, _anchor.Y - 6 - h);
         _box = new RectF(x, y, w, h);
     }
 
     RectF ItemRect(int idx)
     {
         float y = _box.Y + Pad;
-        for (int i = 0; i < idx; i++) y += _items[i].IsSeparator ? SepH : ItemH;
-        return new RectF(_box.X + Pad, y, _box.W - Pad * 2, _items[idx].IsSeparator ? SepH : ItemH);
+        for (int i = 0; i < idx; i++) y += H(_items[i]);
+        return new RectF(_box.X + Pad, y, _box.W - Pad * 2, H(_items[idx]));
     }
+
+    public int IndexOf(string text) => _items.FindIndex(i => i.Text == text);
+    public RectF RectOf(int idx) => ItemRect(idx);
 
     int IndexAt(float x, float y)
     {
         if (!_box.Contains(x, y)) return -1;
         for (int i = 0; i < _items.Count; i++)
-            if (!_items[i].IsSeparator && ItemRect(i).Contains(x, y)) return i;
+            if (!_items[i].IsSeparator && !_items[i].IsHeader && ItemRect(i).Contains(x, y)) return i;
         return -1;
     }
 
-    public override CursorKind CursorAt(float x, float y) => IndexAt(x, y) >= 0 && _items[IndexAt(x, y)].Enabled ? CursorKind.Hand : CursorKind.Arrow;
+    public override CursorKind CursorAt(float x, float y) { int i = IndexAt(x, y); return i >= 0 && _items[i].Enabled ? CursorKind.Hand : CursorKind.Arrow; }
 
     public override void OnMouseMove(in MouseEvent e)
     {
@@ -333,49 +130,72 @@ internal sealed class PopupMenu : Overlay
         for (int n = 0; n < _items.Count; n++)
         {
             i = ((i < 0 ? (d > 0 ? -1 : 0) : i) + d + _items.Count) % _items.Count;
-            if (!_items[i].IsSeparator && _items[i].Enabled) { _hover = i; break; }
+            if (!_items[i].IsSeparator && !_items[i].IsHeader && _items[i].Enabled) { _hover = i; break; }
         }
         Invalidate();
     }
 
+    public override bool Tick(float dt)
+    {
+        if (_t >= 1) return false;
+        _t = Math.Min(1, _t + dt / 0.12f);
+        return true;
+    }
+
     public override void Paint(Renderer g)
     {
-        g.Shadow(_box, 10, 14, 0.5f, 4);
-        g.FillRound(_box, 10, Theme.Rgb(0x1F2227));
-        g.StrokeRound(_box, 10, Theme.BorderStrong);
+        float a = 1 - MathF.Pow(1 - _t, 3);
+        var box = _box.Offset(0, (1 - a) * -4);
+        g.Shadow(box, 12, 16, 1.4f * a, 6);
+        g.FillRound(box, 12, Theme.Elevated);
+        g.StrokeRound(box, 12, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        bool icons = HasIcons;
         for (int i = 0; i < _items.Count; i++)
         {
             var it = _items[i];
-            var r = ItemRect(i);
-            if (it.IsSeparator) { g.Fill(new RectF(r.X + 6, r.CY, r.W - 12, 1), Theme.Border); continue; }
+            var r = ItemRect(i).Offset(0, box.Y - _box.Y);
+            if (it.IsSeparator) { g.Fill(new RectF(r.X + 8, r.CY, r.W - 16, 1), Theme.Separator); continue; }
+            if (it.IsHeader)
+            {
+                g.Text(it.Text, new RectF(r.X + 10, r.Y + 2, r.W - 20, r.H), Theme.CaptionStrong, Theme.TextTertiary, HAlign.Left, VAlign.Middle, true);
+                continue;
+            }
             bool hot = i == _hover && it.Enabled;
-            if (hot) g.FillRound(r, 6, it.Danger ? Theme.Mute.With(0.18f) : Theme.Accent.With(0.18f));
-            var col = !it.Enabled ? Theme.TextFaint : it.Danger ? Theme.Mute : Theme.Text;
-            if (it.Checked) Icons.Chevron(g, r.X + 14, r.CY, 7, Theme.Accent, 0, 2f);
-            g.Text(it.Text, new RectF(r.X + 28, r.Y, r.W - 36, r.H), Theme.Body, col);
-            if (it.Shortcut != null) g.Text(it.Shortcut, new RectF(r.X, r.Y, r.W - 12, r.H), Theme.Small, Theme.TextFaint, HAlign.Right);
+            if (hot) g.FillRound(r, 7, it.Danger ? Theme.Soft(Theme.Red) : Theme.Accent);
+            var col = !it.Enabled ? Theme.TextTertiary : it.Danger ? Theme.Red : hot ? Theme.OnAccent : Theme.Text;
+            float tx = r.X + 10;
+            if (icons)
+            {
+                if (it.Checked) Icons.Draw(g, Icon.Check, r.X + 18, r.CY, 15, hot ? Theme.OnAccent : Theme.AccentText);
+                else if (it.Icon != Icon.None) Icons.Draw(g, it.Icon, r.X + 18, r.CY, 16, it.Danger && it.Enabled ? Theme.Red : hot ? Theme.OnAccent : it.Enabled ? Theme.TextSecondary : Theme.TextTertiary);
+                tx = r.X + 34;
+            }
+            g.Text(it.Text, new RectF(tx, r.Y, r.Right - tx - 10, r.H), Theme.Body, col);
+            if (it.Shortcut != null) g.Text(it.Shortcut, new RectF(r.X, r.Y, r.W - 10, r.H), Theme.Callout, hot ? Theme.OnAccent.With(0.8f) : Theme.TextTertiary, HAlign.Right);
         }
     }
 }
 
-// ================================================================================================
-
-/// <summary>Bestaetigungsdialog (modal): Titel, Text, Tasten. Enter = Vorgabe, Esc = erste Taste (Abbrechen).</summary>
+/// <summary>Hinweis-/Bestaetigungsdialog (modal, Apple-Alert): Titel, Text, Tasten. Enter = Vorgabe, Esc = erste Taste.</summary>
 internal sealed class ModalDialog : Overlay
 {
     readonly string _title, _message;
     readonly string[] _buttons;
     readonly int _default, _danger;
     readonly Action<int> _result;
+    readonly Icon _icon;
     RectF _box;
     RectF[] _btnRects = Array.Empty<RectF>();
     int _hover = -1, _press = -1;
+    float _t;
 
-    ModalDialog(string title, string message, string[] buttons, int def, int danger, Action<int> result)
-    { _title = title; _message = message; _buttons = buttons; _default = def; _danger = danger; _result = result; }
+    ModalDialog(string title, string message, string[] buttons, int def, int danger, Action<int> result, Icon icon)
+    { _title = title; _message = message; _buttons = buttons; _default = def; _danger = danger; _result = result; _icon = icon; }
 
-    public static void Show(UiRoot root, string title, string message, string[] buttons, int defaultButton, int dangerButton, Action<int> result) =>
-        root.ShowOverlay(new ModalDialog(title, message, buttons, defaultButton, dangerButton, result));
+    public static void Show(UiRoot root, string title, string message, string[] buttons, int defaultButton, int dangerButton, Action<int> result, Icon icon = Icon.None) =>
+        root.ShowOverlay(new ModalDialog(title, message, buttons, defaultButton, dangerButton, result, icon));
+
+    public string TitleText => _title;
 
     void Finish(int idx)
     {
@@ -405,43 +225,163 @@ internal sealed class ModalDialog : Overlay
         else if (vk == Win32.VK_RETURN) Finish(_default);
     }
 
-    public override void Paint(Renderer g)
+    public override bool Tick(float dt)
+    {
+        if (_t >= 1) return false;
+        _t = Math.Min(1, _t + dt / 0.16f);
+        return true;
+    }
+
+    public override void Layout()
     {
         var b = Bounds;
-        g.Fill(b, new Color4(0, 0, 0, 0.62f));
-        float w = Math.Min(460, b.W - 40);
+        float w = Math.Min(Theme.Touch ? 500 : 460, b.W - 40);
         float textW = w - 48;
         float mh = Renderer.TextHeight(_message, Theme.Body, textW);
-        float h = 24 + 24 + 14 + mh + 26 + 38 + 22;
-        _box = RectF.Centered(b.CX, b.CY, w, h);
-        g.Shadow(_box, 14, 24, 0.6f, 8);
-        g.FillRound(_box, 14, Theme.Rgb(0x1B1E23));
-        g.StrokeRound(_box, 14, Theme.BorderStrong);
-        g.Text(_title, new RectF(_box.X + 24, _box.Y + 20, textW, 26), Theme.Heading, Theme.Text);
-        g.Text(_message, new RectF(_box.X + 24, _box.Y + 58, textW, mh + 4), Theme.Body, Theme.TextDim, HAlign.Left, VAlign.Top, false, true);
-
-        // Tasten rechts unten
+        float bh = Theme.ControlH;
+        float h = 24 + (_icon != Icon.None ? 52 : 0) + 26 + 10 + mh + 24 + bh + 20;
+        _box = RectF.Centered(b.CX, b.CY, w, Math.Min(h, b.H - 40));
         _btnRects = new RectF[_buttons.Length];
         float x = _box.Right - 24;
-        float by = _box.Bottom - 22 - 38;
+        float by = _box.Bottom - 20 - bh;
         for (int i = _buttons.Length - 1; i >= 0; i--)
         {
-            float bw = Math.Max(96, Renderer.MeasureWidth(_buttons[i], Theme.BodyBold) + 40);
+            float bw = Math.Max(96, Renderer.MeasureWidth(_buttons[i], Theme.BodyMedium) + 32);
             x -= bw;
-            _btnRects[i] = new RectF(x, by, bw, 38);
+            _btnRects[i] = new RectF(x, by, bw, bh);
             x -= 10;
         }
+    }
+
+    public override void Paint(Renderer g)
+    {
+        float a = 1 - MathF.Pow(1 - _t, 3);
+        g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * a));
+        var box = _box;
+        g.Shadow(box, 16, 28, 1.6f * a, 10);
+        g.FillRound(box, 16, Theme.Elevated);
+        g.StrokeRound(box, 16, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        float y = box.Y + 24;
+        if (_icon != Icon.None)
+        {
+            var ic = _danger >= 0 ? Theme.Red : _icon == Icon.Warn ? Theme.Orange : Theme.AccentText;
+            g.FillRound(new RectF(box.X + 24, y, 40, 40), 10, Theme.Soft(ic));
+            Icons.Draw(g, _icon, box.X + 44, y + 20, 22, ic);
+            y += 52;
+        }
+        float textW = box.W - 48;
+        g.Text(_title, new RectF(box.X + 24, y, textW, 26), Theme.Title, Theme.Text);
+        y += 36;
+        float mh = Renderer.TextHeight(_message, Theme.Body, textW);
+        g.Text(_message, new RectF(box.X + 24, y, textW, mh + 4), Theme.Body, Theme.TextSecondary, HAlign.Left, VAlign.Top, false, true);
+
         for (int i = 0; i < _buttons.Length; i++)
         {
-            var r = _btnRects[i];
-            bool primary = i == _default;
-            bool danger = i == _danger;
-            bool hot = i == _hover;
-            Color4 bg = danger ? Theme.Mute : primary ? Theme.Accent : Theme.Raised;
-            if (hot) bg = Theme.Mix(bg, Theme.White, 0.14f);
-            if (_press == i) bg = Theme.Mix(bg, Theme.Black, 0.2f);
-            g.FillRound(r, 8, bg);
-            g.Text(_buttons[i], r, Theme.BodyBold, primary || danger ? Theme.OnAccent : Theme.Text, HAlign.Center);
+            var style = i == _danger ? ButtonStyle.Destructive : i == _default ? ButtonStyle.Filled : ButtonStyle.Gray;
+            Draw.ButtonLook(g, _btnRects[i], _buttons[i], style, true, i == _hover, _press == i, font: Theme.BodyMedium);
         }
+    }
+}
+
+/// <summary>
+/// Seitenblatt rechts (Inspektor wie bei UniFi/Apple): schwebt ueber dem Inhalt, Klick daneben oder Esc schliesst.
+/// Unterklassen setzen ihre Bedienelemente als Kinder in <see cref="Panel"/>.
+/// </summary>
+internal abstract class SheetOverlay : Overlay
+{
+    float _t;
+    readonly VScroll _sc = new();
+    protected RectF Panel { get; private set; }
+    protected RectF Body { get; private set; }
+    protected float ScrollOffset => _sc.Offset;
+    protected const float HeaderH = 74f;
+
+    public override void Layout()
+    {
+        var b = Bounds;
+        float top = Root?.Top.Bounds.Bottom ?? 0;
+        float w = Math.Min(Theme.SheetW, b.W - 40);
+        Panel = new RectF(b.Right - w - 12, top + 8, w, Math.Max(100, b.Bottom - top - 20));
+        Body = new RectF(Panel.X, Panel.Y + HeaderH, Panel.W, Math.Max(0, Panel.H - HeaderH));
+        float contentH = LayoutBody(Body.X + 20, Body.Y + 4 - _sc.Offset, Body.W - 40);
+        _sc.Update(Body, contentH + 24);
+        if (_sc.Offset > 0 && _sc.Offset > Math.Max(0, contentH + 24 - Body.H))
+        {
+            _sc.Update(Body, contentH + 24);
+            LayoutBody(Body.X + 20, Body.Y + 4 - _sc.Offset, Body.W - 40);
+        }
+    }
+
+    /// <summary>Verteilt die Kinder ab (x, y) mit Breite w und liefert die Inhaltshoehe.</summary>
+    protected abstract float LayoutBody(float x, float y, float w);
+    protected abstract void PaintHeader(Renderer g, RectF header);
+    protected abstract void PaintBody(Renderer g);
+
+    public override Widget? HitTest(float x, float y)
+    {
+        if (!Visible) return null;
+        if (Body.Contains(x, y) || Panel.Contains(x, y))
+        {
+            for (int i = Children.Count - 1; i >= 0; i--)
+            {
+                var c = Children[i];
+                if (!c.Visible) continue;
+                // Kinder im Inhaltsbereich nur innerhalb des sichtbaren Ausschnitts
+                if (c.Bounds.Y >= Body.Y - 1 && !Body.Contains(x, y)) continue;
+                var h = c.HitTest(x, y);
+                if (h != null) return h;
+            }
+        }
+        return this;
+    }
+
+    public override void OnMouseDown(in MouseEvent e)
+    {
+        if (!Panel.Contains(e.X, e.Y)) { Close(); return; }
+        if (_sc.Down(e.X, e.Y)) { Layout(); Invalidate(); }
+    }
+
+    public override void OnMouseMove(in MouseEvent e)
+    {
+        if (_sc.Dragging && IsPressed) { _sc.Drag(e.Y); Layout(); Invalidate(); }
+    }
+
+    public override void OnMouseUp(in MouseEvent e) { if (_sc.Dragging) { _sc.Up(); Invalidate(); } }
+
+    public override bool OnMouseWheel(in MouseEvent e)
+    {
+        if (_sc.Wheel(e.Wheel)) { Layout(); Invalidate(); }
+        return true;
+    }
+
+    public override void OnKeyDown(int vk, bool ctrl, bool shift)
+    {
+        if (vk == Win32.VK_ESCAPE) Close();
+    }
+
+    public override bool Tick(float dt)
+    {
+        if (_t >= 1) return false;
+        _t = Math.Min(1, _t + dt / 0.18f);
+        return true;
+    }
+
+    public override void Paint(Renderer g)
+    {
+        float a = 1 - MathF.Pow(1 - _t, 3);
+        g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * 0.55f * a));
+        var p = Panel;
+        g.Shadow(p, 16, 24, 1.5f * a, 8);
+        g.FillRound(p, 16, Theme.Elevated);
+        g.StrokeRound(p, 16, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        PaintHeader(g, new RectF(p.X, p.Y, p.W, HeaderH));
+        g.Fill(new RectF(p.X, p.Y + HeaderH - 1, p.W, 1), Theme.Separator);
+        // Kopf-Elemente (Name, Pfeile, Schliessen) ungeschnitten, Inhalt im scrollbaren Ausschnitt
+        foreach (var c in Children) if (c.Visible && c.Bounds.Bottom <= Body.Y + 1 && c.Bounds.Y >= p.Y) c.Paint(g);
+        g.PushClip(Body.Deflate(1, 0, 1, 8));
+        PaintBody(g);
+        foreach (var c in Children) if (c.Visible && !(c.Bounds.Bottom <= Body.Y + 1 && c.Bounds.Y >= p.Y)) c.Paint(g);
+        g.PopClip();
+        _sc.Paint(g);
     }
 }

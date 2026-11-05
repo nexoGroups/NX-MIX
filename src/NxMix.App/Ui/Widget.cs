@@ -24,19 +24,11 @@ internal abstract class Widget
     public bool Visible { get; set; } = true;
     public bool Enabled { get; set; } = true;
     public string? Tooltip { get; set; }
-    /// <summary>Kurzer Hinweis fuer die Statusleiste.</summary>
-    public string? Hint { get; set; }
     public CursorKind Cursor { get; set; } = CursorKind.Arrow;
 
     public virtual UiRoot? Root => Parent?.Root;
 
     public T Add<T>(T w) where T : Widget { w.Parent = this; Children.Add(w); return w; }
-
-    public void ClearChildren()
-    {
-        foreach (var c in Children) c.Parent = null;
-        Children.Clear();
-    }
 
     public void Invalidate() => Root?.Invalidate();
 
@@ -62,7 +54,6 @@ internal abstract class Widget
     }
 
     public virtual string? TooltipAt(float x, float y) => Tooltip;
-    public virtual string? HintAt(float x, float y) => Hint;
     public virtual CursorKind CursorAt(float x, float y) => Enabled ? Cursor : CursorKind.Arrow;
 
     public virtual void OnMouseEnter() { }
@@ -76,15 +67,21 @@ internal abstract class Widget
     public bool IsPressed => Root?.Captured == this;
 }
 
-/// <summary>Eine Seite der Tab-Leiste.</summary>
+/// <summary>Eine Seite der Navigation.</summary>
 internal abstract class Page : Widget
 {
     public abstract string Title { get; }
+    /// <summary>Zweite Zeile in der Kopfleiste (z. B. Kanalzahlen).</summary>
+    public virtual string? Subtitle => null;
+    public abstract Icon Icon { get; }
     public virtual void OnShow() { }
     public virtual void Tick(float dt) { }
 }
 
-/// <summary>Vollflaechige Ebene ueber allem (Menue, Dialog). Faengt alle Eingaben ab.</summary>
+/// <summary>
+/// Ebene ueber der Oberflaeche (Menue, Dialog, Seitenblatt). Liegt auf einem Stapel; nur die oberste bekommt Eingaben.
+/// Kind-Widgets der Ebene werden wie normale Widgets bedient (Hover, Ziehen, Tooltip).
+/// </summary>
 internal abstract class Overlay : Widget
 {
     public override bool AcceptsMouse => true;

@@ -23,14 +23,6 @@ internal static class SelfTest
         Log.AppendLine((ok ? "OK   " : "FAIL ") + name + (ok || detail.Length == 0 ? "" : "  -> " + detail));
     }
 
-    static IEnumerable<Widget> Walk(Widget w)
-    {
-        yield return w;
-        foreach (var c in w.Children.ToArray()) foreach (var d in Walk(c)) yield return d;
-    }
-
-    static T First<T>(Widget w, Func<T, bool>? pred = null) where T : Widget => Walk(w).OfType<T>().First(x => pred == null || pred(x));
-
     static (float X, float Y) Mid(Widget w) => (w.Bounds.CX, w.Bounds.CY);
 
     static void Click(UiRoot r, float x, float y, int clicks = 1, int button = 0, bool ctrl = false)
@@ -42,6 +34,8 @@ internal static class SelfTest
 
     static void Click(UiRoot r, Widget w, int clicks = 1, int button = 0, bool ctrl = false) { var (x, y) = Mid(w); Click(r, x, y, clicks, button, ctrl); }
 
+    static void ClickSeg(UiRoot r, Segmented s, int i) { var b = s.SegRect(i); Click(r, b.CX, b.CY); }
+
     static void Drag(UiRoot r, float x, float y, float dx, float dy, bool ctrl = false)
     {
         r.MouseMove(x, y, ctrl, false, false);
@@ -50,7 +44,12 @@ internal static class SelfTest
         r.MouseUp(x + dx, y + dy, 0, ctrl, false, false);
     }
 
-    static UiRoot NewRoot(out AppModel model, float w = 1600, float h = 900)
+    static void Type(UiRoot r, string s) { foreach (char c in s) r.Char(c); }
+    static void Key(UiRoot r, int vk) => r.KeyDown(vk, false, false, false);
+    static void Settle(UiRoot r, int frames = 20) { for (int i = 0; i < frames; i++) r.Tick(1f / 60f); }
+    static void CloseAll(UiRoot r) { while (r.Modal != null) r.CloseOverlay(r.Modal); }
+
+    static UiRoot NewRoot(out AppModel model, float w = 1600, float h = 900, UiPrefs? prefs = null)
     {
         EngineFactory.ForceDemo = true;
         model = new AppModel(AppModel.EmptySettings(), new List<DeviceBinding>(), EngineFactory.Create, () => new DemoCatalog(), () => new DemoHost(false), true, null)
@@ -59,7 +58,7 @@ internal static class SelfTest
         model.RunInline = true;
         model.AppCatalogFactory = () => new DemoAppCatalog();
         model.RestorerFactory = () => new DemoRestorer();
-        var r = new UiRoot(model, new NullShell());
+        var r = new UiRoot(model, new NullShell(), prefs ?? new UiPrefs { Theme = ThemeMode.Dark });
         r.Resize(w, h);
         return r;
     }
@@ -76,6 +75,8 @@ internal static class SelfTest
 
     static void RunAll(string outFile)
     {
+        Check("Schrift Inter wird aus dem App-Ordner geladen", Renderer.FontName == "Inter", Renderer.FontName);
+
         // ---- Leerer Start --------------------------------------------------------------------
         var root = NewRoot(out var m);
         Check("Start ist leer: 0 Eingaenge, 0 Ausgaenge", m.InputCount == 0 && m.OutputCount == 0);
@@ -83,37 +84,68 @@ internal static class SelfTest
         var mixer = (MixerPage)root.Pages[0];
 
         // ---- Kanaele per Klick anlegen --------------------------------------------------------
-        var addIn = First<TextButton>(mixer.Inputs, b => b.Visible && b.Text == "Eingang");
-        Click(root, addIn);
-        Check("Klick auf '+ Eingang' legt einen Eingang an", m.InputCount == 1, "InputCount=" + m.InputCount);
+        Check("Leerzustand zeigt die Anlegen-Tasten", mixer.Inputs.EmptyMono.Visible && !mixer.Inputs.AddButton.Visible);
+        Click(root, mixer.Inputs.EmptyMono);
+        Check("Klick auf 'Eingang' legt einen Eingang an", m.InputCount == 1, "InputCount=" + m.InputCount);
         Check("neuer Kanal hat keinen vorbelegten Namen", m.Settings.Inputs[0].Name == "");
         var eng0 = m.Engine;
-        var addPair = First<TextButton>(mixer.Outputs, b => b.Visible && b.Text == "Stereo-Paar");
-        Click(root, addPair);
+        Click(root, mixer.Outputs.EmptyPair);
         Check("Stereo-Paar legt zwei Ausgaenge an", m.OutputCount == 2 && m.Settings.Outputs[0].Name == "Stereo 1 L" && m.Settings.Outputs[1].Name == "Stereo 1 R");
         Check("Kanalzahl-Aenderung erzeugt neue Engine", !ReferenceEquals(eng0, m.Engine));
-        m.AddChannels(false, 2); // Ausgang 3 + 4
+        Click(root, mixer.Outputs.AddButton);
+        Check("'Hinzufuegen' oeffnet ein Menue", root.Modal is PopupMenu);
+        if (root.Modal is PopupMenu pm)
+        {
+            var r0 = pm.RectOf(pm.IndexOf("Ausgang (mono)"));
+            Click(root, r0.CX, r0.CY);
+        }
+        Check("Menue 'Ausgang (mono)' legt einen Ausgang an und schliesst", m.OutputCount == 3 && root.Modal == null, "OutputCount=" + m.OutputCount);
+        m.AddChannels(false, 1); // Ausgang 4
         m.AddChannels(true, 2);  // Eingang 2 + 3
         Check("Anlegen: 3 Eingaenge, 4 Ausgaenge", m.InputCount == 3 && m.OutputCount == 4);
         Check("Matrix passt sich an (3x4)", m.Settings.MatrixDb.Length == 3 && m.Settings.MatrixDb.All(r => r.Length == 4));
 
-        // ---- Umbenennen mit eigenem Editor ----------------------------------------------------
+        // ---- Kanal-Blatt: Umbenennen ----------------------------------------------------------
         var strip0 = mixer.Inputs.Strips[0];
-        var name0 = First<NameLabel>(strip0);
-        Click(root, name0, 2);
-        Check("Doppelklick auf den Namen oeffnet den Editor", root.Editor.Active);
-        foreach (char c in "Front L") root.Char(c);
-        root.KeyDown(Win32.VK_RETURN, false, false, false);
+        Check("Streifen ohne Namen zeigt den Platzhalter", strip0.Header.Name == "Eingang 1" && strip0.Header.NamePlaceholder);
+        Click(root, strip0.Header);
+        var sheet = root.Modal as ChannelSheet;
+        Check("Klick auf den Kanalkopf oeffnet das Kanal-Blatt", sheet != null && sheet.IsInput && sheet.Index == 0);
+        Settle(root);
+        Click(root, sheet!.Name);
+        Check("Klick auf den Namen oeffnet den Editor", root.Editor.Active);
+        Type(root, "Front L");
+        Key(root, Win32.VK_RETURN);
         Check("Name per Editor gesetzt", m.Settings.Inputs[0].Name == "Front L", m.Settings.Inputs[0].Name);
-        Check("Editor danach geschlossen", !root.Editor.Active);
-        // Esc bricht ab
-        Click(root, First<NameLabel>(mixer.Inputs.Strips[0]), 2);
-        foreach (char c in "XYZ") root.Char(c);
-        root.KeyDown(Win32.VK_ESCAPE, false, false, false);
+        Check("Editor danach geschlossen, Blatt bleibt offen", !root.Editor.Active && root.Modal == sheet);
+        Click(root, sheet.Name);
+        Type(root, "XYZ");
+        Key(root, Win32.VK_ESCAPE);
         Check("Esc verwirft die Eingabe", m.Settings.Inputs[0].Name == "Front L");
+        Check("Streifen zeigt den neuen Namen", strip0.Header.Name == "Front L" && !strip0.Header.NamePlaceholder);
+
+        // Schalter im Blatt
+        Click(root, sheet.MuteSw);
+        Check("Blatt: Stumm-Schalter schaltet den Kanal stumm", m.Settings.Inputs[0].Mute);
+        Click(root, sheet.MuteSw);
+        Check("Blatt: Stumm-Schalter wieder aus", !m.Settings.Inputs[0].Mute);
+        Click(root, sheet.PhaseSw);
+        Check("Blatt: Phase invertieren", m.Settings.Inputs[0].InvertPhase);
+        Click(root, sheet.PhaseSw);
+        Click(root, sheet.DelayBox, 2);
+        Type(root, "1,5");
+        Key(root, Win32.VK_RETURN);
+        Check("Blatt: Laufzeit per Eingabe (1,5 ms)", Math.Abs(m.Settings.Inputs[0].DelayMs - 1.5) < 1e-9, "Delay=" + m.Settings.Inputs[0].DelayMs);
+        Click(root, sheet.Delay, 2);
+        Check("Blatt: Doppelklick auf den Laufzeit-Regler = 0", m.Settings.Inputs[0].DelayMs == 0, "Delay=" + m.Settings.Inputs[0].DelayMs);
+        Key(root, Win32.VK_RIGHT);
+        Check("Pfeil rechts wechselt zum naechsten Kanal", sheet.Index == 1);
+        Key(root, Win32.VK_LEFT);
+        Key(root, Win32.VK_ESCAPE);
+        Check("Esc schliesst das Blatt", root.Modal == null);
 
         // ---- Fader ----------------------------------------------------------------------------
-        var fader = First<Fader>(mixer.Inputs.Strips[0]);
+        var fader = strip0.Fader;
         Check("Fader startet bei 0 dB", fader.Value == 0);
         var (fx, fy) = Mid(fader);
         Drag(root, fx + 4, FaderCapY(fader, 0), 0, -60);
@@ -131,17 +163,21 @@ internal static class SelfTest
         Check("Mausrad bis unten ergibt -unendlich", double.IsNegativeInfinity(m.Settings.Inputs[0].GainDb), "Gain=" + m.Settings.Inputs[0].GainDb);
         Click(root, fx + 4, fader.Bounds.Y + 100, 2);
 
-        // ---- Mute / Solo / Phase --------------------------------------------------------------
-        var mute = First<ToggleButton>(mixer.Inputs.Strips[0], b => b.Text == "M");
-        Click(root, mute);
+        // ---- Mute / Solo ----------------------------------------------------------------------
+        Click(root, strip0.Mute);
         Check("Mute schaltet", m.Settings.Inputs[0].Mute);
-        Click(root, mute);
+        Click(root, strip0.Mute);
         Check("Mute schaltet zurueck", !m.Settings.Inputs[0].Mute);
+        Click(root, strip0.Solo);
+        Check("Solo schaltet", m.Settings.Inputs[0].Solo);
+        Click(root, strip0.Solo);
 
         // ---- Gain-Sperre (Hochtoener-Schutz) ----------------------------------------------------
         m.UpdateChannel(false, 2, c => c with { GainDb = -13, MaxGainDb = -13, Name = "Hi Links" });
-        var hi = First<Fader>(mixer.Outputs.Strips[2]);
+        var hiStrip = mixer.Outputs.Strips[2];
+        var hi = hiStrip.Fader;
         Check("Gain-Sperre: Fader zeigt Sperrwert", hi.Value == -13 && hi.MaxDb == -13);
+        Check("Gain-Sperre: Streifen markiert den Kanal orange", hiStrip.Header.Mark is { } mk && mk.Equals(Theme.Orange));
         var (hx, hy) = Mid(hi);
         Drag(root, hx + 4, FaderCapY(hi, -13), 0, -300);
         Check("Gesperrter Fader laesst sich nicht ueber -13 dB ziehen", m.Settings.Outputs[2].GainDb <= -13 + 1e-9, "Gain=" + m.Settings.Outputs[2].GainDb);
@@ -149,26 +185,40 @@ internal static class SelfTest
         Check("Doppelklick (0 dB) wird auf die Sperre geklemmt", m.Settings.Outputs[2].GainDb <= -13 + 1e-9, "Gain=" + m.Settings.Outputs[2].GainDb);
         root.MouseWheel(hx + 4, hy, 5f, false, false, false);
         Check("Mausrad kann die Sperre nicht uebersteigen", m.Settings.Outputs[2].GainDb <= -13 + 1e-9, "Gain=" + m.Settings.Outputs[2].GainDb);
-        var readout = First<ReadoutBox>(mixer.Outputs.Strips[2]);
-        Click(root, readout, 2);
-        foreach (char c in "5") root.Char(c);
-        root.KeyDown(Win32.VK_RETURN, false, false, false);
+        Click(root, hiStrip.Readout, 2);
+        Type(root, "5");
+        Key(root, Win32.VK_RETURN);
         Check("Getippter Wert +5 wird auf die Sperre geklemmt", m.Settings.Outputs[2].GainDb <= -13 + 1e-9, "Gain=" + m.Settings.Outputs[2].GainDb);
         m.UpdateChannel(false, 2, c => c with { GainDb = 3 });
         Check("Modell klemmt GainDb auf MaxGainDb", m.Settings.Outputs[2].GainDb == -13);
 
-        // Schloss-Menue
-        var lockBtn = First<IconButton>(mixer.Outputs.Strips[2], b => b.Icon == IconKind.Lock);
-        Click(root, lockBtn);
-        Check("Klick auf das Schloss oeffnet ein Menue", root.Modal is PopupMenu);
-        root.CloseOverlay(root.Modal);
+        // Gain-Sperre im Kanal-Blatt
+        Click(root, hiStrip.Header);
+        var hs = root.Modal as ChannelSheet;
+        Check("Kanal-Blatt des Hochtoeners offen", hs != null && !hs.IsInput && hs.Index == 2);
+        Settle(root);
+        Check("Blatt: Segment zeigt keine Standardsperre bei -13 dB", hs!.Lock.Selected == -1);
+        ClickSeg(root, hs.Lock, 0); // "Aus" = lockern
+        Check("Sperre lockern fragt nach", root.Modal is ModalDialog);
+        Key(root, Win32.VK_ESCAPE);
+        Check("Abbrechen laesst die Sperre bei -13 dB", m.Settings.Outputs[2].MaxGainDb == -13 && root.Modal == hs);
+        ClickSeg(root, hs.Lock, 4); // -20 dB = strenger: ohne Rueckfrage
+        Check("Strengere Sperre gilt sofort (-20 dB)", m.Settings.Outputs[2].MaxGainDb == -20 && m.Settings.Outputs[2].GainDb <= -20 + 1e-9);
+        ClickSeg(root, hs.Ceiling, 2);
+        Check("Blatt: Limiter-Grenze -6 dBFS", m.Settings.Outputs[2].CeilingDbfs == -6);
+        Click(root, hs.GainBox, 2);
+        Type(root, "0");
+        Key(root, Win32.VK_RETURN);
+        Check("Blatt: getippter Gain wird auf die Sperre geklemmt", m.Settings.Outputs[2].GainDb <= -20 + 1e-9);
+        Key(root, Win32.VK_ESCAPE);
+        m.UpdateChannel(false, 2, c => c with { MaxGainDb = -13, GainDb = -13, CeilingDbfs = -1 });
 
         // ---- Matrix ---------------------------------------------------------------------------
         root.SwitchPage(1);
         var mp = (MatrixPage)root.Pages[1];
-        var view = First<MatrixView>(mp);
+        var view = mp.View;
         Check("Matrix-Ansicht sichtbar bei vorhandenen Kanaelen", view.Visible && view.Bounds.W > 100);
-        var cell = CellCenter(view, m, 0, 0);
+        var cell = CellCenter(view, 0, 0);
         Click(root, cell.X, cell.Y);
         Check("Matrix: Klick verbindet bei 0 dB", m.Settings.MatrixDb[0][0] == 0, "v=" + m.Settings.MatrixDb[0][0]);
         Drag(root, cell.X, cell.Y, 0, -30);
@@ -184,7 +234,7 @@ internal static class SelfTest
         Check("Matrix: Mausrad +2 dB", Math.Abs(m.Settings.MatrixDb[0][0] - 2) < 1e-9, "v=" + m.Settings.MatrixDb[0][0]);
         Click(root, cell.X, cell.Y, 1, 1);
         Check("Matrix: Rechtsklick trennt", double.IsNegativeInfinity(m.Settings.MatrixDb[0][0]));
-        var pc = CellCenter(view, m, 1, 2); // auf den geschuetzten Hochtoener-Ausgang
+        var pc = CellCenter(view, 1, 2); // auf den geschuetzten Hochtoener-Ausgang
         Click(root, pc.X, pc.Y);
         Drag(root, pc.X, pc.Y, 0, -400);
         Check("Matrix: geschuetzter Ausgang bleibt <= 0 dB", m.Settings.MatrixDb[1][2] <= 0 + 1e-9, "v=" + m.Settings.MatrixDb[1][2]);
@@ -199,9 +249,17 @@ internal static class SelfTest
         m.MoveChannel(true, 2, -1);
         Check("Verschieben tauscht die Reihenfolge", m.Settings.Inputs[1].Name == "C" && m.Settings.Inputs[2].Name == "B");
         Check("Verschieben tauscht die Matrix-Zeilen mit", m.Settings.MatrixDb[1][3] == -6 && double.IsNegativeInfinity(m.Settings.MatrixDb[2][3]), $"{m.Settings.MatrixDb[1][3]} / {m.Settings.MatrixDb[2][3]}");
-        mixer.Inputs.Strips[1].DebugOpen("channel");
-        Check("Kanal-Menue oeffnet", root.Modal is PopupMenu);
-        root.CloseOverlay(root.Modal);
+        var ds = Program.Sheet(root, true, 1);
+        Settle(root);
+        root.MouseWheel(ds!.Delete.Bounds.CX, root.H - 120, -30f, false, false, false); // Blatt nach unten scrollen
+        Check("Blatt scrollt bis 'Kanal loeschen'", ds.Delete.Bounds.Bottom < root.H - 10, "Delete.Y=" + ds.Delete.Bounds.Y);
+        Click(root, ds.Delete);
+        Check("Kanal loeschen fragt nach", root.Modal is ModalDialog);
+        Key(root, Win32.VK_ESCAPE);
+        Check("Abbrechen behaelt den Kanal", m.InputCount == 3 && root.Modal == ds);
+        Click(root, ds.Delete);
+        Key(root, Win32.VK_RETURN);
+        Check("Bestaetigen loescht den Kanal und schliesst das Blatt", m.InputCount == 2 && m.Settings.Inputs[1].Name == "B" && root.Modal == null);
         int eIn = m.InputCount;
         m.RemoveChannel(true, 0);
         Check("Loeschen entfernt den Kanal", m.InputCount == eIn - 1 && m.Settings.MatrixDb.Length == eIn - 1);
@@ -247,20 +305,29 @@ internal static class SelfTest
         Check("Projekt laden ersetzt den Zustand", m2.InputCount == m.InputCount && m2.Settings.Outputs[0].MaxGainDb == -13);
         try { File.Delete(tmp); } catch { }
 
-        // ---- Seitenwechsel + Menues -----------------------------------------------------------
+        // ---- Navigation + Menues --------------------------------------------------------------
+        var nav = root2.Side.ItemRect(2);
+        Click(root2, nav.CX, nav.CY);
+        Check("Seitenleiste: Klick auf 'Geraete' wechselt die Seite", root2.PageIndex == 2);
+        root2.KeyDown('2', true, false, false);
+        Check("Strg+2 wechselt zur Matrix", root2.PageIndex == 1);
         root2.SwitchPage(2);
-        Check("Geraete-Seite wechselt", root2.PageIndex == 2);
-        root2.ShowProjectMenu(root2.Title.MenuRect);
+        Click(root2, root2.Top.MenuRect.CX, root2.Top.MenuRect.CY);
         Check("Projekt-Menue oeffnet", root2.Modal is PopupMenu);
-        root2.KeyDown(Win32.VK_ESCAPE, false, false, false);
+        Key(root2, Win32.VK_ESCAPE);
         Check("Esc schliesst das Menue", root2.Modal == null);
+        Click(root2, root2.Top.AudioRect.CX, root2.Top.AudioRect.CY);
+        Check("Audio-Pille fuehrt zur Seite Geraete", root2.PageIndex == 2);
         root2.NewProjectWithConfirm();
         Check("Neues Projekt fragt nach", root2.Modal is ModalDialog);
-        root2.KeyDown(Win32.VK_ESCAPE, false, false, false);
+        Key(root2, Win32.VK_ESCAPE);
         Check("Abbrechen laesst das Projekt unveraendert", m2.InputCount == m.InputCount);
         root2.NewProjectWithConfirm();
-        root2.KeyDown(Win32.VK_RETURN, false, false, false);
+        Key(root2, Win32.VK_RETURN);
         Check("Bestaetigen leert das Projekt", m2.InputCount == 0 && m2.OutputCount == 0);
+
+        // ---- Darstellung: Farbmodus, Touch, Seitenleiste ------------------------------------------
+        DisplayTests();
 
         AppLinkTests(outFile);
         try
@@ -272,14 +339,15 @@ internal static class SelfTest
         }
         catch (Exception ex) { Log.AppendLine("INFO App-Links echt: Ausnahme " + ex.Message); }
 
-        // ---- Layout bei vielen Groessen (nur Zeichnen, keine Ausnahme) -----------------------------
+        // ---- Layout bei vielen Groessen, beiden Farbmodi und Touch (nur Zeichnen, keine Ausnahme) ----
         int drawn = 0;
-        foreach (var (w, h, sc) in new[] { (1180, 680, 1f), (1280, 720, 1f), (1600, 900, 1f), (1920, 1080, 1f), (2560, 1440, 1f), (2000, 1200, 1.5f), (3840, 2160, 2f) })
+        foreach (var (w, h, sc) in new[] { (1100, 680, 1f), (1280, 720, 1f), (1600, 900, 1f), (1920, 1080, 1f), (2560, 1440, 1f), (2000, 1200, 1.5f), (3840, 2160, 2f) })
         {
-            foreach (bool demo in new[] { false, true })
+            foreach (var (demo, light, touch, collapsed) in new[] { (false, false, false, false), (true, false, false, false), (true, true, true, true) })
             {
-                var r = NewRoot(out var mm, w / sc, h / sc);
-                if (demo) { var (ds, db) = DemoProject.Create(); mm.LoadProject(ds, db, 480, false, DemoProject.AppLinks()); mm.LinkStatusSource = DemoProject.LinkStatuses; }
+                var prefs = new UiPrefs { Theme = light ? ThemeMode.Light : ThemeMode.Dark, Density = touch ? Density.Touch : Density.Mouse, SidebarExpanded = !collapsed };
+                var r = NewRoot(out var mm, w / sc, h / sc, prefs);
+                if (demo) { var (dset, dbind) = DemoProject.Create(); mm.LoadProject(dset, dbind, 480, false, DemoProject.AppLinks()); mm.LinkStatusSource = DemoProject.LinkStatuses; }
                 else { mm.AddChannels(true, 30); mm.AddChannels(false, 30); } // viele Kanaele: Scrollen
                 for (int p = 0; p < 4; p++)
                 {
@@ -289,22 +357,69 @@ internal static class SelfTest
                     Program.RenderRoot(r, w, h, sc, null);
                     drawn++;
                 }
+                // Kanal-Blaetter und Auswahl-Popup (Liste, Handeingabe, Konflikt) in jeder Groesse zeichnen
+                Program.Sheet(r, false, 2); Settle(r, 15); Program.RenderRoot(r, w, h, sc, null); drawn++; CloseAll(r);
                 if (demo)
                 {
-                    // Auswahl-Popup (Liste, Handeingabe, Konflikt) in jeder Groesse zeichnen
-                    r.SwitchPage(0);
-                    foreach (var (strip, how) in new[] { (10, "applink"), (10, "applink-manual"), (2, "applink"), (8, "applink") })
+                    foreach (var (strip, manual) in new[] { (10, false), (10, true), (2, false), (8, false) })
                     {
-                        ((MixerPage)r.Pages[0]).DebugOpen(true, strip, how);
-                        r.Tick(0.016f);
+                        Program.Picker(r, strip, manual);
+                        Settle(r, 15);
                         Program.RenderRoot(r, w, h, sc, null);
                         drawn++;
-                        r.CloseOverlay(r.Modal);
+                        CloseAll(r);
                     }
                 }
             }
         }
-        Check($"Zeichnen in {drawn} Groessen/Seiten ohne Ausnahme", true);
+        Theme.Apply(true, Density.Mouse);
+        Check($"Zeichnen in {drawn} Groessen/Seiten/Modi ohne Ausnahme", true);
+    }
+
+    // ================================================================================================
+    // Darstellung: Farbmodus, Maus/Touch, Seitenleiste
+    // ================================================================================================
+    static void DisplayTests()
+    {
+        var shell = new NullShell { SystemDark = false };
+        EngineFactory.ForceDemo = true;
+        var m = new AppModel(AppModel.EmptySettings(), new List<DeviceBinding>(), EngineFactory.Create, () => new DemoCatalog(), () => new DemoHost(false), true, null) { Post = a => a() };
+        m.SetDevicesNow(new DemoCatalog().List());
+        var root = new UiRoot(m, shell, new UiPrefs { Theme = ThemeMode.System, SidebarExpanded = true });
+        root.Resize(1600, 900);
+        Check("Farbmodus 'System' folgt Windows (hell)", !Theme.IsDark);
+        shell.SystemDark = true;
+        root.SystemThemeChanged();
+        Check("Windows wechselt auf dunkel: Oberflaeche folgt", Theme.IsDark);
+
+        root.SwitchPage(3);
+        var sp = (SettingsPage)root.Pages[3];
+        Program.RenderRoot(root, 1600, 900, 1f, null); // Layout der Einstellungen
+        ClickSeg(root, sp.ThemeSeg, 1);
+        Check("Einstellungen: 'Hell' schaltet auf hell und merkt es", !Theme.IsDark && root.Prefs.Theme == ThemeMode.Light);
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        ClickSeg(root, sp.ThemeSeg, 2);
+        Check("Einstellungen: 'Dunkel' schaltet auf dunkel", Theme.IsDark && root.Prefs.Theme == ThemeMode.Dark);
+        shell.SystemDark = false;
+        root.SystemThemeChanged();
+        Check("Fester Farbmodus ignoriert den Windows-Wechsel", Theme.IsDark);
+
+        float mouseCap = Theme.FaderCapH, mouseStrip = Theme.StripMinW;
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        ClickSeg(root, sp.DensitySeg, 1);
+        Check("Einstellungen: 'Touch' vergroessert Fader-Kappen und Streifen", Theme.Touch && Theme.FaderCapH > mouseCap && Theme.StripMinW > mouseStrip && root.Prefs.Density == Density.Touch);
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        ClickSeg(root, sp.DensitySeg, 0);
+        Check("Einstellungen: 'Maus' wieder kompakt", !Theme.Touch && Theme.FaderCapH == mouseCap);
+
+        float wide = root.Side.Width;
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        Click(root, sp.SidebarSw.Track.CX, sp.SidebarSw.Track.CY);
+        Check("Seitenleiste einklappen macht den Inhalt breiter", !root.Side.Expanded && root.Side.Width < wide && root.ContentRect.X < wide);
+        var col = root.Side.CollapseRect;
+        Click(root, col.CX, col.CY);
+        Check("Knopf unten klappt die Seitenleiste wieder aus", root.Side.Expanded && root.Prefs.SidebarExpanded);
+        Theme.Apply(true, Density.Mouse);
     }
 
     // ================================================================================================
@@ -330,36 +445,49 @@ internal static class SelfTest
         Check("App-Link auf einen Eingang mit Geraete-Zuordnung wird abgelehnt und erklaert", why != null && why.Contains("Geräte-Zuordnung") && m.AppLinks.Count == 0, why ?? "null");
         Check("Auch ein Stereo-Link, der in die Zuordnung ragt, wird abgelehnt", m.SetLink(1, 2, "spotify.exe", null) != null && m.AppLinks.Count == 0);
 
-        mixer.DebugOpen(true, 2, "applink");
-        Check("Klick auf einen belegten Eingang oeffnet das Popup", root.Modal is AppLinkPicker);
-        root.KeyDown(Win32.VK_DOWN, false, false, false);
-        root.KeyDown(Win32.VK_RETURN, false, false, false);
+        Program.Picker(root, 2);
+        Check("Programm binden an einem belegten Eingang oeffnet das Popup", root.Modal is AppLinkPicker);
+        Key(root, Win32.VK_DOWN);
+        Key(root, Win32.VK_RETURN);
         Check("Popup an belegtem Eingang bindet nichts", m.AppLinks.Count == 0);
-        root.KeyDown(Win32.VK_ESCAPE, false, false, false);
-        Check("Esc schliesst das Popup", root.Modal == null);
+        Key(root, Win32.VK_ESCAPE);
+        Check("Esc schliesst das Popup, das Kanal-Blatt bleibt", root.Modal is ChannelSheet);
+        Key(root, Win32.VK_ESCAPE);
+        Check("Zweites Esc schliesst das Blatt", root.Modal == null);
 
-        // ---- Bedienung: Link-Knopf -> Filter tippen -> Enter -----------------------------------------
-        var box = First<AppLinkBox>(mixer.Inputs.Strips[4]);
-        Click(root, box.DrawRect.CX, box.DrawRect.CY);
-        Check("Klick auf den Link-Knopf oeffnet das Auswahl-Popup", root.Modal is AppLinkPicker);
-        foreach (char c in "vlc") root.Char(c);
-        root.KeyDown(Win32.VK_RETURN, false, false, false);
+        // ---- Bedienung: Kanalkopf -> Blatt -> "Programm binden" -> Filter tippen -> Enter -------------
+        Click(root, mixer.Inputs.Strips[4].Header);
+        var sheet = root.Modal as ChannelSheet;
+        Settle(root);
+        Check("Blatt eines freien Eingangs bietet 'Programm binden'", sheet != null && sheet.LinkBind.Visible && sheet.LinkBind.Enabled && !sheet.LinkRemove.Visible);
+        Click(root, sheet!.LinkBind);
+        Check("Klick auf 'Programm binden' oeffnet das Auswahl-Popup", root.Modal is AppLinkPicker);
+        Type(root, "vlc");
+        Key(root, Win32.VK_RETURN);
         var vlc = m.LinkAt(4);
         Check("Filter 'vlc' + Enter bindet VLC (mono) an Eingang 5", vlc != null && vlc.ExeName == "vlc.exe" && vlc.Count == 1 && vlc.DisplayName == "VLC media player", vlc?.ToString() ?? "null");
-        Check("Popup schliesst nach der Auswahl", root.Modal == null);
-        Check("Gebundener Streifen zeigt den Programmnamen", First<NameLabel>(mixer.Inputs.Strips[4]).Placeholder == "VLC media player");
+        Check("Popup schliesst nach der Auswahl, Blatt bleibt", root.Modal == sheet);
+        Settle(root);
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        Check("Blatt bietet danach 'Loesen' an", sheet.LinkRemove.Visible);
+        Check("Gebundener Streifen zeigt den Programmnamen", mixer.Inputs.Strips[4].Header.Name == "VLC media player");
+        CloseAll(root);
 
         // ---- Handeingabe ------------------------------------------------------------------------------
-        mixer.DebugOpen(true, 5, "applink-manual");
-        foreach (char c in "C:\\Programme\\Chrome") root.Char(c);
-        root.KeyDown(Win32.VK_RETURN, false, false, false);
+        Program.Picker(root, 5, true);
+        Type(root, "C:\\Programme\\Chrome");
+        Key(root, Win32.VK_RETURN);
         var chrome = m.LinkAt(5);
         Check("Handeingabe normalisiert Pfad/Endung: 'Chrome.exe'", chrome != null && chrome.ExeName == "Chrome.exe" && chrome.Count == 1, chrome?.ExeName ?? "null");
         Check("Handeingabe kennt Programme der Liste (Anzeigename)", chrome?.DisplayName == "Google Chrome", chrome?.DisplayName ?? "null");
+        CloseAll(root);
 
         // ---- Stereo-Paar, Duplikate, ungueltige Namen -------------------------------------------------
         Check("Stereo-App-Link auf das benannte Paar 1+2", m.SetLink(0, 2, "Spotify.exe", "Spotify") == null && m.LinkAt(1)?.FirstChannel == 0 && m.LinkAt(1)?.Count == 2);
-        Check("Zweite Streifenhaelfte heisst 'Spotify R'", First<NameLabel>(mixer.Inputs.Strips[1]).Placeholder == "Spotify R" && First<NameLabel>(mixer.Inputs.Strips[0]).Placeholder == "Spotify L");
+        m.UpdateChannel(true, 0, c => c with { Name = "" });
+        m.UpdateChannel(true, 1, c => c with { Name = "" });
+        Check("Ohne eigenen Namen: Streifen heissen 'Spotify L' / 'Spotify R'", mixer.Inputs.Strips[1].Header.Name == "Spotify R" && mixer.Inputs.Strips[0].Header.Name == "Spotify L",
+            mixer.Inputs.Strips[0].Header.Name + " / " + mixer.Inputs.Strips[1].Header.Name);
         Check("Dasselbe Programm an zwei Faders wird abgelehnt (ohne Beachtung der Gross-/Kleinschreibung)", m.SetLink(6, 1, "SPOTIFY.EXE", null) != null && m.LinkAt(6) == null);
         Check("Link ueber einen schon gebundenen Eingang wird abgelehnt", m.SetLink(1, 1, "other.exe", null) != null);
         Check("Ungueltige Programmnamen werden abgelehnt", m.SetLink(6, 1, "", null) != null && m.SetLink(6, 1, "readme.txt", null) != null && m.SetLink(6, 1, "a|b.exe", null) != null && m.AppLinks.Count == 3);
@@ -408,6 +536,8 @@ internal static class SelfTest
         var vs = m.ViewOf(m.LinkAt(0)!); var vv = m.ViewOf(m.LinkAt(4)!); var vc = m.ViewOf(m.LinkAt(5)!);
         Check("Status: verbunden / Fehler mit Meldung / wartet", vs.State == LinkUi.Linked && vs.ProcessCount == 2 && vv.State == LinkUi.Failed && vv.Message == "Zugriff verweigert" && vc.State == LinkUi.Waiting);
         Check("Tooltip nennt Programm und Fehlermeldung", LinkLook.Describe(m.LinkAt(4)!, vv).Contains("vlc.exe") && LinkLook.Describe(m.LinkAt(4)!, vv).Contains("Zugriff verweigert"));
+        mixer.Inputs.SyncAll();
+        Check("Streifen mit Fehler-Link bekommt eine rote Marke", mixer.Inputs.Strips[4].Header.Mark is { } fm && fm.Equals(Theme.Red));
         m.LinkStatusSource = null;
         m.Tick(0.3f);
         Check("Ohne Host-Status: bereit (Audio gestoppt)", m.ViewOf(m.LinkAt(0)!).State == LinkUi.Idle);
@@ -417,12 +547,11 @@ internal static class SelfTest
         int before = restorer.Calls;
         m.ResetAllRoutes(e => resetErr = e);
         Check("'Alle Umleitungen zuruecksetzen' ruft RestoreAllKnown", restorer.Calls == before + 1 && resetErr == null);
-        // Seite Einstellungen zeichnet sich mit und ohne Parkplatz
-        root.SwitchPage(3); Program.RenderRoot(root, 1600, 900, 1f, null); root.Resize(1180, 680);
-        m.SetParking(null); Program.RenderRoot(root, 1180, 680, 1f, null);
+        root.SwitchPage(3); Program.RenderRoot(root, 1600, 900, 1f, null); root.Resize(1100, 680);
+        m.SetParking(null); Program.RenderRoot(root, 1100, 680, 1f, null);
         Check("Einstellungsseite mit App-Link-Abschnitt zeichnet (mit/ohne Parkplatz, niedriges Fenster scrollt)", true);
         root.MouseWheel(600, 400, -5f, false, false, false);
-        Program.RenderRoot(root, 1180, 680, 1f, null);
+        Program.RenderRoot(root, 1100, 680, 1f, null);
         m.SetParking(DemoProject.ParkingId);
         root.SwitchPage(0);
 
@@ -437,7 +566,7 @@ internal static class SelfTest
         var root2 = NewRoot(out var m2);
         m2.LoadProject(s2, b2, dto.BlockFrames, dto.Exclusive, setup);
         Check("Laden: App-Links, Schalter und Parkplatz kommen zurueck", m2.AppLinks.SequenceEqual(m.AppLinks) && m2.AppLinksEnabled && m2.ParkingDeviceId == DemoProject.ParkingId && m2.ParkingDeviceName == m.ParkingDeviceName);
-        Check("Geladener Streifen zeigt den Link", First<NameLabel>(((MixerPage)root2.Pages[0]).Inputs.Strips[1]).Placeholder == "Spotify R");
+        Check("Geladener Streifen zeigt den Link", ((MixerPage)root2.Pages[0]).Inputs.Strips[1].Header.Name == "Spotify R");
 
         // Rueckwaertskompatibel: Datei ohne die neuen Felder = keine Links
         var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
@@ -480,22 +609,21 @@ internal static class SelfTest
         m6.RestorerFactory = () => null;
         m6.AddChannels(true, 1); m6.SetLink(0, 1, "a.exe", null); m6.SetParking(DemoProject.ParkingId);
         Check("Ohne Umleitungs-Klasse: Start mit Links wird verweigert", m6.AppLinkProblem() != null);
+        _ = root3; _ = root4; _ = root5; _ = root6;
     }
 
     static float FaderCapY(Fader f, double db)
     {
         // gleiche Geometrie wie Fader: Kappenmitte fuer den Wert
-        float capH = Theme.FaderCapHeight;
+        float capH = Theme.FaderCapH;
         float yTop = f.Bounds.Y + capH / 2 + 1, yBot = f.Bounds.Bottom - capH / 2 - 1;
         double t = FaderScale.ToT(db) / FaderScale.ToT(f.ScaleTop);
         return (float)(yBot - Math.Clamp(t, 0, 1) * (yBot - yTop));
     }
 
-    static (float X, float Y) CellCenter(MatrixView v, AppModel m, int i, int o)
+    static (float X, float Y) CellCenter(MatrixView v, int i, int o)
     {
-        // gleiche Geometrie wie MatrixView (Kopfbreite 168, Kopfhoehe 76)
-        float cw = Math.Clamp((v.Bounds.W - 168) / m.OutputCount, 62f, 132f);
-        float ch = Math.Clamp((v.Bounds.H - 76) / m.InputCount, 42f, 72f);
-        return (v.Bounds.X + 168 + o * cw + cw / 2, v.Bounds.Y + 76 + i * ch + ch / 2);
+        var r = v.CellRect(i, o);
+        return (r.CX, r.CY);
     }
 }

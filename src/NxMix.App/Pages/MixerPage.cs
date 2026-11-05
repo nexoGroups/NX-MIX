@@ -4,39 +4,52 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Gruppenflaeche "Eingaenge" oder "Ausgaenge" mit Kanalstreifen, Kopfzeile, Leerzustand und waagrechtem Scrollen.</summary>
+/// <summary>Karte "Eingaenge" oder "Ausgaenge": Kopf mit Zahl und Hinzufuegen-Taste, Kanalstreifen, Leerzustand, waagrechtes Scrollen.</summary>
 internal sealed class GroupPanel : Widget
 {
     readonly AppModel _m;
     readonly bool _input;
     public readonly List<ChannelStrip> Strips = new();
-    readonly TextButton _addMono, _addPair, _bigMono, _bigPair;
+    public readonly Button AddButton;
+    public readonly Button EmptyMono, EmptyPair;
     RectF _viewport;
     float _scroll;
-    float _stripW = 70;
-    // Scrollbalken
+    float _stripW = 80;
     RectF _barTrack, _barThumb;
     bool _dragBar;
     float _dragBarOff;
+    const float HeadH = 52f;
 
     public GroupPanel(AppModel m, bool input)
     {
         _m = m; _input = input;
         string noun = input ? "Eingang" : "Ausgang";
-        _addMono = Add(new TextButton("+ " + noun, ButtonStyle.Secondary) { Font = Theme.SmallBold, Radius = 7 });
-        _addPair = Add(new TextButton("+ Stereo-Paar", ButtonStyle.Secondary) { Font = Theme.SmallBold, Radius = 7 });
-        _bigMono = Add(new TextButton(noun, ButtonStyle.Primary, true) { Radius = 10 });
-        _bigPair = Add(new TextButton("Stereo-Paar", ButtonStyle.Secondary, true) { Radius = 10 });
-        _addMono.Clicked += AddMono; _bigMono.Clicked += AddMono;
-        _addPair.Clicked += AddPair; _bigPair.Clicked += AddPair;
-        _addMono.Tooltip = _bigMono.Tooltip = $"Einen {noun} am Ende hinzufügen";
-        _addPair.Tooltip = _bigPair.Tooltip = $"Zwei {noun}-Kanäle als Stereo-Paar (L/R) hinzufügen";
+        AddButton = Add(new Button("Hinzufügen", ButtonStyle.Tinted, Icon.Plus) { Font = Theme.CalloutMedium, Tooltip = $"{noun} oder Stereo-Paar hinzufügen" });
+        AddButton.Clicked += ShowAddMenu;
+        EmptyMono = Add(new Button(noun, ButtonStyle.Filled, Icon.Plus));
+        EmptyPair = Add(new Button("Stereo-Paar", ButtonStyle.Gray, Icon.Plus));
+        EmptyMono.Clicked += AddMono;
+        EmptyPair.Clicked += AddPair;
+        EmptyMono.Tooltip = $"Einen {noun} hinzufügen";
+        EmptyPair.Tooltip = $"Zwei {noun}-Kanäle als Stereo-Paar (L/R) hinzufügen";
     }
 
     void AddMono() => _m.AddChannels(_input, 1);
     void AddPair() => _m.AddChannels(_input, 2, _m.NextPairNames(_input));
 
+    void ShowAddMenu()
+    {
+        var root = Root; if (root == null) return;
+        string noun = _input ? "Eingang" : "Ausgang";
+        PopupMenu.Show(root, AddButton.Bounds, new List<MenuItem>
+        {
+            new($"{noun} (mono)", null, AddMono) { Icon = _input ? Icon.Mic : Icon.Speaker },
+            new("Stereo-Paar (L/R)", null, AddPair) { Icon = Icon.Plus },
+        }, 220);
+    }
+
     public int Count => _input ? _m.InputCount : _m.OutputCount;
+    public string Title => _input ? "Eingänge" : "Ausgänge";
 
     public void Rebuild()
     {
@@ -46,40 +59,39 @@ internal sealed class GroupPanel : Widget
         {
             var s = new ChannelStrip(_m, _input, i);
             Strips.Add(s);
-            Add(s);
+            Children.Insert(0, s);
+            s.Parent = this;
             s.Sync();
         }
     }
 
     public void SyncAll() { foreach (var s in Strips) s.Sync(); }
-
     public void SetStripWidth(float w) => _stripW = w;
-
     float ContentWidth => Count * _stripW + Math.Max(0, Count - 1) * Theme.StripGap;
+    public static float Inner => 12f;
 
     public override void Layout()
     {
         var b = Bounds;
         bool empty = Count == 0;
-        _addMono.Visible = _addPair.Visible = !empty;
-        _bigMono.Visible = _bigPair.Visible = empty;
+        AddButton.Visible = !empty;
+        EmptyMono.Visible = EmptyPair.Visible = empty;
+        float bw = AddButton.PreferredWidth;
+        AddButton.Bounds = new RectF(b.Right - Theme.CardPad - bw + 4, b.Y + (HeadH - Theme.ControlHSmall) / 2 + 2, bw, Theme.ControlHSmall);
 
-        float btnH = 26;
-        float hx = b.Right - Theme.PanelInner;
-        float w2 = Renderer.MeasureWidth(_addPair.Text, Theme.SmallBold) + 22;
-        float w1 = Renderer.MeasureWidth(_addMono.Text, Theme.SmallBold) + 22;
-        _addPair.Bounds = new RectF(hx - w2, b.Y + 9, w2, btnH); hx -= w2 + 6;
-        _addMono.Bounds = new RectF(hx - w1, b.Y + 9, w1, btnH);
+        var emptyArea = RectF.FromLTRB(b.X, b.Y + HeadH, b.Right, b.Bottom);
+        float eh = Draw.EmptyHeight(b.W, EmptyBody) + 8 + Theme.ControlH;
+        float ey = emptyArea.Y + Math.Max(10, (emptyArea.H - eh) / 2);
+        float btnY = ey + Draw.EmptyHeight(b.W, EmptyBody) + 4;
+        float w1 = EmptyMono.PreferredWidth + 10, w2 = EmptyPair.PreferredWidth + 10;
+        float x0 = b.CX - (w1 + w2 + 10) / 2;
+        EmptyMono.Bounds = new RectF(x0, btnY, w1, Theme.ControlH);
+        EmptyPair.Bounds = new RectF(x0 + w1 + 10, btnY, w2, Theme.ControlH);
+        _emptyY = ey;
 
-        var (_, _, btnY) = EmptyMetrics();
-        float cx = b.CX;
-        float bw = Math.Min(150, (b.W - 60) / 2);
-        _bigMono.Bounds = new RectF(cx - bw - 6, btnY, bw, 46);
-        _bigPair.Bounds = new RectF(cx + 6, btnY, bw, 46);
-
-        float top = b.Y + Theme.PanelHeaderHeight + 6;
-        float barH = ContentWidth > b.W - 2 * Theme.PanelInner + 0.5f ? 12 : 0;
-        _viewport = new RectF(b.X + Theme.PanelInner, top, b.W - 2 * Theme.PanelInner, Math.Max(0, b.Bottom - Theme.PanelInner - top - barH));
+        float top = b.Y + HeadH;
+        float barH = ContentWidth > b.W - 2 * Inner + 0.5f ? 14 : 0;
+        _viewport = new RectF(b.X + Inner, top, b.W - 2 * Inner, Math.Max(0, b.Bottom - Inner - top - barH));
         float maxScroll = Math.Max(0, ContentWidth - _viewport.W);
         _scroll = Math.Clamp(_scroll, 0, maxScroll);
         float x = _viewport.X - _scroll;
@@ -91,14 +103,15 @@ internal sealed class GroupPanel : Widget
         }
         if (barH > 0)
         {
-            _barTrack = new RectF(_viewport.X, _viewport.Bottom + 4, _viewport.W, 6);
-            float ratio = _viewport.W / ContentWidth;
-            float tw = Math.Max(30, _barTrack.W * ratio);
+            _barTrack = new RectF(_viewport.X, _viewport.Bottom + 6, _viewport.W, 6);
+            float tw = Math.Max(40, _barTrack.W * _viewport.W / ContentWidth);
             float tx = _barTrack.X + (_barTrack.W - tw) * (maxScroll <= 0 ? 0 : _scroll / maxScroll);
             _barThumb = new RectF(tx, _barTrack.Y, tw, 6);
         }
         else _barTrack = _barThumb = default;
     }
+
+    float _emptyY;
 
     public override Widget? HitTest(float x, float y)
     {
@@ -110,14 +123,14 @@ internal sealed class GroupPanel : Widget
             var h = c.HitTest(x, y);
             if (h != null) return h;
         }
-        return AcceptsMouse ? this : null;
+        return this;
     }
 
     public override bool AcceptsMouse => true;
 
     public override void OnMouseDown(in MouseEvent e)
     {
-        if (_barThumb.W > 0 && _barTrack.Inflate(4).Contains(e.X, e.Y))
+        if (_barThumb.W > 0 && _barTrack.Inflate(5).Contains(e.X, e.Y))
         {
             _dragBar = true;
             _dragBarOff = _barThumb.Contains(e.X, e.Y) ? e.X - _barThumb.X : _barThumb.W / 2;
@@ -136,57 +149,56 @@ internal sealed class GroupPanel : Widget
     }
 
     public override void OnMouseMove(in MouseEvent e) { if (_dragBar && IsPressed) DragBarTo(e.X); }
-    public override void OnMouseUp(in MouseEvent e) => _dragBar = false;
+    public override void OnMouseUp(in MouseEvent e) { _dragBar = false; Invalidate(); }
 
     public override bool OnMouseWheel(in MouseEvent e)
     {
-        // Rad ueber Fader/Knopf wird von diesen verbraucht; hier landen nur freie Stellen.
+        // Rad ueber Fadern verbrauchen diese; hier landen nur freie Stellen.
         if (ContentWidth <= _viewport.W) return false;
-        _scroll = Math.Clamp(_scroll - e.Wheel * 60, 0, Math.Max(0, ContentWidth - _viewport.W));
+        _scroll = Math.Clamp(_scroll - e.Wheel * 70, 0, Math.Max(0, ContentWidth - _viewport.W));
         Layout();
         return true;
+    }
+
+    /// <summary>Scrollt so, dass Streifen i sichtbar ist.</summary>
+    public void Reveal(int i)
+    {
+        float l = i * (_stripW + Theme.StripGap), r = l + _stripW;
+        if (l < _scroll) _scroll = l;
+        else if (r > _scroll + _viewport.W) _scroll = r - _viewport.W;
+        Layout();
     }
 
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        g.FillRound(b, Theme.RadiusPanel, Theme.Panel);
-        g.StrokeRound(b, Theme.RadiusPanel, Theme.Border);
-        string title = _input ? "EINGÄNGE" : "AUSGÄNGE";
-        g.Text(title, new RectF(b.X + Theme.PanelInner + 4, b.Y + 4, 140, Theme.PanelHeaderHeight), Theme.Caps, Theme.TextDim, HAlign.Left, VAlign.Middle, false);
-        float tw = Renderer.MeasureWidth(title, Theme.Caps);
-        if (Count > 0)
+        Draw.Card(g, b);
+        Draw.CardTitle(g, new RectF(b.X + Theme.CardPad, b.Y + 2, 200, HeadH), Title, Count > 0 ? Count : null);
+
+        if (Count == 0)
         {
-            string n = Count.ToString();
-            float cw = Renderer.MeasureWidth(n, Theme.TinyBold) + 12;
-            var chip = new RectF(b.X + Theme.PanelInner + 4 + tw + 8, b.Y + 4 + (Theme.PanelHeaderHeight - 17) / 2, cw, 17);
-            g.FillRound(chip, 8.5f, Theme.Raised);
-            g.Text(n, chip, Theme.TinyBold, Theme.TextDim, HAlign.Center, VAlign.Middle, false);
+            Draw.Empty(g, b, _emptyY, _input ? Icon.Mic : Icon.Speaker, _input ? "Noch keine Eingänge" : "Noch keine Ausgänge", EmptyBody);
+            PaintChildrenExceptStrips(g);
+            return;
         }
 
-        if (Count == 0) { PaintEmpty(g); PaintChildrenExceptStrips(g); return; }
-
-        g.PushClip(_viewport);
+        g.PushClip(_viewport.Inflate(2));
         foreach (var s in Strips) if (s.Bounds.Right > _viewport.X && s.Bounds.X < _viewport.Right) s.Paint(g);
         if (_input)
         {
-            // Stereo-App-Links: eine kleine Bruecke verbindet die beiden Link-Felder des Paares
+            // Stereo-App-Links: eine Bruecke verbindet die Koepfe des Paares
             foreach (var l in _m.AppLinks)
             {
                 for (int k = l.FirstChannel; k < l.End - 1 && k + 1 < Strips.Count; k++)
                 {
-                    var a = Strips[k].LinkRect; var c = Strips[k + 1].LinkRect;
-                    if (a.IsEmpty || c.IsEmpty) continue;
-                    g.Fill(new RectF(a.Right, a.CY - 2, c.X - a.Right, 4), _m.AppLinksEnabled ? Theme.Accent.With(0.85f) : Theme.BorderStrong);
+                    var a = Strips[k].Header.Bounds; var c = Strips[k + 1].Header.Bounds;
+                    var col = _m.AppLinksEnabled ? LinkLook.Color(_m.ViewOf(l).State) : Theme.BorderStrong;
+                    g.FillPill(new RectF(a.Right - 2, a.Y + 3, c.X - a.Right + 4, 3), col);
                 }
             }
         }
         g.PopClip();
-        if (_barTrack.W > 0)
-        {
-            g.FillRound(_barTrack, 3, Theme.Well);
-            g.FillRound(_barThumb, 3, _dragBar ? Theme.Accent : Theme.RaisedHi);
-        }
+        if (_barTrack.W > 0) g.FillPill(_barThumb, _dragBar ? Theme.TextSecondary.With(0.8f) : Theme.TextTertiary.With(0.5f));
         PaintChildrenExceptStrips(g);
     }
 
@@ -196,52 +208,34 @@ internal sealed class GroupPanel : Widget
     }
 
     string EmptyBody => _input
-        ? "Eingänge sind deine Signalquellen. Lege sie hier an und weise ihnen später auf der Seite „Geräte“ eine Aufnahme-Quelle zu."
-        : "Ausgänge gehen an Lautsprecher und Endstufen. Lege sie hier an; die Matrix verteilt die Eingänge darauf. Für Hochtöner lässt sich pro Kanal eine Gain-Sperre setzen.";
-
-    /// <summary>Senkrechte Aufteilung des Leerzustands (Symbol, Textblock, Tasten) - fuer Layout und Zeichnen gleich.</summary>
-    (float IconY, float BodyH, float BtnY) EmptyMetrics()
-    {
-        var b = Bounds;
-        float y = b.Y + Theme.PanelHeaderHeight + (b.H - Theme.PanelHeaderHeight) / 2 - 90;
-        float bh = Renderer.TextHeight(EmptyBody, Theme.Body, Math.Max(40, b.W - 80));
-        return (y, bh, y + 70 + bh + 22);
-    }
-
-    void PaintEmpty(Renderer g)
-    {
-        var b = Bounds;
-        float cx = b.CX;
-        var (y, bh, _) = EmptyMetrics();
-        // Symbol: Kreis mit Pfeil
-        g.StrokeRect(new RectF(cx - 26, y - 26, 52, 52), Theme.BorderStrong, 1.6f);
-        if (_input) Icons.InArrow(g, cx, y, 22, Theme.TextDim); else Icons.OutArrow(g, cx, y, 22, Theme.TextDim);
-        string head = _input ? "Noch keine Eingänge" : "Noch keine Ausgänge";
-        g.Text(head, new RectF(b.X + 24, y + 38, b.W - 48, 26), Theme.Heading, Theme.Text, HAlign.Center);
-        g.Text(EmptyBody, new RectF(b.X + 40, y + 70, b.W - 80, bh + 4), Theme.Body, Theme.TextDim, HAlign.Center, VAlign.Top, false, true);
-    }
+        ? "Eingänge sind deine Signalquellen. Lege sie hier an und weise ihnen auf der Seite „Geräte“ eine Aufnahme-Quelle zu – oder binde ein Programm per App-Link."
+        : "Ausgänge gehen an Lautsprecher und Endstufen. Die Matrix verteilt die Eingänge darauf. Für Hochtöner lässt sich pro Kanal eine Gain-Sperre setzen.";
 }
 
+/// <summary>Mixer: Eingaenge, Ausgaenge und Master nebeneinander (Anordnung wie Mixing Station).</summary>
 internal sealed class MixerPage : Page
 {
     readonly AppModel _m;
     readonly GroupPanel _in, _out;
-    readonly Panel _masterPanel = new();
+    readonly MasterPanel _masterPanel = new();
     readonly ChannelStrip _master;
     float[] _inPeaks = Array.Empty<float>();
     float[] _outPeaks = Array.Empty<float>();
 
     public override string Title => "Mixer";
+    public override Icon Icon => Icon.Mixer;
+    public override string? Subtitle => _m.InputCount + _m.OutputCount == 0 ? null
+        : $"{Fmt.Inputs(_m.InputCount)}  ·  {Fmt.Outputs(_m.OutputCount)}  ·  Klick auf einen Kanalnamen öffnet seine Einstellungen";
     internal GroupPanel Inputs => _in;
     internal GroupPanel Outputs => _out;
+    internal ChannelStrip Master => _master;
 
-    sealed class Panel : Widget
+    sealed class MasterPanel : Widget
     {
         public override void Paint(Renderer g)
         {
-            g.FillRound(Bounds, Theme.RadiusPanel, Theme.Panel);
-            g.StrokeRound(Bounds, Theme.RadiusPanel, Theme.Border);
-            g.Text("MASTER", new RectF(Bounds.X + Theme.PanelInner + 4, Bounds.Y + 4, 100, Theme.PanelHeaderHeight), Theme.Caps, Theme.TextDim, HAlign.Left, VAlign.Middle, false);
+            Draw.Card(g, Bounds);
+            Draw.CardTitle(g, new RectF(Bounds.X + Theme.CardPad, Bounds.Y + 2, 100, 52), "Master");
             PaintChildren(g);
         }
     }
@@ -255,6 +249,7 @@ internal sealed class MixerPage : Page
         _master = _masterPanel.Add(new ChannelStrip(m, false, 0, master: true));
         m.StructureChanged += Rebuild;
         m.ValuesChanged += SyncAll;
+        m.HostChanged += SyncAll;
         Rebuild();
     }
 
@@ -277,32 +272,34 @@ internal sealed class MixerPage : Page
         Invalidate();
     }
 
-    public override void OnShow() { SyncAll(); }
+    public override void OnShow() { LayoutPanels(); SyncAll(); }
 
-    /// <summary>Nur fuer Screenshots: Menue/Editor eines Streifens oeffnen.</summary>
-    public void DebugOpen(bool input, int index, string what)
+    /// <summary>Oeffnet das Kanal-Blatt (Screenshots, Selbsttest).</summary>
+    public ChannelSheet? OpenSheet(bool input, int index)
     {
-        var strips = (input ? _in : _out).Strips;
-        if (index >= 0 && index < strips.Count) strips[index].DebugOpen(what);
+        var g = input ? _in : _out;
+        if (index < 0 || index >= g.Strips.Count || Root == null) return null;
+        g.Reveal(index);
+        return ChannelSheet.Show(Root, _m, input, index);
     }
 
     public override void Layout() => LayoutPanels();
 
     void LayoutPanels()
     {
-        var area = new RectF(Bounds.X + Theme.Pad, Bounds.Y + 12, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - 24));
-        const float gap = 12f;
+        var area = new RectF(Bounds.X + Theme.Pad, Bounds.Y + 2, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - Theme.Pad - 2));
+        float gap = Theme.Gap;
         int ni = _m.InputCount, no = _m.OutputCount;
-        float masterStrip = 78f;
-        float masterW = masterStrip + 2 * Theme.PanelInner;
+        float inner = GroupPanel.Inner, sg = Theme.StripGap;
+        float masterStrip = Theme.Touch ? 104f : 92f;
+        float masterW = masterStrip + 2 * inner;
         float free = area.W - masterW - 2 * gap;
-        const float emptyW = 360f;
-        float inner = Theme.PanelInner, sg = Theme.StripGap;
+        const float emptyW = 380f;
 
         float s, win, wout;
         if (ni == 0 && no == 0)
         {
-            s = 70; win = wout = free / 2;
+            s = 80; win = wout = free / 2;
         }
         else
         {
@@ -310,16 +307,15 @@ internal sealed class MixerPage : Page
             float overhead = (ni > 0 ? 2 * inner + (ni - 1) * sg : 0) + (no > 0 ? 2 * inner + (no - 1) * sg : 0);
             int count = ni + no;
             s = (free - fixedW - overhead) / count;
-            s = Math.Clamp(s, Theme.StripMinWidth - 6, Theme.StripMaxWidth);
-            // Mindestbreite je Gruppe: Kopfzeile mit Titel und beiden Hinzufuegen-Tasten muss hineinpassen
-            const float minPanel = 330f;
+            s = Math.Clamp(s, Theme.StripMinW, Theme.StripMaxW);
+            const float minPanel = 260f;
             win = ni > 0 ? Math.Max(minPanel, 2 * inner + ni * s + (ni - 1) * sg) : emptyW;
             wout = no > 0 ? Math.Max(minPanel, 2 * inner + no * s + (no - 1) * sg) : emptyW;
             float total = win + wout;
             if (total > free)
             {
                 // zu viele Kanaele: die Gruppen teilen sich den Platz im Verhaeltnis, innen wird gescrollt
-                win = Math.Max(Math.Min(200, free / 2), free * win / total);
+                win = Math.Max(Math.Min(260, free / 2), free * win / total);
                 wout = free - win;
             }
             else if (total < free)
@@ -330,13 +326,12 @@ internal sealed class MixerPage : Page
         }
         _in.SetStripWidth(s);
         _out.SetStripWidth(s);
-        // Bleibt Platz uebrig (sehr breite Fenster), sitzt die ganze Gruppe mittig statt einsam am Rand.
         float used = win + wout + masterW + 2 * gap;
         float startX = area.X + Math.Max(0, (area.W - used) / 2);
         _in.Bounds = new RectF(startX, area.Y, Math.Max(0, win), area.H);
         _out.Bounds = new RectF(_in.Bounds.Right + gap, area.Y, Math.Max(0, wout), area.H);
         _masterPanel.Bounds = new RectF(_out.Bounds.Right + gap, area.Y, masterW, area.H);
-        _master.Bounds = new RectF(_masterPanel.Bounds.X + inner, area.Y + Theme.PanelHeaderHeight + 6, masterStrip, area.H - Theme.PanelHeaderHeight - 6 - inner);
+        _master.Bounds = new RectF(_masterPanel.Bounds.X + inner, area.Y + 52, masterStrip, area.H - 52 - inner);
         _in.Layout(); _out.Layout(); _master.Layout();
     }
 

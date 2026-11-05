@@ -2,25 +2,24 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Ui;
 
-internal enum ButtonStyle { Secondary, Primary, Ghost, Danger }
+internal enum ButtonStyle { Filled, Tinted, Gray, Plain, Destructive, DestructiveTinted }
 
-/// <summary>Text-Taste (Standard, Primaer mit Akzent, Ghost, Gefahr). Optional mit Plus-Symbol.</summary>
-internal class TextButton : Widget
+/// <summary>Taste im Apple-Stil: gefuellt (Akzent), getoent, grau, schlicht oder destruktiv; optional mit Symbol davor.</summary>
+internal class Button : Widget
 {
     public string Text { get; set; }
     public ButtonStyle Style { get; set; }
-    public bool PlusIcon { get; set; }
-    public TextStyle Font { get; set; } = Theme.BodyBold;
-    public float Radius { get; set; } = 8f;
+    public Icon Icon { get; set; }
+    public TextStyle Font { get; set; } = Theme.BodyMedium;
+    public bool Pill { get; set; }
     public event Action? Clicked;
 
-    public TextButton(string text, ButtonStyle style = ButtonStyle.Secondary, bool plus = false)
+    public Button(string text, ButtonStyle style = ButtonStyle.Gray, Icon icon = Icon.None)
     {
-        Text = text; Style = style; PlusIcon = plus; Cursor = CursorKind.Hand;
+        Text = text; Style = style; Icon = icon; Cursor = CursorKind.Hand;
     }
 
     public override bool AcceptsMouse => Visible;
-
     public override void OnMouseEnter() => Invalidate();
     public override void OnMouseLeave() => Invalidate();
     public override void OnMouseDown(in MouseEvent e) { if (e.Button == 0 && Enabled) Invalidate(); }
@@ -29,66 +28,62 @@ internal class TextButton : Widget
         Invalidate();
         if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y)) Clicked?.Invoke();
     }
+    public override CursorKind CursorAt(float x, float y) => Enabled ? CursorKind.Hand : CursorKind.Arrow;
 
-    protected void Fire() => Clicked?.Invoke();
+    /// <summary>Empfohlene Breite fuer den Text (mit Innenabstand und Symbol).</summary>
+    public float PreferredWidth => Renderer.MeasureWidth(Text, Font) + (Icon != Icon.None ? 22 : 0) + (Theme.Touch ? 36 : 28);
+
+    public static (Color4 Bg, Color4 Fg) Colors(ButtonStyle style, bool enabled, bool hot, bool down)
+    {
+        if (!enabled)
+            return style == ButtonStyle.Plain ? (Theme.Clear, Theme.TextTertiary) : (Theme.Control.With(0.6f), Theme.TextTertiary);
+        return style switch
+        {
+            ButtonStyle.Filled => (down ? Theme.AccentPressed : hot ? Theme.AccentHover : Theme.Accent, Theme.OnAccent),
+            ButtonStyle.Tinted => (Theme.Accent.With((Theme.IsDark ? 0.18f : 0.11f) + (down ? 0.12f : hot ? 0.07f : 0)), Theme.AccentText),
+            ButtonStyle.Plain => (down ? Theme.ControlPressed.With(0.7f) : hot ? Theme.Control.With(0.8f) : Theme.Clear, Theme.AccentText),
+            ButtonStyle.Destructive => (Theme.Mix(Theme.Red, down ? Theme.Black : Theme.White, down ? 0.18f : hot ? 0.10f : 0f), Theme.White),
+            ButtonStyle.DestructiveTinted => (Theme.Red.With((Theme.IsDark ? 0.16f : 0.10f) + (down ? 0.12f : hot ? 0.07f : 0)), Theme.Red),
+            _ => (down ? Theme.ControlPressed : hot ? Theme.ControlHover : Theme.Control, Theme.Text),
+        };
+    }
 
     public override void Paint(Renderer g)
     {
-        bool hot = IsHovered && Enabled, down = IsPressed && Enabled && hot;
-        Color4 bg, fg, border = default;
-        bool hasBorder = false;
-        switch (Style)
-        {
-            case ButtonStyle.Primary:
-                bg = Theme.Accent; fg = Theme.OnAccent;
-                if (hot) bg = Theme.AccentHi;
-                if (down) bg = Theme.Mix(Theme.Accent, Theme.Black, 0.18f);
-                break;
-            case ButtonStyle.Danger:
-                bg = Theme.Mute.With(0.16f); fg = Theme.Mute; border = Theme.Mute.With(0.5f); hasBorder = true;
-                if (hot) bg = Theme.Mute.With(0.28f);
-                break;
-            case ButtonStyle.Ghost:
-                bg = hot ? Theme.Rgb(0xFFFFFF, 0.07f) : default; fg = hot ? Theme.Text : Theme.TextDim;
-                if (down) bg = Theme.Rgb(0xFFFFFF, 0.12f);
-                break;
-            default:
-                bg = hot ? Theme.RaisedHi : Theme.Raised; fg = Theme.Text; border = Theme.BorderStrong; hasBorder = true;
-                if (down) bg = Theme.Mix(Theme.Raised, Theme.Black, 0.2f);
-                break;
-        }
-        if (!Enabled)
-        {
-            bg = Style == ButtonStyle.Primary ? Theme.Raised : Theme.Card; fg = Theme.TextFaint; border = Theme.Border; hasBorder = Style != ButtonStyle.Ghost;
-        }
+        bool hot = IsHovered && Enabled, down = IsPressed && hot;
+        var (bg, fg) = Colors(Style, Enabled, hot, down);
         var b = Bounds;
-        if (bg.A > 0) g.FillRound(b, Radius, bg);
-        if (hasBorder) g.StrokeRound(b, Radius, border);
+        float radius = Pill ? b.H / 2 : Theme.RadiusControl;
+        g.FillRound(b, radius, bg);
         float tw = Renderer.MeasureWidth(Text, Font);
-        if (PlusIcon)
+        float iconS = Font.Size >= 13 ? 16 : 14;
+        if (Icon != Icon.None && Text.Length == 0)
         {
-            float total = 12 + 8 + tw;
-            float x0 = b.CX - total / 2;
-            Icons.Plus(g, x0 + 6, b.CY, 11, fg, 1.8f);
-            g.Text(Text, new RectF(x0 + 20, b.Y, tw + 4, b.H), Font, fg, HAlign.Left, VAlign.Middle, false);
+            Icons.Draw(g, Icon, b.CX, b.CY, iconS, fg);
+            return;
         }
-        else g.Text(Text, b.Deflate(6, 0), Font, fg, HAlign.Center);
+        if (Icon != Icon.None)
+        {
+            float total = iconS + 6 + tw;
+            float x0 = MathF.Round(b.CX - total / 2);
+            Icons.Draw(g, Icon, x0 + iconS / 2, b.CY, iconS, fg);
+            g.Text(Text, new RectF(x0 + iconS + 6, b.Y, tw + 4, b.H), Font, fg, HAlign.Left, VAlign.Middle, false);
+        }
+        else g.Text(Text, b.Deflate(8, 0), Font, fg, HAlign.Center);
     }
 }
 
-internal enum IconKind { More, Lock, LockOpen, Plus, Cross, Trash, Refresh, Left, Right, Down }
-
-/// <summary>Kleine quadratische Symboltaste. Active faerbt das Symbol (z. B. aktive Gain-Sperre).</summary>
+/// <summary>Symboltaste: rundes Hover-Feld, Symbol in Sekundaerfarbe (aktiv: eigene Farbe).</summary>
 internal sealed class IconButton : Widget
 {
-    public IconKind Icon { get; set; }
+    public Icon Icon { get; set; }
     public bool Active { get; set; }
-    public Color4 ActiveColor { get; set; } = Theme.Accent;
-    public float IconSize { get; set; } = 13f;
+    public Color4? ActiveColor { get; set; }
+    public float IconSize { get; set; } = 18f;
+    public bool Circle { get; set; }
     public event Action<RectF>? Clicked;
-    public bool Filled { get; set; }
 
-    public IconButton(IconKind icon) { Icon = icon; Cursor = CursorKind.Hand; }
+    public IconButton(Icon icon, string? tooltip = null) { Icon = icon; Tooltip = tooltip; Cursor = CursorKind.Hand; }
     public override bool AcceptsMouse => Visible;
     public override void OnMouseEnter() => Invalidate();
     public override void OnMouseLeave() => Invalidate();
@@ -103,36 +98,26 @@ internal sealed class IconButton : Widget
     {
         bool hot = IsHovered && Enabled;
         var b = Bounds;
-        if (hot) g.FillRound(b, 6, IsPressed ? Theme.RaisedHi : Theme.CardHover);
-        else if (Filled || Active) g.FillRound(b, 6, Active ? ActiveColor.With(0.14f) : Theme.Raised);
-        var c = !Enabled ? Theme.TextFaint : Active ? ActiveColor : hot ? Theme.Text : Theme.TextDim;
-        float cx = b.CX, cy = b.CY, s = IconSize;
-        switch (Icon)
-        {
-            case IconKind.More: Icons.Dots(g, cx, cy, s, c); break;
-            case IconKind.Lock: Icons.Lock(g, cx, cy, s, c, true); break;
-            case IconKind.LockOpen: Icons.Lock(g, cx, cy, s, c, false); break;
-            case IconKind.Plus: Icons.Plus(g, cx, cy, s * 0.8f, c); break;
-            case IconKind.Cross: Icons.Cross(g, cx, cy, s * 0.7f, c); break;
-            case IconKind.Trash: Icons.Trash(g, cx, cy, s, c); break;
-            case IconKind.Refresh: Icons.Refresh(g, cx, cy, s, c); break;
-            case IconKind.Left: Icons.Chevron(g, cx, cy, s * 0.8f, c, 2); break;
-            case IconKind.Right: Icons.Chevron(g, cx, cy, s * 0.8f, c, 3); break;
-            case IconKind.Down: Icons.Chevron(g, cx, cy, s * 0.8f, c, 0); break;
-        }
+        float rad = Circle ? Math.Min(b.W, b.H) / 2 : Theme.RadiusControl;
+        var ac = ActiveColor ?? Theme.AccentText;
+        if (hot) g.FillRound(b, rad, IsPressed ? Theme.ControlPressed : Theme.ControlHover);
+        else if (Active) g.FillRound(b, rad, Theme.Soft(ac));
+        var c = !Enabled ? Theme.TextTertiary : Active ? ac : hot ? Theme.Text : Theme.TextSecondary;
+        Icons.Draw(g, Icon, b.CX, b.CY, IconSize, c);
     }
 }
 
-/// <summary>Mute / Solo / Phase: rastet ein, Farbe frei waehlbar.</summary>
-internal sealed class ToggleButton : Widget
+/// <summary>Rastende Taste fuer Mute/Solo im Kanalstreifen (aktiv: volle Funktionsfarbe).</summary>
+internal sealed class Toggle : Widget
 {
     public string Text { get; set; }
-    public Color4 ActiveColor { get; set; }
+    public Func<Color4> ActiveColor { get; set; }
+    public Func<Color4> ActiveText { get; set; } = () => Theme.White;
     public bool Checked { get; private set; }
-    public TextStyle Font { get; set; } = Theme.SmallBold;
+    public TextStyle Font { get; set; } = Theme.CalloutStrong;
     public event Action<bool>? Toggled;
 
-    public ToggleButton(string text, Color4 activeColor) { Text = text; ActiveColor = activeColor; Cursor = CursorKind.Hand; }
+    public Toggle(string text, Func<Color4> activeColor) { Text = text; ActiveColor = activeColor; Cursor = CursorKind.Hand; }
 
     public void SetChecked(bool on) { if (on != Checked) { Checked = on; Invalidate(); } }
 
@@ -155,42 +140,202 @@ internal sealed class ToggleButton : Widget
         var b = Bounds;
         bool hot = IsHovered && Enabled;
         Color4 bg, fg;
-        if (Checked) { bg = hot ? Theme.Mix(ActiveColor, Theme.White, 0.15f) : ActiveColor; fg = Theme.OnAccent; }
-        else { bg = hot ? Theme.RaisedHi : Theme.Raised; fg = hot ? Theme.Text : Theme.TextDim; }
-        if (IsPressed && hot) bg = Theme.Mix(bg, Theme.Black, 0.22f);
-        g.FillRound(b, Theme.RadiusControl, bg);
-        if (!Checked) g.StrokeRound(b, Theme.RadiusControl, Theme.BorderStrong.With(0.6f));
+        if (Checked)
+        {
+            var ac = ActiveColor();
+            bg = hot ? Theme.Mix(ac, Theme.White, 0.12f) : ac; fg = ActiveText();
+        }
+        else { bg = hot ? Theme.ControlHover : Theme.Control; fg = hot ? Theme.Text : Theme.TextSecondary; }
+        if (IsPressed && hot) bg = Theme.Mix(bg, Theme.Black, 0.15f);
+        g.FillRound(b, Theme.RadiusSmall, bg);
         g.Text(Text, b, Font, fg, HAlign.Center);
     }
 }
 
-/// <summary>Drehregler: Ziehen (senkrecht), Mausrad, Strg/Umschalt = fein, Doppelklick = Vorgabewert.</summary>
-internal sealed class Knob : Widget
+/// <summary>Ein/Aus-Schalter wie bei iOS (Akzent = an).</summary>
+internal sealed class Switch : Widget
+{
+    public bool On { get; private set; }
+    public event Action<bool>? Changed;
+
+    public Switch() { Cursor = CursorKind.Hand; }
+    public void SetOn(bool on) { if (on != On) { On = on; Invalidate(); } }
+
+    public override bool AcceptsMouse => Visible;
+    public override void OnMouseEnter() => Invalidate();
+    public override void OnMouseLeave() => Invalidate();
+    public override CursorKind CursorAt(float x, float y) => Enabled ? CursorKind.Hand : CursorKind.Arrow;
+    public override void OnMouseUp(in MouseEvent e)
+    {
+        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y))
+        {
+            On = !On;
+            Invalidate();
+            Changed?.Invoke(On);
+        }
+    }
+
+    /// <summary>Gezeichnete Flaeche (rechtsbuendig in Bounds, senkrecht mittig).</summary>
+    public RectF Track => new(Bounds.Right - Theme.SwitchW, Bounds.CY - Theme.SwitchH / 2, Theme.SwitchW, Theme.SwitchH);
+
+    public override void Paint(Renderer g)
+    {
+        var t = Track;
+        bool hot = IsHovered && Enabled;
+        Color4 track = On ? (hot ? Theme.AccentHover : Theme.Accent) : (Theme.IsDark ? (hot ? Theme.Rgb(0x4A4D55) : Theme.Rgb(0x3E4148)) : (hot ? Theme.Rgb(0xD3D6DB) : Theme.Rgb(0xDDE0E4)));
+        if (!Enabled) track = track.With(0.45f);
+        g.FillPill(t, track);
+        float d = t.H - 4;
+        float kx = On ? t.Right - 2 - d : t.X + 2;
+        var knob = new RectF(kx, t.Y + 2, d, d);
+        g.Shadow(knob, d / 2, 3, 0.8f, 1);
+        g.FillPill(knob, Enabled ? Theme.White : Theme.Rgb(0xE8E8E8));
+    }
+}
+
+/// <summary>Segment-Schalter (Apple): eine Zeile Abschnitte, der gewaehlte hebt sich als Plaettchen ab.</summary>
+internal sealed class Segmented : Widget
+{
+    public string[] Items { get; set; }
+    public int Selected { get; private set; }
+    public Func<int, bool>? ItemEnabled { get; set; }
+    public Func<int, string?>? ItemTooltip { get; set; }
+    public TextStyle Font { get; set; } = Theme.CalloutMedium;
+    public event Action<int>? Changed;
+    int _hot = -1, _press = -1;
+
+    public Segmented(params string[] items) { Items = items; Cursor = CursorKind.Hand; }
+
+    public void SetSelected(int i) { if (i != Selected) { Selected = i; Invalidate(); } }
+
+    public override bool AcceptsMouse => Visible;
+
+    public RectF SegRect(int i)
+    {
+        var b = Bounds.Deflate(2);
+        float w = b.W / Math.Max(1, Items.Length);
+        return new RectF(b.X + i * w, b.Y, w, b.H);
+    }
+
+    int IndexAt(float x, float y)
+    {
+        for (int i = 0; i < Items.Length; i++) if (SegRect(i).Contains(x, y)) return i;
+        return -1;
+    }
+
+    bool IsEnabled(int i) => Enabled && (ItemEnabled?.Invoke(i) ?? true);
+
+    public override CursorKind CursorAt(float x, float y) { int i = IndexAt(x, y); return i >= 0 && IsEnabled(i) ? CursorKind.Hand : CursorKind.Arrow; }
+    public override string? TooltipAt(float x, float y) { int i = IndexAt(x, y); return i >= 0 ? ItemTooltip?.Invoke(i) ?? Tooltip : Tooltip; }
+    public override void OnMouseMove(in MouseEvent e) { int i = IndexAt(e.X, e.Y); if (i != _hot) { _hot = i; Invalidate(); } }
+    public override void OnMouseLeave() { _hot = -1; Invalidate(); }
+    public override void OnMouseDown(in MouseEvent e) { _press = e.Button == 0 ? IndexAt(e.X, e.Y) : -1; Invalidate(); }
+    public override void OnMouseUp(in MouseEvent e)
+    {
+        int i = IndexAt(e.X, e.Y);
+        if (i >= 0 && i == _press && IsEnabled(i))
+        {
+            Selected = i;
+            Changed?.Invoke(i);
+        }
+        _press = -1;
+        Invalidate();
+    }
+
+    public override void Paint(Renderer g)
+    {
+        var b = Bounds;
+        g.FillRound(b, Theme.RadiusControl + 1, Theme.Control);
+        for (int i = 0; i < Items.Length; i++)
+        {
+            var r = SegRect(i);
+            bool sel = i == Selected;
+            bool en = IsEnabled(i);
+            if (sel)
+            {
+                if (!Theme.IsDark) g.Shadow(r, Theme.RadiusControl - 1, 2.5f, 0.7f, 1);
+                g.FillRound(r, Theme.RadiusControl - 1, Theme.SegmentThumb);
+            }
+            else if (i == _hot && en) g.FillRound(r.Deflate(1), Theme.RadiusControl - 1, Theme.ControlHover);
+            // Trennstrich zwischen zwei nicht gewaehlten Abschnitten
+            if (i > 0 && !sel && i - 1 != Selected)
+                g.Fill(new RectF(r.X - 0.5f, r.CY - r.H * 0.25f, 1, r.H * 0.5f), Theme.BorderStrong.With(0.7f));
+            var fg = !en ? Theme.TextTertiary : sel ? Theme.Text : Theme.TextSecondary;
+            g.Text(Items[i], r.Deflate(4, 0), sel ? new TextStyle(Font.Size, Vortice.DirectWrite.FontWeight.SemiBold) : Font, fg, HAlign.Center);
+        }
+    }
+}
+
+/// <summary>Auswahlfeld (Apple-Popup-Taste): zeigt den aktuellen Wert, klappt beim Klick ein Menue auf.</summary>
+internal sealed class Dropdown : Widget
+{
+    public Func<string> Text = () => "";
+    public Func<List<MenuItem>> Items = () => new();
+    public Func<Color4>? TextColor;
+
+    public Dropdown() { Cursor = CursorKind.Hand; }
+    public override bool AcceptsMouse => Visible;
+    public override CursorKind CursorAt(float x, float y) => Enabled ? CursorKind.Hand : CursorKind.Arrow;
+    public override void OnMouseEnter() => Invalidate();
+    public override void OnMouseLeave() => Invalidate();
+    public override void OnMouseDown(in MouseEvent e) => Invalidate();
+    public override void OnMouseUp(in MouseEvent e)
+    {
+        Invalidate();
+        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y) && Root != null)
+            PopupMenu.Show(Root, Bounds, Items(), Bounds.W);
+    }
+
+    public override void Paint(Renderer g)
+    {
+        var b = Bounds;
+        bool hot = IsHovered && Enabled;
+        g.FillRound(b, Theme.RadiusControl, !Enabled ? Theme.Control.With(0.6f) : hot ? Theme.ControlHover : Theme.Control);
+        var tc = !Enabled ? Theme.TextTertiary : TextColor?.Invoke() ?? Theme.Text;
+        g.Text(Text(), new RectF(b.X + 12, b.Y, b.W - 40, b.H), Theme.Body, tc, HAlign.Left, VAlign.Middle, true);
+        Icons.Draw(g, Icon.UpDown, b.Right - 16, b.CY, 14, Enabled ? Theme.TextSecondary : Theme.TextTertiary);
+    }
+}
+
+/// <summary>Waagrechter Schieberegler (Apple): Ziehen, Mausrad, Strg/Umschalt = fein, Doppelklick = Vorgabe.</summary>
+internal sealed class Slider : Widget
 {
     public double Min { get; set; }
     public double Max { get; set; } = 1;
     public double Default { get; set; }
     public double Value { get; private set; }
+    /// <summary>Raster beim Ziehen (0 = frei).</summary>
+    public double Step { get; set; } = 0.01;
+    public double WheelStep { get; set; } = 0.1;
+    /// <summary>Wert -> Position 0..1 (Standard: linear).</summary>
+    public Func<double, double>? ToNorm { get; set; }
+    public Func<double, double>? FromNorm { get; set; }
+    /// <summary>Obergrenze, ueber die nicht gezogen werden darf (z. B. Gain-Sperre); NaN = keine.</summary>
+    public double Limit { get; set; } = double.NaN;
+    public Func<Color4>? FillColor { get; set; }
     public event Action<double>? Changed;
 
-    double _dragStartValue;
-    float _dragStartY;
     bool _lastFine;
-    const float DragPixels = 160f;
+    double _dragNorm0;
+    float _dragX0;
 
-    public Knob() { Cursor = CursorKind.SizeNS; }
+    public Slider() { Cursor = CursorKind.Hand; }
     public override bool AcceptsMouse => Visible;
 
-    public void SetValue(double v)
-    {
-        v = Math.Clamp(v, Min, Max);
-        if (v != Value) { Value = v; Invalidate(); }
-    }
+    double Norm(double v) => ToNorm?.Invoke(v) ?? (Max > Min ? (v - Min) / (Max - Min) : 0);
+    double Val(double t) => FromNorm?.Invoke(t) ?? Min + t * (Max - Min);
 
-    void Set(double v)
+    public void SetValue(double v) { if (!v.Equals(Value)) { Value = v; Invalidate(); } }
+
+    RectF TrackRect => new(Bounds.X + KnobD / 2, Bounds.CY - 2, Math.Max(1, Bounds.W - KnobD), 4);
+    static float KnobD => Theme.Touch ? 26 : 20;
+
+    void Set(double v, bool fine)
     {
-        v = Math.Clamp(Math.Round(v, 2), Min, Max);
-        if (v == Value) return;
+        if (Step > 0 && !double.IsInfinity(v)) v = Math.Round(v / (fine ? Step / 10 : Step)) * (fine ? Step / 10 : Step);
+        if (!double.IsNegativeInfinity(v)) v = Math.Clamp(v, Min, Max);
+        if (!double.IsNaN(Limit) && v > Limit) v = Limit;
+        if (v.Equals(Value)) return;
         Value = v; Invalidate();
         Changed?.Invoke(v);
     }
@@ -198,18 +343,22 @@ internal sealed class Knob : Widget
     public override void OnMouseDown(in MouseEvent e)
     {
         if (e.Button != 0 || !Enabled) return;
-        if (e.Clicks >= 2) { Set(Default); return; }
-        _dragStartValue = Value; _dragStartY = e.Y; _lastFine = e.Fine;
+        if (e.Clicks >= 2) { Set(Default, false); return; }
+        var t = TrackRect;
+        float kx = t.X + (float)Math.Clamp(Norm(Value), 0, 1) * t.W;
+        bool onKnob = Math.Abs(e.X - kx) <= KnobD / 2 + 2;
+        if (!onKnob) Set(Val(Math.Clamp((e.X - t.X) / t.W, 0, 1)), e.Fine);
+        _dragNorm0 = Math.Clamp(Norm(Value), 0, 1); _dragX0 = e.X; _lastFine = e.Fine;
         Invalidate();
     }
 
     public override void OnMouseMove(in MouseEvent e)
     {
         if (!IsPressed || !Enabled) return;
-        if (e.Fine != _lastFine) { _dragStartValue = Value; _dragStartY = e.Y; _lastFine = e.Fine; }
-        double range = Max - Min;
-        double per = e.Fine ? 0.1 : 1.0;
-        Set(_dragStartValue + (_dragStartY - e.Y) / DragPixels * range * per);
+        if (e.Fine != _lastFine) { _dragNorm0 = Math.Clamp(Norm(Value), 0, 1); _dragX0 = e.X; _lastFine = e.Fine; }
+        double k = e.Fine ? 0.1 : 1.0;
+        double t = Math.Clamp(_dragNorm0 + (e.X - _dragX0) / TrackRect.W * k, 0, 1);
+        Set(Val(t), e.Fine);
     }
 
     public override void OnMouseUp(in MouseEvent e) => Invalidate();
@@ -217,78 +366,38 @@ internal sealed class Knob : Widget
     public override bool OnMouseWheel(in MouseEvent e)
     {
         if (!Enabled) return true;
-        double step = (Max - Min) / (e.Fine ? 500.0 : 50.0);
-        Set(Value + Math.Sign(e.Wheel) * step * Math.Max(1, Math.Abs(e.Wheel)));
+        double step = e.Fine ? WheelStep / 10 : WheelStep;
+        double v = double.IsNegativeInfinity(Value) ? Min : Value;
+        Set(v + Math.Sign(e.Wheel) * step * Math.Max(1, Math.Abs(Math.Round(e.Wheel))), e.Fine);
         return true;
     }
 
     public override void Paint(Renderer g)
     {
-        var b = Bounds;
-        float d = Math.Min(b.W, b.H);
-        float cx = b.CX, cy = b.CY;
-        float rOuter = d / 2 - 1.5f;
-        bool hot = (IsHovered || IsPressed) && Enabled;
-        const float start = 135f, sweep = 270f;
-        g.Arc(cx, cy, rOuter - 1f, start, sweep, Theme.Well, 3.2f);
-        double t = (Value - Min) / (Max - Min);
-        if (t > 0.002) g.Arc(cx, cy, rOuter - 1f, start, (float)(sweep * t), Enabled ? (hot ? Theme.AccentHi : Theme.Accent) : Theme.TextFaint, 3.2f);
-        float rb = rOuter - 5.5f;
-        g.FillCircle(cx, cy, rb, hot ? Theme.RaisedHi : Theme.Raised);
-        g.StrokeCircle(cx, cy, rb - 0.5f, Theme.BorderStrong.With(0.7f), 1f);
-        float a = (start + (float)(sweep * t)) * MathF.PI / 180f;
-        g.Line(cx + MathF.Cos(a) * rb * 0.35f, cy + MathF.Sin(a) * rb * 0.35f, cx + MathF.Cos(a) * (rb - 1.5f), cy + MathF.Sin(a) * (rb - 1.5f),
-            Theme.Text, 1.8f, true);
+        var t = TrackRect;
+        g.FillPill(t, Theme.IsDark ? Theme.Rgb(0x3A3D44) : Theme.Rgb(0xDADDE2));
+        float n = (float)Math.Clamp(Norm(Value), 0, 1);
+        if (!double.IsNaN(Limit))
+        {
+            float lx = t.X + (float)Math.Clamp(Norm(Limit), 0, 1) * t.W;
+            g.FillPill(new RectF(lx, t.Y, t.Right - lx, t.H), Theme.Orange.With(0.35f));
+            g.FillRound(new RectF(lx - 1, t.Y - 4, 2, t.H + 8), 1, Theme.Orange);
+        }
+        var fill = FillColor?.Invoke() ?? Theme.Accent;
+        if (n > 0) g.FillPill(new RectF(t.X, t.Y, n * t.W, t.H), Enabled ? fill : Theme.TextTertiary);
+        float kx = t.X + n * t.W;
+        var knob = RectF.Centered(kx, t.CY, KnobD, KnobD);
+        g.Shadow(knob, KnobD / 2, 4, 1f, 1.5f);
+        g.FillPill(knob, Theme.White);
+        g.StrokeRound(knob, KnobD / 2, Theme.IsDark ? Theme.Rgb(0x000000, 0.25f) : Theme.Rgb(0x000000, 0.10f));
     }
 }
 
-/// <summary>Kanalname: mittig, bis zu zwei Zeilen; Doppelklick = umbenennen (eigener Mini-Editor).</summary>
-internal sealed class NameLabel : Widget
+/// <summary>Zahlenanzeige als Pille; Doppelklick = Wert eintippen.</summary>
+internal sealed class ValueBox : Widget
 {
     public string Text { get; set; } = "";
-    public string Placeholder { get; set; } = "";
-    /// <summary>Farbe des Platzhalters (Standard: blass; bei App-Links der Programmname in voller Schrift).</summary>
-    public Color4 PlaceholderColor { get; set; } = Theme.TextFaint;
-    public TextStyle Font { get; set; } = Theme.SmallBold;
-    public int MaxLength { get; set; } = 24;
-    public event Action<string>? Renamed;
-    public bool Editable { get; set; } = true;
-
-    public override bool AcceptsMouse => Visible;
-
-    public override void OnMouseEnter() => Invalidate();
-    public override void OnMouseLeave() => Invalidate();
-
-    public override void OnMouseDown(in MouseEvent e)
-    {
-        if (e.Button == 0 && e.Clicks >= 2 && Editable) BeginRename();
-    }
-
-    public void BeginRename()
-    {
-        var root = Root;
-        if (root == null) return;
-        var r = new RectF(Bounds.CX - Math.Max(Bounds.W, 110) / 2, Bounds.CY - 15, Math.Max(Bounds.W, 110), 30);
-        r = new RectF(Math.Clamp(r.X, 4, root.W - r.W - 4), r.Y, r.W, r.H);
-        root.BeginEdit(r, Text, Theme.Body, s => Renamed?.Invoke(s.Trim()), MaxLength, null, HAlign.Center);
-    }
-
-    public override string? TooltipAt(float x, float y) => Editable ? "Doppelklick: umbenennen" : null;
-
-    public override void Paint(Renderer g)
-    {
-        bool empty = string.IsNullOrWhiteSpace(Text);
-        string s = empty ? Placeholder : Text;
-        var col = empty ? PlaceholderColor : IsHovered && Editable ? Theme.AccentHi : Theme.Text;
-        g.Text(s, Bounds, Font, col, HAlign.Center, VAlign.Middle, true, true);
-    }
-}
-
-/// <summary>Zahlenanzeige im Kasten; Doppelklick = Wert eintippen.</summary>
-internal sealed class ReadoutBox : Widget
-{
-    public string Text { get; set; } = "";
-    public Color4 TextColor { get; set; } = Theme.Text;
+    public Color4? TextColor { get; set; }
     public string EditHint { get; set; } = "Doppelklick: Wert eintippen";
     public event Action<string>? Typed;
     public bool Editable { get; set; } = true;
@@ -296,7 +405,7 @@ internal sealed class ReadoutBox : Widget
     public override bool AcceptsMouse => Visible;
     public override void OnMouseEnter() => Invalidate();
     public override void OnMouseLeave() => Invalidate();
-    public override string? TooltipAt(float x, float y) => Editable ? EditHint : null;
+    public override string? TooltipAt(float x, float y) => Editable ? EditHint : Tooltip;
 
     public override void OnMouseDown(in MouseEvent e)
     {
@@ -306,8 +415,154 @@ internal sealed class ReadoutBox : Widget
 
     public override void Paint(Renderer g)
     {
-        g.FillRound(Bounds, 5, Theme.Well);
-        if (IsHovered && Editable) g.StrokeRound(Bounds, 5, Theme.BorderStrong);
-        g.Text(Text, Bounds, Theme.Value, TextColor, HAlign.Center, VAlign.Middle, false);
+        var b = Bounds;
+        g.FillRound(b, Theme.RadiusSmall, Theme.IsDark ? Theme.Well : Theme.Control);
+        if (IsHovered && Editable) g.StrokeRound(b, Theme.RadiusSmall, Theme.BorderStrong);
+        g.Text(Text, b, Theme.Value, TextColor ?? Theme.Text, HAlign.Center, VAlign.Middle, false);
     }
+}
+
+/// <summary>Senkrechtes Scrollen mit schmalem, schwebendem Balken (macOS-Stil) fuer selbst gezeichnete Listen.</summary>
+internal sealed class VScroll
+{
+    public float Offset;
+    public float ContentH;
+    public RectF View;
+    public bool Dragging;
+    float _grab;
+
+    public void Update(RectF view, float contentH)
+    {
+        View = view; ContentH = contentH;
+        Offset = Math.Clamp(Offset, 0, Math.Max(0, ContentH - View.H));
+    }
+
+    public bool Needed => ContentH > View.H + 0.5f;
+    public RectF Track => new(View.Right - 9, View.Y + 3, 6, Math.Max(0, View.H - 6));
+
+    public RectF Thumb
+    {
+        get
+        {
+            var t = Track;
+            float th = Math.Max(32, t.H * View.H / Math.Max(1, ContentH));
+            float max = Math.Max(1, ContentH - View.H);
+            return new RectF(t.X, t.Y + (t.H - th) * (Offset / max), t.W, th);
+        }
+    }
+
+    public bool Wheel(float notches)
+    {
+        if (!Needed) return false;
+        Offset = Math.Clamp(Offset - notches * 60, 0, Math.Max(0, ContentH - View.H));
+        return true;
+    }
+
+    public bool Down(float x, float y)
+    {
+        if (!Needed || !Track.Inflate(5).Contains(x, y)) return false;
+        var th = Thumb;
+        _grab = th.Contains(x, y) ? y - th.Y : th.H / 2;
+        Dragging = true;
+        Drag(y);
+        return true;
+    }
+
+    public void Drag(float y)
+    {
+        var t = Track; var th = Thumb;
+        float span = t.H - th.H;
+        if (span <= 0) return;
+        Offset = Math.Clamp((y - _grab - t.Y) / span, 0, 1) * Math.Max(0, ContentH - View.H);
+    }
+
+    public void Up() => Dragging = false;
+
+    public void Paint(Renderer g)
+    {
+        if (!Needed) return;
+        g.FillPill(Thumb, Dragging ? Theme.TextSecondary.With(0.8f) : Theme.TextTertiary.With(0.55f));
+    }
+}
+
+/// <summary>Gemeinsame Zeichenbausteine: Karte, Chip, Abschnittstitel, Trennlinie.</summary>
+internal static class Draw
+{
+    /// <summary>Karte im UniFi/Apple-Stil: im Dunkeln flach mit feinem Rand, im Hellen weiss mit weichem Schatten.</summary>
+    public static void Card(Renderer g, RectF r, float radius = Theme.RadiusCard, Color4? fill = null)
+    {
+        if (!Theme.IsDark) g.Shadow(r, radius, 6, 0.35f, 1);
+        g.FillRound(r, radius, fill ?? Theme.Surface);
+        g.StrokeRound(r, radius, Theme.Border);
+    }
+
+    /// <summary>Kleine Statuspille: getoenter Grund, farbiger Text, optional Punkt davor.</summary>
+    public static float Chip(Renderer g, float x, float cy, string text, Color4 color, bool dot = true, TextStyle? font = null, bool alignRight = false)
+    {
+        var f = font ?? Theme.CaptionStrong;
+        float tw = Renderer.MeasureWidth(text, f);
+        float h = Theme.Touch ? 24 : 22;
+        float w = tw + (dot ? 26 : 18);
+        var r = new RectF(alignRight ? x - w : x, cy - h / 2, w, h);
+        g.FillPill(r, Theme.Soft(color));
+        if (dot) g.FillCircle(r.X + 11, r.CY, 3.5f, color);
+        g.Text(text, new RectF(r.X + (dot ? 19 : 9), r.Y, tw + 2, r.H), f, color, HAlign.Left, VAlign.Middle, false);
+        return w;
+    }
+
+    public static float ChipWidth(string text, bool dot = true, TextStyle? font = null) =>
+        Renderer.MeasureWidth(text, font ?? Theme.CaptionStrong) + (dot ? 26 : 18);
+
+    /// <summary>Kopf einer Karte: Titel (Headline), optional Zahl als graue Pille.</summary>
+    public static void CardTitle(Renderer g, RectF r, string title, int? count = null)
+    {
+        g.Text(title, r, Theme.Headline, Theme.Text, HAlign.Left, VAlign.Middle, false);
+        if (count is int n)
+        {
+            float tw = Renderer.MeasureWidth(title, Theme.Headline);
+            string s = n.ToString();
+            float cw = Math.Max(20, Renderer.MeasureWidth(s, Theme.CaptionStrong) + 12);
+            var chip = new RectF(r.X + tw + 8, r.CY - 10, cw, 20);
+            g.FillPill(chip, Theme.Control);
+            g.Text(s, chip, Theme.CaptionStrong, Theme.TextSecondary, HAlign.Center, VAlign.Middle, false);
+        }
+    }
+
+    public static void HLine(Renderer g, float x, float y, float w) => g.Fill(new RectF(x, y, w, 1), Theme.Separator);
+
+    /// <summary>Taste ohne eigenes Widget (fuer Listen): Hintergrund + Text/Symbol.</summary>
+    public static void ButtonLook(Renderer g, RectF r, string text, ButtonStyle style, bool enabled, bool hot, bool down = false, Icon icon = Icon.None, TextStyle? font = null)
+    {
+        var (bg, fg) = Button.Colors(style, enabled, hot, down);
+        g.FillRound(r, Theme.RadiusControl, bg);
+        var f = font ?? Theme.CalloutMedium;
+        if (icon != Icon.None)
+        {
+            float tw = Renderer.MeasureWidth(text, f);
+            float total = 14 + (text.Length > 0 ? 5 + tw : 0);
+            float x0 = r.CX - total / 2;
+            Icons.Draw(g, icon, x0 + 7, r.CY, 14, fg);
+            if (text.Length > 0) g.Text(text, new RectF(x0 + 19, r.Y, tw + 4, r.H), f, fg, HAlign.Left, VAlign.Middle, false);
+        }
+        else g.Text(text, r, f, fg, HAlign.Center, VAlign.Middle, false);
+    }
+
+    /// <summary>Leerzustand: Symbol im getoenten Kreis, Ueberschrift, Text (zentriert ab y).</summary>
+    public static float Empty(Renderer g, RectF area, float y, Icon icon, string head, string body, Color4? tint = null)
+    {
+        var c = tint ?? Theme.AccentText;
+        float cx = area.CX;
+        g.FillCircle(cx, y + 28, 28, Theme.Soft(c));
+        Icons.Draw(g, icon, cx, y + 28, 26, c);
+        y += 70;
+        g.Text(head, new RectF(area.X + 20, y, area.W - 40, 24), Theme.Title, Theme.Text, HAlign.Center);
+        y += 30;
+        float bw = Math.Min(460, area.W - 60);
+        float bh = Renderer.TextHeight(body, Theme.Body, bw);
+        g.Text(body, new RectF(cx - bw / 2, y, bw, bh + 4), Theme.Body, Theme.TextSecondary, HAlign.Center, VAlign.Top, false, true);
+        return y + bh + 20;
+    }
+
+    public static float EmptyHeight(float width, string body) =>
+        70 + 30 + Renderer.TextHeight(body, Theme.Body, Math.Min(460, width - 60)) + 20;
 }

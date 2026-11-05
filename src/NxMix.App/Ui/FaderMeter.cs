@@ -4,7 +4,7 @@ namespace NxMix.App.Ui;
 
 /// <summary>
 /// Senkrechter Fader mit dB-Skala. Doppelklick = 0 dB, Strg/Umschalt = Feinjustierung, Mausrad = 1 dB (fein 0,1 dB).
-/// MaxDb ist die Gain-Sperre: darueber laesst er sich nicht ziehen; die Sperre wird auf der Schiene markiert.
+/// MaxDb ist die Gain-Sperre: darueber laesst er sich nicht ziehen; der gesperrte Bereich ist orange markiert.
 /// </summary>
 internal sealed class Fader : Widget
 {
@@ -15,7 +15,7 @@ internal sealed class Fader : Widget
     public bool ShowLabels { get; set; } = true;
     public event Action<double>? Changed;
 
-    double Quant(double db) => Math.Round(db * 10.0) / 10.0;
+    static double Quant(double db) => Math.Round(db * 10.0) / 10.0;
 
     float _dragY0;
     double _dragT0;
@@ -27,14 +27,14 @@ internal sealed class Fader : Widget
     public void SetValue(double db)
     {
         if (!Db.IsOff(db) && db > MaxDb) db = MaxDb;
-        if (!(Value.Equals(db))) { Value = db; Invalidate(); }
+        if (!Value.Equals(db)) { Value = db; Invalidate(); }
     }
 
     // ---- Geometrie -----------------------------------------------------------------------------
-    float LabelW => ShowLabels ? 19f : 0f;
-    float CapW => Math.Min(28f, Math.Max(14f, Bounds.W - LabelW - 8f));
-    float CapH => Theme.FaderCapHeight;
-    float TrackX => Bounds.X + LabelW + 6f + CapW / 2f;
+    float LabelW => ShowLabels ? 20f : 0f;
+    float CapW => Math.Min(Theme.FaderCapMaxW, Math.Max(16f, Bounds.W - LabelW - 6f));
+    static float CapH => Theme.FaderCapH;
+    float TrackX => Bounds.X + LabelW + 4f + CapW / 2f;
     float YTop => Bounds.Y + CapH / 2f + 1f;
     float YBot => Bounds.Bottom - CapH / 2f - 1f;
 
@@ -103,7 +103,7 @@ internal sealed class Fader : Widget
 
     public override string? TooltipAt(float x, float y)
     {
-        if (MaxDb < ScaleTop - 0.05) return $"Gain-Sperre aktiv: max. {Db.Format(MaxDb)} dB. Doppelklick = {Db.Format(Math.Min(0, MaxDb))} dB";
+        if (MaxDb < ScaleTop - 0.05) return $"Gain-Sperre aktiv: max. {Db.Format(MaxDb)} dB · Doppelklick = {Db.Format(Math.Min(0, MaxDb))} dB";
         return "Ziehen · Strg/Umschalt = fein · Mausrad · Doppelklick = 0 dB";
     }
 
@@ -112,60 +112,54 @@ internal sealed class Fader : Widget
     {
         var b = Bounds;
         float tx = TrackX;
-        float slotW = 4f;
-        var slot = new RectF(tx - slotW / 2, YTop - 6, slotW, YBot - YTop + 12);
+        float slotW = Theme.Touch ? 5f : 4f;
+        var slot = new RectF(tx - slotW / 2, YTop - 4, slotW, YBot - YTop + 8);
         bool limited = MaxDb < ScaleTop - 0.05;
 
-        // Skala: Striche und Beschriftung links der Kappe
-        float tickX1 = b.X + LabelW + 4.5f;
+        // Skala links der Kappe
+        float tickR = tx - CapW / 2 - 2;
         foreach (double tdb in FaderScale.Ticks)
         {
             if (tdb > ScaleTop + 0.01) continue;
             float y = g.Snap(YOfDb(tdb));
             bool zero = tdb == 0;
-            g.Line(tickX1 - (zero ? 5.5f : 3.5f), y, tickX1, y, zero ? Theme.TextDim : Theme.TextFaint, 1f);
             if (ShowLabels)
             {
                 string s = tdb > 0 ? "+" + (int)tdb : ((int)tdb).ToString().Replace('-', Db.Minus);
-                g.Text(s, new RectF(b.X - 2, y - 7, LabelW - 4.5f + 0.5f, 14), Theme.Tiny, zero ? Theme.TextDim : Theme.TextFaint, HAlign.Right, VAlign.Middle, false);
+                g.Text(s, new RectF(b.X - 4, y - 7, LabelW + 1, 14), zero ? Theme.MicroStrong : Theme.Micro,
+                    zero ? Theme.TextSecondary : Theme.TextTertiary, HAlign.Right, VAlign.Middle, false);
             }
+            else g.Line(tickR - (zero ? 5 : 3), y, tickR, y, zero ? Theme.TextSecondary : Theme.TextTertiary.With(0.7f), 1f);
         }
 
         // Schlitz
-        g.FillRound(slot, 2f, Theme.Well);
-        g.StrokeRound(slot, 2f, Theme.Border.With(0.8f));
+        g.FillPill(slot, Theme.IsDark ? Theme.Well : Theme.Rgb(0xD6D9DE));
         float capY = YOfDb(Value);
-        // Gefuellter Teil unter der Kappe
-        var fill = RectF.FromLTRB(slot.X + 1, capY, slot.Right - 1, YBot + 4);
-        if (fill.H > 0) g.FillRound(fill, 1.2f, Enabled ? Theme.Accent.With(0.55f) : Theme.TextFaint.With(0.3f));
 
-        // Gain-Sperre: Bereich darueber schraffiert-amber
+        // Gain-Sperre: Bereich darueber orange
         if (limited)
         {
             float ly = YOfDb(MaxDb);
-            g.Fill(new RectF(slot.X - 1, slot.Y + 1, slotW + 2, Math.Max(0, ly - slot.Y - 1)), Theme.Protect.With(0.20f));
-            g.Line(tx - CapW / 2 - 2, g.Snap(ly), tx + CapW / 2 + 2, g.Snap(ly), Theme.Protect, 1.5f);
-            // kleine Dreiecke an den Raendern der Sperre
-            g.Line(tx + CapW / 2 + 2, ly - 3.5f, tx + CapW / 2 + 2, ly + 3.5f, Theme.Protect, 1.5f);
-            g.Line(tx - CapW / 2 - 2, ly - 3.5f, tx - CapW / 2 - 2, ly + 3.5f, Theme.Protect, 1.5f);
+            var lockArea = RectF.FromLTRB(slot.X - 1.5f, slot.Y, slot.Right + 1.5f, ly);
+            g.FillPill(lockArea, Theme.Orange.With(0.28f));
+            g.FillRound(new RectF(tx - CapW / 2 - 3, g.Snap(ly) - 1, CapW + 6, 2), 1, Theme.Orange);
         }
 
         // Kappe
         var cap = RectF.Centered(tx, capY, CapW, CapH);
         bool hot = (IsHovered || IsPressed) && Enabled;
-        g.Shadow(cap, 5, 5, 0.55f, 2);
-        g.FillRound(cap, 5, hot ? Theme.Rgb(0x3A3F49) : Theme.Rgb(0x30343C));
-        g.StrokeRound(cap, 5, Theme.Rgb(0x464B56));
-        g.Fill(new RectF(cap.X + 5, cap.Y + 1.2f, cap.W - 10, 1), Theme.Rgb(0xFFFFFF, 0.10f));
+        g.Shadow(cap, 7, 5, 1.1f, 2);
+        g.FillRound(cap, 7, hot ? Theme.CapFillHot : Theme.CapFill);
+        g.StrokeRound(cap, 7, Theme.CapBorder);
         // Griffrillen
-        for (int i = -1; i <= 1; i += 2) g.Line(cap.X + 5, cap.CY + i * 6, cap.Right - 5, cap.CY + i * 6, Theme.Rgb(0x000000, 0.35f), 1f);
-        // Akzentstrich
-        var line = Enabled ? (limited && Value >= MaxDb - 0.05 ? Theme.Protect : Theme.Accent) : Theme.TextFaint;
-        g.FillRound(new RectF(cap.X + 3, cap.CY - 1.25f, cap.W - 6, 2.5f), 1.2f, line);
+        var grip = Theme.IsDark ? Theme.Rgb(0x000000, 0.28f) : Theme.Rgb(0x000000, 0.08f);
+        for (int i = -1; i <= 1; i += 2) g.Line(cap.X + 6, g.Snap(cap.CY + i * CapH * 0.22f), cap.Right - 6, g.Snap(cap.CY + i * CapH * 0.22f), grip, 1f);
+        var line = Enabled ? (limited && Value >= MaxDb - 0.05 ? Theme.Orange : Theme.Accent) : Theme.TextTertiary;
+        g.FillPill(new RectF(cap.X + 4, cap.CY - 1.25f, cap.W - 8, 2.5f), line);
     }
 }
 
-/// <summary>Pegelmeter: Verlauf, Spitzenhalten, Clip-Anzeige (Klick loescht), optionale Limiter-Marke.</summary>
+/// <summary>Pegelmeter: Verlauf, Spitzenhalten, Clip-Punkt (Klick loescht), optionale Limiter-Marke.</summary>
 internal sealed class Meter : Widget
 {
     float _db = -120f;
@@ -176,6 +170,7 @@ internal sealed class Meter : Widget
     public double CeilingDb { get; set; } = double.NaN;
     public string? ExtraTooltip { get; set; }
 
+    public bool Clipped => _clip;
     public override bool AcceptsMouse => Visible;
     public override CursorKind CursorAt(float x, float y) => CursorKind.Hand;
     public override void OnMouseDown(in MouseEvent e) { _clip = false; Invalidate(); }
@@ -204,40 +199,35 @@ internal sealed class Meter : Widget
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        const float ledH = 8f;
-        var clipR = new RectF(b.X, b.Y, b.W, ledH);
-        var bar = new RectF(b.X, b.Y + ledH + 2, b.W, Math.Max(0, b.H - ledH - 2));
-        g.FillRound(clipR, 2f, _clip ? Theme.Clip : Theme.Well);
-        if (_clip) g.Shadow(clipR, 2, 3, 0.0f);
-        g.FillRound(bar, 2f, Theme.Well);
-        var inner = bar.Deflate(1);
-        if (inner.H <= 0) return;
-        float bottom = inner.Bottom;
-        float fh = inner.H;
+        float w = b.W;
+        var clipR = new RectF(b.X, b.Y, w, w);
+        var bar = new RectF(b.X, b.Y + w + 3, w, Math.Max(0, b.H - w - 3));
+        g.FillPill(clipR, _clip ? Theme.Clip : Theme.MeterBack);
+        g.FillPill(bar, Theme.MeterBack);
+        if (bar.H <= 2) return;
+        float bottom = bar.Bottom, fh = bar.H;
         float level = Frac(_db);
         if (level > 0.002f)
         {
             float top = bottom - fh * level;
-            g.FillMeterGradient(new RectF(inner.X, top, inner.W, bottom - top), bottom, fh);
+            g.FillMeterGradient(new RectF(bar.X, top, bar.W, bottom - top), bottom, fh, bar.W / 2);
         }
-        // Raster: feine dunkle Linien (LED-Anmutung) alle 3 dB
-        for (double db = Theme.MeterMinDb + 3; db < Theme.MeterMaxDb; db += 3)
+        // feine Skalenstriche alle 6 dB (wie LED-Leiter, aber ruhig)
+        for (double db = Theme.MeterMinDb + 6; db < Theme.MeterMaxDb; db += 6)
         {
             float y = g.Snap(bottom - fh * Frac(db));
-            g.Fill(new RectF(inner.X, y, inner.W, 1f), Theme.Well.With(0.85f));
+            g.Fill(new RectF(bar.X, y, bar.W, 1f), Theme.MeterBack.With(0.55f));
         }
-        // Spitzenhalten
         if (_peakDb > Theme.MeterMinDb + 1)
         {
             float py = bottom - fh * Frac(_peakDb);
             var c = _peakDb >= -0.5f ? Theme.Clip : Theme.PeakHold;
-            g.Fill(new RectF(inner.X, Math.Max(inner.Y, py - 1), inner.W, 2f), c);
+            g.FillRound(new RectF(bar.X, Math.Max(bar.Y, py - 1), bar.W, 2f), 1, c);
         }
-        // Limiter-Marke
         if (!double.IsNaN(CeilingDb) && CeilingDb > Theme.MeterMinDb && CeilingDb < Theme.MeterMaxDb + 0.01)
         {
             float cy = g.Snap(bottom - fh * Frac(CeilingDb));
-            g.Line(b.X - 3, cy, b.Right + 3, cy, Theme.Protect, 1.4f);
+            g.FillRound(new RectF(b.X - 3, cy - 0.75f, w + 6, 1.5f), 0.75f, Theme.Orange);
         }
     }
 }
