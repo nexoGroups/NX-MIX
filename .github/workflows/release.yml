@@ -26,8 +26,9 @@ jobs:
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Echtzeit-Tests (zwei Threads, keine Allokation im Audio-Pfad) brauchen freie Kerne: Testklassen nacheinander
       - name: Test
-        run: dotnet test NxMix.slnx -c Release --filter "Category!=Performance"
+        run: dotnet test NxMix.slnx -c Release --filter "Category!=Performance" -- RunConfiguration.DisableParallelization=true
 
       - name: Install Velopack CLI
         run: dotnet tool install -g vpk --version $env:VPK_VERSION

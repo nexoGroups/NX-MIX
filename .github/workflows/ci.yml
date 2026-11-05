@@ -15,5 +15,6 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build
         run: dotnet build NxMix.slnx -c Release
+      # Echtzeit-Tests (zwei Threads, keine Allokation im Audio-Pfad) brauchen freie Kerne: Testklassen nacheinander
       - name: Test
-        run: dotnet test NxMix.slnx -c Release --no-build --filter "Category!=Performance"
+        run: dotnet test NxMix.slnx -c Release --no-build --filter "Category!=Performance" -- RunConfiguration.DisableParallelization=true
