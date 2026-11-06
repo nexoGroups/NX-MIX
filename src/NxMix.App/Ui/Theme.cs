@@ -207,10 +207,10 @@ internal static class Theme
     static Theme() => Apply(true, Density.Mouse);
 
     // ---- Form ----------------------------------------------------------------------------------
-    public const float RadiusCard = 14f;
-    public const float RadiusInner = 10f;
-    public const float RadiusControl = 8f;
-    public const float RadiusSmall = 6f;
+    public const float RadiusCard = 10f;
+    public const float RadiusInner = 7f;
+    public const float RadiusControl = 6f;
+    public const float RadiusSmall = 4f;
 
     // ---- Abstaende -----------------------------------------------------------------------------
     public const float Pad = 20f;            // Rand des Inhalts

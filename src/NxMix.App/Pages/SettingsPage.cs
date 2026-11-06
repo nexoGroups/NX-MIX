@@ -258,7 +258,7 @@ internal sealed class SettingsPage : Page
         _painters.Add(g =>
         {
             var r = new RectF(x, wy2, colW, wh2 + 24);
-            g.FillRound(r, 12, Theme.Soft(Theme.Orange));
+            g.FillRound(r, Theme.RadiusInner, Theme.Soft(Theme.Orange));
             Icons.Draw(g, Icon.Warn, x + 22, wy2 + 20, 16, Theme.Orange);
             g.Text(Warn, new RectF(x + 42, wy2 + 12, colW - 58, wh2 + 2), Theme.Callout, Theme.Text, HAlign.Left, VAlign.Top, false, true);
         });

@@ -147,8 +147,8 @@ internal sealed class PopupMenu : Overlay
         float a = 1 - MathF.Pow(1 - _t, 3);
         var box = _box.Offset(0, (1 - a) * -4);
         g.Shadow(box, 12, 16, 1.4f * a, 6);
-        g.FillRound(box, 12, Theme.Elevated);
-        g.StrokeRound(box, 12, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        g.FillRound(box, Theme.RadiusCard, Theme.Elevated);
+        g.StrokeRound(box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         bool icons = HasIcons;
         for (int i = 0; i < _items.Count; i++)
         {
@@ -260,8 +260,8 @@ internal sealed class ModalDialog : Overlay
         g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * a));
         var box = _box;
         g.Shadow(box, 16, 28, 1.6f * a, 10);
-        g.FillRound(box, 16, Theme.Elevated);
-        g.StrokeRound(box, 16, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        g.FillRound(box, Theme.RadiusCard, Theme.Elevated);
+        g.StrokeRound(box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         float y = box.Y + 24;
         if (_icon != Icon.None)
         {
@@ -297,6 +297,8 @@ internal abstract class SheetOverlay : Overlay
     protected float ScrollOffset => _sc.Offset;
     protected const float HeaderH = 74f;
     protected virtual float PreferredWidth => Theme.SheetW;
+    /// <summary>Breite Kanalbearbeitung innerhalb des App-Arbeitsbereichs.</summary>
+    protected virtual bool FullPage => false;
     protected void ResetScroll() => _sc.Offset = 0;
 
     public override void Layout()
@@ -304,7 +306,9 @@ internal abstract class SheetOverlay : Overlay
         var b = Bounds;
         float top = Root?.Top.Bounds.Bottom ?? 0;
         float w = Math.Min(PreferredWidth, b.W - 40);
-        Panel = new RectF(b.Right - w - 12, top + 8, w, Math.Max(100, b.Bottom - top - 20));
+        Panel = FullPage && Root is { } root
+            ? new RectF(root.ContentRect.X + 8, top + 8, Math.Max(100, root.ContentRect.W - 16), Math.Max(100, b.Bottom - top - 16))
+            : new RectF(b.Right - w - 12, top + 8, w, Math.Max(100, b.Bottom - top - 20));
         Body = new RectF(Panel.X, Panel.Y + HeaderH, Panel.W, Math.Max(0, Panel.H - HeaderH));
         float contentH = LayoutBody(Body.X + 20, Body.Y + 4 - _sc.Offset, Body.W - 40);
         _sc.Update(Body, contentH + 24);
@@ -372,11 +376,15 @@ internal abstract class SheetOverlay : Overlay
     public override void Paint(Renderer g)
     {
         float a = 1 - MathF.Pow(1 - _t, 3);
-        g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * 0.55f * a));
+        if (!FullPage) g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * 0.55f * a));
         var p = Panel;
-        g.Shadow(p, 16, 24, 1.5f * a, 8);
-        g.FillRound(p, 16, Theme.Elevated);
-        g.StrokeRound(p, 16, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        if (FullPage) g.Fill(p, Theme.Elevated);
+        else
+        {
+            g.Shadow(p, Theme.RadiusCard, 24, 1.5f * a, 8);
+            g.FillRound(p, Theme.RadiusCard, Theme.Elevated);
+            g.StrokeRound(p, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        }
         PaintHeader(g, new RectF(p.X, p.Y, p.W, HeaderH));
         g.Fill(new RectF(p.X, p.Y + HeaderH - 1, p.W, 1), Theme.Separator);
         // Kopf-Elemente (Name, Pfeile, Schliessen) ungeschnitten, Inhalt im scrollbaren Ausschnitt

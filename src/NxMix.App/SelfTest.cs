@@ -133,6 +133,8 @@ internal static class SelfTest
         Click(root, sheet.PhaseSw);
         Check("Blatt: Phase invertieren", m.Settings.Inputs[0].InvertPhase);
         Click(root, sheet.PhaseSw);
+        sheet.OpenTab(1);
+        Check("Laufzeit öffnet den ganzen Arbeitsbereich", sheet.DetailView && sheet.Delay.Visible && sheet.Delay.Bounds.W > 1000);
         Click(root, sheet.DelayBox, 2);
         Type(root, "1,5");
         Key(root, Win32.VK_RETURN);
@@ -198,6 +200,7 @@ internal static class SelfTest
         var hs = root.Modal as ChannelSheet;
         Check("Kanal-Blatt des Hochtoeners offen", hs != null && !hs.IsInput && hs.Index == 2);
         Settle(root);
+        hs!.OpenTab(2);
         Check("Blatt: Segment zeigt keine Standardsperre bei -13 dB", hs!.Lock.Selected == -1);
         ClickSeg(root, hs.Lock, 0); // "Aus" = lockern
         Check("Sperre lockern fragt nach", root.Modal is ModalDialog);
@@ -207,6 +210,7 @@ internal static class SelfTest
         Check("Strengere Sperre gilt sofort (-20 dB)", m.Settings.Outputs[2].MaxGainDb == -20 && m.Settings.Outputs[2].GainDb <= -20 + 1e-9);
         ClickSeg(root, hs.Ceiling, 2);
         Check("Blatt: Limiter-Grenze -6 dBFS", m.Settings.Outputs[2].CeilingDbfs == -6);
+        hs.ShowInfo();
         Click(root, hs.GainBox, 2);
         Type(root, "0");
         Key(root, Win32.VK_RETURN);
@@ -458,6 +462,7 @@ internal static class SelfTest
         model.UpdateChannel(false, 0, c => c with { Filters = new[] { protection }, CeilingDbfs = -6 });
 
         var sheet = ChannelSheet.Show(root, model, false, 0);
+        sheet.OpenTab(0);
         var dir = Path.GetDirectoryName(Path.GetFullPath(outFile))!;
         string filtersFile = Path.Combine(dir, "selftest-rew.txt");
         string projectFile = Path.Combine(dir, "selftest-rew-project.json");
@@ -666,6 +671,7 @@ internal static class SelfTest
         Click(root, mixer.Inputs.Strips[4].Header);
         var sheet = root.Modal as ChannelSheet;
         Settle(root);
+        sheet!.OpenTab(3);
         Check("Blatt eines freien Eingangs bietet 'Programm binden'", sheet != null && sheet.LinkBind.Visible && sheet.LinkBind.Enabled && !sheet.LinkRemove.Visible);
         Click(root, sheet!.LinkBind);
         Check("Klick auf 'Programm binden' oeffnet das Auswahl-Popup", root.Modal is AppLinkPicker);

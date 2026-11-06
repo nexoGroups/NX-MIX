@@ -405,8 +405,8 @@ internal sealed class Toasts : Widget
             float h = wrap ? Renderer.TextHeight(it.Text, Theme.BodyMedium, w - 64) + 22 : 42;
             var r = new RectF(area.CX - w / 2, y - h + (1 - a) * 8, w, h);
             g.Shadow(r, 14, 18, 1.4f * a, 6);
-            g.FillRound(r, 14, Theme.Elevated.With(a));
-            g.StrokeRound(r, 14, (Theme.IsDark ? Theme.BorderStrong : Theme.Border).With(a));
+            g.FillRound(r, Theme.RadiusCard, Theme.Elevated.With(a));
+            g.StrokeRound(r, Theme.RadiusCard, (Theme.IsDark ? Theme.BorderStrong : Theme.Border).With(a));
             var c = it.Error ? Theme.Red : Theme.Green;
             g.FillCircle(r.X + 22, r.Y + 21, 11, Theme.Soft(c).With(Theme.Soft(c).A * a));
             Icons.Draw(g, it.Error ? Icon.Warn : Icon.Check, r.X + 22, r.Y + 21, 14, c.With(a));

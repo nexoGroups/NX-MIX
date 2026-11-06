@@ -468,8 +468,8 @@ internal sealed class AppLinkPicker : Overlay
         g.Fill(b, Theme.Scrim.With(Theme.Scrim.A * 0.5f * a));
         if (_box.IsEmpty) return;
         g.Shadow(_box, 16, 22, 1.5f * a, 8);
-        g.FillRound(_box, 16, Theme.Elevated);
-        g.StrokeRound(_box, 16, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
+        g.FillRound(_box, Theme.RadiusCard, Theme.Elevated);
+        g.StrokeRound(_box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         float x = _box.X + Pad, cw = _box.W - 2 * Pad;
 
         // Kopf

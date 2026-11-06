@@ -29,22 +29,28 @@ internal sealed class NameField : Widget
 }
 
 /// <summary>
-/// Kanal-Blatt (wie die Kanal-Detailansicht bei Mixing Station): Name, Pegel, Mute/Solo/Phase, Laufzeit,
-/// Gain-Sperre, Limiter-Grenze, App-Link, Verschieben/Loeschen. Pfeile wechseln zum Nachbarkanal.
+/// Kanalinfo im Seitenblatt; die Bearbeitungsreiter nutzen den ganzen Arbeitsbereich.
 /// </summary>
 internal sealed class ChannelSheet : SheetOverlay
 {
     readonly AppModel _m;
     public bool IsInput { get; }
     public int Index { get; private set; }
-    public bool EqView { get; private set; }
-    protected override float PreferredWidth => EqView ? 680 : base.PreferredWidth;
+    public bool DetailView { get; private set; }
+    public bool EqView => DetailView && _detailTab == 0;
+    int _detailTab;
+    protected override bool FullPage => DetailView;
 
     readonly IconButton _prev = new(Icon.ChevronLeft, "Vorheriger Kanal (←)") { IconSize = 16 };
     readonly IconButton _next = new(Icon.ChevronRight, "Nächster Kanal (→)") { IconSize = 16 };
     readonly IconButton _close = new(Icon.Close, "Schließen (Esc)") { IconSize = 16 };
+    readonly Button _back = new("Kanalinfo", ButtonStyle.Gray, Icon.ChevronLeft);
     public readonly NameField Name = new();
-    readonly Segmented _view = new("Kanal", "EQ & Spektrum");
+    readonly Segmented _view;
+    readonly Button _openEq = new("EQ & Spektrum", ButtonStyle.Tinted);
+    readonly Button _openDelay = new("Laufzeit", ButtonStyle.Gray);
+    readonly Button _openProtection = new("Schutz", ButtonStyle.Gray);
+    readonly Button _openLink = new("App-Link", ButtonStyle.Gray);
     readonly Toggle _showEq = new("EQ-Kurve", () => EqSpectrumGraph.EqColor) { ActiveText = () => Theme.IsDark ? Theme.Black : Theme.White };
     readonly Toggle _showBefore = new("Vor EQ", () => EqSpectrumGraph.BeforeColor) { ActiveText = () => Theme.Black };
     readonly Toggle _showAfter = new("Nach EQ", () => EqSpectrumGraph.AfterColor) { ActiveText = () => Theme.Black };
@@ -80,7 +86,11 @@ internal sealed class ChannelSheet : SheetOverlay
     ChannelSheet(AppModel m, bool input, int index, bool eq)
     {
         _m = m; IsInput = input; Index = index;
-        Add(_prev); Add(_next); Add(_close); Add(Name);
+        _view = input ? new Segmented("EQ & Spektrum", "Laufzeit", "Schutz", "App-Link")
+                      : new Segmented("EQ & Spektrum", "Laufzeit", "Schutz");
+        Add(_prev); Add(_next); Add(_close); Add(_back); Add(Name);
+        Add(_openEq); Add(_openDelay); Add(_openProtection);
+        if (input) Add(_openLink);
         Add(Gain); Add(GainBox); Add(MuteSw); Add(SoloSw); Add(PhaseSw);
         Add(Delay); Add(DelayBox); Add(Lock); Add(_lockCustom);
         if (!input) { Add(Ceiling); Add(_ceilCustom); Add(RewImport); Add(RewBypass); Add(_rewRemove); }
@@ -88,7 +98,12 @@ internal sealed class ChannelSheet : SheetOverlay
         Add(_left); Add(_right); Add(Delete);
         Add(_view); Add(_showEq); Add(_showBefore); Add(_showAfter); Add(_graph);
 
-        _view.Changed += i => SetView(i == 1);
+        _view.Changed += SetTab;
+        _back.Clicked += () => SetView(false);
+        _openEq.Clicked += () => SetTab(0);
+        _openDelay.Clicked += () => SetTab(1);
+        _openProtection.Clicked += () => SetTab(2);
+        _openLink.Clicked += () => SetTab(3);
         _showEq.SetChecked(true); _showBefore.SetChecked(true); _showAfter.SetChecked(true);
         _showEq.Toggled += on => _graph.ShowEq = on;
         _showBefore.Toggled += on => _graph.ShowBefore = on;
@@ -148,18 +163,41 @@ internal sealed class ChannelSheet : SheetOverlay
         _graph.Stop();
     }
 
-    void SetView(bool eq)
+    void SetView(bool detail)
     {
-        EqView = eq;
-        _view.SetSelected(eq ? 1 : 0);
+        DetailView = detail;
+        _view.Visible = _back.Visible = detail;
+        _openEq.Visible = _openDelay.Visible = _openProtection.Visible = !detail;
+        _openLink.Visible = IsInput && !detail;
+        bool basic = !detail;
+        Gain.Visible = GainBox.Visible = MuteSw.Visible = SoloSw.Visible = PhaseSw.Visible = basic;
+        _left.Visible = _right.Visible = Delete.Visible = basic;
+        bool eq = detail && _detailTab == 0;
         _graph.Visible = _showEq.Visible = _showBefore.Visible = _showAfter.Visible = eq;
-        foreach (var w in new Widget[] { Gain, GainBox, MuteSw, SoloSw, PhaseSw, Delay, DelayBox, Lock, _lockCustom,
-                     Ceiling, _ceilCustom, LinkBind, _left, _right, Delete })
-            w.Visible = !eq;
+        RewImport.Visible = !IsInput && eq;
+        RewBypass.Visible = _rewRemove.Visible = !IsInput && eq && Index < Count && Cur.Correction != null;
+        bool delay = detail && _detailTab == 1;
+        Delay.Visible = DelayBox.Visible = delay;
+        bool protect = detail && _detailTab == 2;
+        Lock.Visible = _lockCustom.Visible = protect;
+        Ceiling.Visible = _ceilCustom.Visible = !IsInput && protect;
+        bool link = detail && _detailTab == 3 && IsInput;
+        LinkBind.Visible = link;
+        LinkRemove.Visible = link && _m.LinkAt(Index) != null;
         if (!eq) _graph.Stop();
         ResetScroll();
         if (Root != null) { RefreshSpectrum(0); Layout(); Invalidate(); }
     }
+
+    void SetTab(int tab)
+    {
+        _detailTab = Math.Clamp(tab, 0, IsInput ? 3 : 2);
+        _view.SetSelected(_detailTab);
+        SetView(true);
+    }
+
+    internal void OpenTab(int tab) => SetTab(tab);
+    internal void ShowInfo() => SetView(false);
 
     bool RefreshSpectrum(float dt) => EqView && Index < Count && _graph.Update(Cur, _m.Settings.SampleRate, IsInput, Index,
         _m.HostState == HostState.Running ? _m.Engine as MixerEngine : null, dt);
@@ -310,12 +348,12 @@ internal sealed class ChannelSheet : SheetOverlay
         Lock.SetSelected(li);
         Ceiling.SetSelected(Array.FindIndex(CeilValues, v => Math.Abs(v - c.CeilingDbfs) < 0.05));
         RewImport.Enabled = RewBypass.Enabled = _rewRemove.Enabled = CanEditRew;
-        RewBypass.Visible = _rewRemove.Visible = c.Correction != null;
+        RewBypass.Visible = _rewRemove.Visible = EqView && c.Correction != null;
         RewBypass.Text = c.Correction?.Bypassed == true ? "EQ aktivieren" : "EQ umgehen";
         bool run = _m.HostRunning;
         LinkBind.Text = link != null ? "Ändern …" : "Programm binden …";
         LinkBind.Enabled = !run;
-        LinkRemove.Visible = !EqView && link != null;
+        LinkRemove.Visible = DetailView && IsInput && _detailTab == 3 && link != null;
         LinkRemove.Enabled = !run;
         _left.Enabled = Index > 0 && _m.CanMoveChannel(IsInput, Index, -1);
         _right.Enabled = Index < Count - 1 && _m.CanMoveChannel(IsInput, Index, +1);
@@ -331,7 +369,9 @@ internal sealed class ChannelSheet : SheetOverlay
         _close.Bounds = new RectF(p.Right - 16 - bs, p.Y + 20, bs, bs);
         _next.Bounds = new RectF(_close.Bounds.X - 6 - bs, p.Y + 20, bs, bs);
         _prev.Bounds = new RectF(_next.Bounds.X - 2 - bs, p.Y + 20, bs, bs);
-        Name.Bounds = new RectF(p.X + 20, p.Y + 34, Math.Max(40, _prev.Bounds.X - 12 - p.X - 20), 28);
+        _back.Bounds = new RectF(p.X + 20, p.Y + 26, 110, 32);
+        float nameX = DetailView ? _back.Bounds.Right + 16 : p.X + 20;
+        Name.Bounds = new RectF(nameX, p.Y + 34, Math.Max(40, _prev.Bounds.X - 12 - nameX), 28);
     }
 
     void Label(string t, RectF r, TextStyle st, Func<Color4> c, bool wrap = false) => _labels.Add((t, r, st, c, wrap));
@@ -356,26 +396,32 @@ internal sealed class ChannelSheet : SheetOverlay
         float rowH = Theme.Touch ? 52 : 44;
         float ip = 14; // Innenabstand der Gruppen
         float boxW = 92, boxH = Theme.Touch ? 32 : 26;
+        float g0;
         var c = Index < Count ? Cur : new ChannelDsp();
 
-        _view.Bounds = new RectF(x, y, w, Theme.ControlHSmall + 4);
-        y = _view.Bounds.Bottom + 14;
+        if (DetailView)
+        {
+            _view.Bounds = new RectF(x, y, w, Theme.ControlHSmall + 8);
+            y = _view.Bounds.Bottom + 18;
+        }
         if (EqView)
         {
-            float bw = (w - 12) / 3;
+            float bw = Math.Min(160, (w - 12) / 3);
             float bh = Theme.ControlHSmall + 4;
             _showEq.Bounds = new RectF(x, y, bw, bh);
             _showBefore.Bounds = new RectF(_showEq.Bounds.Right + 6, y, bw, bh);
             _showAfter.Bounds = new RectF(_showBefore.Bounds.Right + 6, y, bw, bh);
-            _graph.Bounds = new RectF(x, y + bh + 8, w, 252);
+            _graph.Bounds = new RectF(x, y + bh + 12, w, Math.Max(260, Math.Min(500, Body.H - 230)));
             y = Footer(x, _graph.Bounds.Bottom, w, "Live-Abgriff direkt vor und nach der Filterkette.") + 12;
-            if (!IsInput) y = LayoutRew(c, x, y, w, ip);
+            if (!IsInput) y = LayoutRew(c, x, y, Math.Min(w, 720), ip);
             return y - y0;
         }
 
         // ---- Pegel ----
+        if (!DetailView)
+        {
         y = Section(x, y, w, "PEGEL");
-        float g0 = y;
+        g0 = y;
         Label("Gain", new RectF(x + ip, y + 10, 120, boxH), Theme.BodyMedium, () => Theme.Text);
         GainBox.Bounds = new RectF(x + w - ip - boxW, y + 10, boxW, boxH);
         Gain.Bounds = new RectF(x + ip - 4, y + 10 + boxH + 4, w - 2 * ip + 8, 32);
@@ -390,7 +436,20 @@ internal sealed class ChannelSheet : SheetOverlay
         _groups.Add(new RectF(x, g0, w, y - g0));
         y += 22;
 
+        y = Section(x, y, w, "BEARBEITEN");
+        float navW = Math.Min(w, 480);
+        float navH = Theme.ControlHSmall + 8;
+        _openEq.Bounds = new RectF(x, y, navW, navH); y += navH + 7;
+        _openDelay.Bounds = new RectF(x, y, navW, navH); y += navH + 7;
+        _openProtection.Bounds = new RectF(x, y, navW, navH); y += navH + 7;
+        if (IsInput) { _openLink.Bounds = new RectF(x, y, navW, navH); y += navH + 7; }
+        y += 12;
+        return LayoutChannelActions(x, y, w, ip) - y0;
+        }
+
         // ---- Laufzeit ----
+        if (_detailTab == 1)
+        {
         y = Section(x, y, w, "LAUFZEIT");
         g0 = y;
         Label("Verzögerung", new RectF(x + ip, y + 10, 160, boxH), Theme.BodyMedium, () => Theme.Text);
@@ -399,9 +458,12 @@ internal sealed class ChannelSheet : SheetOverlay
         y = Delay.Bounds.Bottom + 8;
         _groups.Add(new RectF(x, g0, w, y - g0));
         y = Footer(x, y, w, "Verzögert diesen Kanal um bis zu 20 ms, z. B. um Lautsprecher zeitlich auszurichten. Doppelklick auf den Regler = 0.");
-        y += 16;
+        return y + 16 - y0;
+        }
 
         // ---- Schutz ----
+        if (_detailTab == 2)
+        {
         y = Section(x, y, w, "SCHUTZ");
         g0 = y;
         float lw = Renderer.MeasureWidth("Eigener Wert …", Theme.CalloutMedium) + 20;
@@ -424,12 +486,11 @@ internal sealed class ChannelSheet : SheetOverlay
             : "Keine Sperre. Für empfindliche Hochtöner einen Höchstwert wählen – der Fader lässt sich dann nicht darüber ziehen.";
         if (!IsInput) lockText += $" Limiter-Grenze: {Db.Format(c.CeilingDbfs)} dBFS (Marke am Meter).";
         y = Footer(x, y, w, lockText);
-        y += 16;
-
-        if (!IsInput) y = LayoutRew(c, x, y, w, ip);
+        return y + 16 - y0;
+        }
 
         // ---- App-Link ----
-        if (IsInput)
+        if (IsInput && _detailTab == 3)
         {
             y = Section(x, y, w, "APP-LINK");
             g0 = y;
@@ -450,12 +511,17 @@ internal sealed class ChannelSheet : SheetOverlay
                 ? "Zum Ändern zuerst Audio stoppen."
                 : "Bindet ein Programm (z. B. Spotify) an diesen Eingang: Sein Ton läuft dann nur noch über NX-MIX.";
             y = Footer(x, y, w, note);
-            y += 16;
+            return y + 16 - y0;
         }
 
-        // ---- Kanal ----
+        return y - y0;
+    }
+
+    float LayoutChannelActions(float x, float y, float w, float ip)
+    {
+        // ---- Kanalverwaltung im Seitenblatt ----
         y = Section(x, y, w, "KANAL");
-        g0 = y;
+        float g0 = y;
         float hb = Theme.ControlHSmall + 4;
         float half = (w - 2 * ip - 8) / 2;
         _left.Bounds = new RectF(x + ip, y + 14, half, hb);
@@ -464,7 +530,7 @@ internal sealed class ChannelSheet : SheetOverlay
         Delete.Bounds = new RectF(x + ip, y, w - 2 * ip, hb);
         y = Delete.Bounds.Bottom + 14;
         _groups.Add(new RectF(x, g0, w, y - g0));
-        return y - y0;
+        return y;
     }
 
     float LayoutRew(ChannelDsp c, float x, float y, float w, float ip)
@@ -494,7 +560,8 @@ internal sealed class ChannelSheet : SheetOverlay
     protected override void PaintHeader(Renderer g, RectF h)
     {
         string kind = IsInput ? "EINGANG" : "AUSGANG";
-        g.Text($"{kind} {Index + 1:00}  ·  {Index + 1} VON {Count}", new RectF(h.X + 20, h.Y + 16, h.W - 160, 16), Theme.Overline, Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
+        float x = DetailView ? _back.Bounds.Right + 16 : h.X + 20;
+        g.Text($"{kind} {Index + 1:00}  ·  {Index + 1} VON {Count}", new RectF(x, h.Y + 12, h.Right - x - 160, 16), Theme.Overline, Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
     }
 
     public override void Paint(Renderer g)
@@ -505,10 +572,10 @@ internal sealed class ChannelSheet : SheetOverlay
 
     protected override void PaintBody(Renderer g)
     {
-        foreach (var r in _groups) g.FillRound(r, 12, Theme.IsDark ? Theme.Surface2 : Theme.Surface2);
+        foreach (var r in _groups) g.FillRound(r, Theme.RadiusInner, Theme.Surface2);
         foreach (var (x, y, w) in _seps) g.Fill(new RectF(x, y, w, 1), Theme.Separator);
         foreach (var l in _labels) g.Text(l.Text, l.Rect, l.Style, l.Color(), HAlign.Left, l.Wrap ? VAlign.Top : VAlign.Middle, !l.Wrap, l.Wrap);
-        if (IsInput && !EqView && !_linkStatus.IsEmpty) PaintLinkStatus(g);
+        if (IsInput && DetailView && _detailTab == 3 && !_linkStatus.IsEmpty) PaintLinkStatus(g);
     }
 
     void PaintLinkStatus(Renderer g)
@@ -517,7 +584,7 @@ internal sealed class ChannelSheet : SheetOverlay
         var l = Index < Count ? _m.LinkAt(Index) : null;
         if (l == null)
         {
-            g.FillRound(new RectF(r.X, r.Y + 2, 36, 36), 10, Theme.Control);
+            g.FillRound(new RectF(r.X, r.Y + 2, 36, 36), Theme.RadiusInner, Theme.Control);
             Icons.Draw(g, Icon.Link, r.X + 18, r.Y + 20, 18, Theme.TextTertiary);
             g.Text("Kein Programm gebunden", new RectF(r.X + 48, r.Y + 2, r.W - 48, 18), Theme.BodyMedium, Theme.Text);
             g.Text(_m.AppLinksEnabled ? "Eingang erhält sein Signal über die Geräte-Zuordnung." : "App-Links sind in den Einstellungen ausgeschaltet.",
@@ -526,7 +593,7 @@ internal sealed class ChannelSheet : SheetOverlay
         }
         var v = _m.ViewOf(l);
         var col = LinkLook.Color(v.State);
-        g.FillRound(new RectF(r.X, r.Y + 2, 36, 36), 10, Theme.Soft(col));
+        g.FillRound(new RectF(r.X, r.Y + 2, 36, 36), Theme.RadiusInner, Theme.Soft(col));
         string letter = l.Title.Length > 0 ? l.Title[..1].ToUpperInvariant() : "?";
         g.Text(letter, new RectF(r.X, r.Y + 2, 36, 36), Theme.Headline, col, HAlign.Center, VAlign.Middle, false);
         string head = $"{l.Title}  ·  {(l.Count == 2 ? (Index == l.FirstChannel ? "Stereo L" : "Stereo R") : "mono")}";

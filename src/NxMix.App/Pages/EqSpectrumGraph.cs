@@ -113,8 +113,8 @@ internal sealed class EqSpectrumGraph : Widget
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        g.FillRound(b, 12, Theme.Well);
-        g.StrokeRound(b, 12, Theme.Border);
+        g.FillRound(b, Theme.RadiusInner, Theme.Well);
+        g.StrokeRound(b, Theme.RadiusInner, Theme.Border);
         var plot = b.Deflate(47, 30, 45, 33);
         if (plot.IsEmpty) return;
 
