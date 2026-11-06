@@ -6,13 +6,15 @@ namespace NxMix.App.Pages;
 
 /// <summary>
 /// Einstellungen als gruppierte Liste (wie die Apple-Systemeinstellungen): Darstellung, Projekt, App-Links, Engine,
-/// Sicherheit, Tastenkuerzel. Eine Spalte, scrollt senkrecht.
+/// Sicherheit, Tastenkuerzel. Nutzt die verfuegbare Breite und scrollt senkrecht.
 /// </summary>
 internal sealed class SettingsPage : Page
 {
     readonly AppModel _m;
     public readonly Segmented ThemeSeg = new("System", "Hell", "Dunkel");
     public readonly Segmented DensitySeg = new("Maus", "Touch");
+    public readonly Slider UiScaleSlider = new() { Min = 75, Max = 150, Default = 100, Step = 5, WheelStep = 5,
+        Tooltip = "75–150 % · Doppelklick stellt 100 % wieder her" };
     public readonly Switch SidebarSw = new();
     readonly Button _export = new("Exportieren …", ButtonStyle.Gray, Icon.Export);
     readonly Button _import = new("Importieren …", ButtonStyle.Gray, Icon.Import);
@@ -25,6 +27,7 @@ internal sealed class SettingsPage : Page
     readonly VScroll _sc = new();
     readonly List<Action<Renderer>> _painters = new();
     readonly List<RectF> _groups = new();
+    internal RectF ContentArea { get; private set; }
 
     const string Intro = "Ein App-Link bindet ein Programm (z. B. Spotify oder Chrome) direkt an einen Eingangs-Fader: Sein Ton läuft dann nur noch über NX-MIX und nirgends sonst. Dafür leitet Windows die Ausgabe des Programms auf den Parkplatz um, und NX-MIX greift den Ton dort ab.";
     const string Warn = "Der Parkplatz muss ein virtuelles, stilles Ausgabegerät sein, an dem NICHTS weitergeleitet wird – nicht in einer VB-Matrix-, Voicemeeter- oder Cable-Kette und nicht auf Lautsprecher. Sonst wird der Ton dort hörbar. Das Standardgerät lässt sich nicht wählen.";
@@ -37,7 +40,7 @@ internal sealed class SettingsPage : Page
     public SettingsPage(AppModel m)
     {
         _m = m;
-        Add(ThemeSeg); Add(DensitySeg); Add(SidebarSw);
+        Add(ThemeSeg); Add(DensitySeg); Add(UiScaleSlider); Add(SidebarSw);
         Add(_export); Add(_import); Add(_new);
         Add(LinksSw); Add(Parking); Add(_reset);
         Add(AutoUpdateSw); Add(UpdateButton);
@@ -45,6 +48,7 @@ internal sealed class SettingsPage : Page
         UpdateButton.Clicked += () => Root?.ShowUpdate();
         ThemeSeg.Changed += i => Root?.SetThemeMode(i switch { 1 => ThemeMode.Light, 2 => ThemeMode.Dark, _ => ThemeMode.System });
         DensitySeg.Changed += i => Root?.SetDensity(i == 1 ? Density.Touch : Density.Mouse);
+        UiScaleSlider.Changed += value => Root?.SetUiScale(value);
         SidebarSw.Changed += on => Root?.SetSidebarExpanded(on);
         _new.Clicked += () => Root?.NewProjectWithConfirm();
         _export.Clicked += () => Root?.ExportProject();
@@ -116,6 +120,7 @@ internal sealed class SettingsPage : Page
         {
             ThemeSeg.SetSelected(root.Prefs.Theme switch { ThemeMode.Light => 1, ThemeMode.Dark => 2, _ => 0 });
             DensitySeg.SetSelected(root.Prefs.Density == Density.Touch ? 1 : 0);
+            UiScaleSlider.SetValue(root.Prefs.UiScalePercent);
             SidebarSw.SetOn(root.Prefs.SidebarExpanded);
             AutoUpdateSw.SetOn(root.Prefs.AutoUpdateCheck);
             var u = root.Updater;
@@ -144,8 +149,9 @@ internal sealed class SettingsPage : Page
         UpdateWidgets();
         _painters.Clear();
         _groups.Clear();
-        float colW = Math.Min(780, Bounds.W - 2 * Theme.Pad - 20);
-        float x = Bounds.X + (Bounds.W - colW) / 2;
+        float colW = Math.Max(280, Bounds.W - 2 * Theme.Pad - 20);
+        float x = Bounds.X + Theme.Pad;
+        ContentArea = new RectF(x, Bounds.Y, colW, Bounds.H);
         float y0 = Bounds.Y + 4 - _sc.Offset;
         float y = y0;
         float rowH = Theme.Touch ? 60 : 52;
@@ -156,6 +162,7 @@ internal sealed class SettingsPage : Page
         float g0 = y;
         y = Row(x, y, colW, rowH, Icon.Palette, Theme.Purple, "Farbmodus", "System folgt der Windows-Einstellung", ThemeSeg, 270);
         y = Row(x, y, colW, rowH, Icon.Hand, Theme.Orange, "Bedienung", "Touch: größere Tasten, Fader und Zeilen", DensitySeg, 190, sep: true);
+        y = ScaleRow(x, y, colW, rowH);
         y = Row(x, y, colW, rowH, Icon.Sidebar, Theme.Teal, "Seitenleiste ausgeklappt", null, SidebarSw, 60, sep: true);
         Group(x, g0, colW, y - g0);
         y += 28;
@@ -386,6 +393,31 @@ internal sealed class SettingsPage : Page
 
     /// <summary>Gruppenflaeche (wird vor allen Zeilen gezeichnet).</summary>
     void Group(float x, float y, float w, float h) => _groups.Add(new RectF(x, y, w, h));
+
+    float ScaleRow(float x, float y, float w, float rowH)
+    {
+        bool compact = w < 760;
+        float h = compact ? rowH + 42 : rowH;
+        float sliderW = compact ? Math.Max(80, w - 56 - 16 - 82) : Math.Min(360, w * 0.34f);
+        float sliderX = compact ? x + 56 : x + w - 16 - 70 - 8 - sliderW;
+        float sliderY = compact ? y + rowH + 2 : y + (h - Theme.ControlH) / 2;
+        UiScaleSlider.Bounds = new RectF(sliderX, sliderY, sliderW, Theme.ControlH);
+        float textW = compact ? w - 72 : sliderX - (x + 56) - 12;
+        _painters.Add(g =>
+        {
+            g.Fill(new RectF(x + 56, y, w - 56, 1), Theme.Separator);
+            var tile = new RectF(x + 16, y + (rowH - 28) / 2, 28, 28);
+            g.FillRound(tile, 8, Theme.Accent);
+            Icons.Draw(g, Icon.UpDown, tile.CX, tile.CY, 17, Theme.White);
+            g.Text("UI-Skalierung", new RectF(x + 56, y + rowH / 2 - 18, textW, 18), Theme.Body, Theme.Text, HAlign.Left, VAlign.Middle, true);
+            g.Text("Ganze Oberfläche · Doppelklick = 100 %", new RectF(x + 56, y + rowH / 2 + 1, textW, 17),
+                Theme.Caption, Theme.TextSecondary, HAlign.Left, VAlign.Middle, true);
+            var value = new RectF(x + w - 16 - 70, sliderY + (Theme.ControlH - 27) / 2, 70, 27);
+            g.FillRound(value, 7, Theme.Control);
+            g.Text($"{UiScaleSlider.Value:0} %", value, Theme.CalloutStrong, Theme.Text, HAlign.Center, VAlign.Middle);
+        });
+        return y + h;
+    }
 
     /// <summary>Eine Zeile: Symbol-Kachel, Titel, optional Untertitel, rechts ein Bedienelement.</summary>
     float Row(float x, float y, float w, float h, Icon icon, Color4 tint, string title, string? sub, Widget? control, float controlW, bool sep = false)

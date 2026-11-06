@@ -22,6 +22,7 @@ internal static class Program
         public string Page = "mixer";
         public int W = 1600, H = 900;
         public float Scale = 1f;
+        public int UiScale = 100;
         public bool Demo, HostRunning, ForceDemoEngine;
         /// <summary>--restorer unsupported: Screenshot mit "Windows unterstuetzt es nicht".</summary>
         public string? Restorer;
@@ -51,6 +52,7 @@ internal static class Program
                         break;
                     }
                 case "--scale": float.TryParse(Next(ref i), NumberStyles.Float, CultureInfo.InvariantCulture, out o.Scale); break;
+                case "--ui-scale": int.TryParse(Next(ref i), out o.UiScale); break;
                 case "--t": double.TryParse(Next(ref i), NumberStyles.Float, CultureInfo.InvariantCulture, out o.T); break;
                 case "--empty": o.Demo = false; break;
                 case "--demo": o.Demo = true; break;
@@ -178,12 +180,14 @@ internal static class Program
             Theme = o.Theme == "light" ? ThemeMode.Light : ThemeMode.Dark,
             Density = o.Touch ? Density.Touch : Density.Mouse,
             SidebarExpanded = o.Expanded,
+            UiScalePercent = UiPrefs.ClampScale(o.UiScale),
         };
         var fake = new FakeUpdateBackend { Offer = o.Update != null ? new UpdateOffer("0.2.0", "## NX-MIX 0.2.0\n\n- Beispiel") : null };
         var root = new UiRoot(model, new NullShell(), prefs, fake);
         root.Updater.RunInline = true;
         if (o.Update != null) { root.Updater.Check(); if (o.Update == "ready") root.Updater.Download(); }
-        float dipW = o.W / o.Scale, dipH = o.H / o.Scale;
+        float effectiveScale = o.Scale * prefs.ScaleFactor;
+        float dipW = o.W / effectiveScale, dipH = o.H / effectiveScale;
         root.Resize(dipW, dipH);
         int page = o.Page switch { "matrix" => 1, "devices" => 2, "settings" => 3, _ => 0 };
         root.SwitchPage(page);
@@ -193,7 +197,7 @@ internal static class Program
         root.Tick(1f / 60f);
         if (o.Show != null) ShowOverlay(root, o.Show);
 
-        RenderRoot(root, o.W, o.H, o.Scale, o.Shot);
+        RenderRoot(root, o.W, o.H, effectiveScale, o.Shot);
         return 0;
     }
 

@@ -18,6 +18,8 @@ internal interface IShell
     bool SystemPrefersDark { get; }
     /// <summary>Farbmodus hat gewechselt (Fensterrahmen anpassen).</summary>
     void ThemeChanged();
+    /// <summary>UI-Skalierung hat gewechselt (Renderziel und Layout anpassen).</summary>
+    void UiScaleChanged();
     /// <summary>Wie beim Schliessen: Projekt speichern, Audio stoppen, Programm-Umleitungen zuruecksetzen (vor einem Update-Neustart).</summary>
     void PrepareExit();
 }
@@ -37,6 +39,8 @@ internal sealed class NullShell : IShell
     public WindowDto? WindowState => null;
     public bool SystemPrefersDark => SystemDark;
     public void ThemeChanged() { }
+    public void UiScaleChanged() { ScaleChanges++; }
+    public int ScaleChanges;
     public int ExitPrepared;
     public void PrepareExit() => ExitPrepared++;
 }
@@ -81,6 +85,7 @@ internal sealed class UiRoot : Widget
         Model = model;
         Shell = shell;
         Prefs = prefs ?? new UiPrefs();
+        Prefs.UiScalePercent = UiPrefs.ClampScale(Prefs.UiScalePercent);
         Updater = new AppUpdater(updates ?? new FakeUpdateBackend { IsInstalled = false }, () => Model.Post);
         Updater.Changed += OnUpdaterChanged;
         ApplyThemeFromPrefs(false);
@@ -111,6 +116,22 @@ internal sealed class UiRoot : Widget
 
     public void SetThemeMode(ThemeMode mode) { Prefs.Theme = mode; Prefs.Save(); ApplyThemeFromPrefs(true); }
     public void SetDensity(Density d) { Prefs.Density = d; Prefs.Save(); ApplyThemeFromPrefs(true); }
+    public void SetUiScale(double percent)
+    {
+        if (!double.IsFinite(percent)) percent = 100;
+        int next = UiPrefs.ClampScale((int)(Math.Round(percent / 5) * 5));
+        int old = Prefs.UiScalePercent;
+        if (next == old) return;
+        Prefs.UiScalePercent = next;
+        Shell.UiScaleChanged();
+        float ratio = (float)old / next;
+        _mx *= ratio;
+        _my *= ratio;
+        if (Captured is Slider slider)
+            slider.RebaseDrag(_mx);
+        Prefs.Save();
+        Dirty = true;
+    }
     public void SetSidebarExpanded(bool on) { Prefs.SidebarExpanded = on; Prefs.Save(); Side.Expanded = on; Resize(W, H); }
     /// <summary>Windows hat den App-Modus gewechselt (nur relevant bei "System").</summary>
     public void SystemThemeChanged() { if (Prefs.Theme == ThemeMode.System) ApplyThemeFromPrefs(true); }

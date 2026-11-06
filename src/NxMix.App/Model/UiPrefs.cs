@@ -5,13 +5,14 @@ using NxMix.App.Ui;
 namespace NxMix.App.Model;
 
 /// <summary>
-/// Darstellung (gehoert zum Geraet, nicht zum Projekt): Farbmodus, Maus/Touch, Seitenleiste.
+/// Darstellung (gehoert zum Geraet, nicht zum Projekt): Farbmodus, Maus/Touch, UI-Skalierung, Seitenleiste.
 /// Liegt als ui.json neben project.json und wird bei jeder Aenderung sofort geschrieben.
 /// </summary>
 internal sealed class UiPrefs
 {
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public Density Density { get; set; } = Density.Mouse;
+    public int UiScalePercent { get; set; } = 100;
     /// <summary>Vorgabe wie bei UniFi: schmale Symbolleiste, Texte als Tooltip.</summary>
     public bool SidebarExpanded { get; set; }
     /// <summary>Beim Start im Hintergrund nach einer neuen Version suchen (installiert wird nur auf Klick).</summary>
@@ -20,13 +21,20 @@ internal sealed class UiPrefs
     static readonly JsonSerializerOptions s_json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 
     static string FilePath => Path.Combine(ProjectStore.Directory, "ui.json");
+    public float ScaleFactor => ClampScale(UiScalePercent) / 100f;
+    public static int ClampScale(int percent) => Math.Clamp(percent, 75, 150);
 
     public static UiPrefs Load()
     {
         if (!ProjectStore.Enabled) return new UiPrefs();
         try
         {
-            if (File.Exists(FilePath)) return JsonSerializer.Deserialize<UiPrefs>(File.ReadAllText(FilePath), s_json) ?? new UiPrefs();
+            if (File.Exists(FilePath))
+            {
+                var prefs = JsonSerializer.Deserialize<UiPrefs>(File.ReadAllText(FilePath), s_json) ?? new UiPrefs();
+                prefs.UiScalePercent = ClampScale(prefs.UiScalePercent);
+                return prefs;
+            }
         }
         catch { /* kaputte Datei: Vorgaben */ }
         return new UiPrefs();

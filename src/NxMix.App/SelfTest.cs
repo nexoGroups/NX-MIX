@@ -582,6 +582,26 @@ internal static class SelfTest
         root.SwitchPage(3);
         var sp = (SettingsPage)root.Pages[3];
         Program.RenderRoot(root, 1600, 900, 1f, null); // Layout der Einstellungen
+        Check("Einstellungen: Gruppen nutzen die ganze Inhaltsbreite",
+            sp.ContentArea.W > 1200 && Math.Abs(sp.ContentArea.X - root.ContentRect.X - Theme.Pad) < 1 &&
+            Math.Abs(sp.ContentArea.Right - (root.ContentRect.Right - Theme.Pad - 20)) < 1);
+        float sliderX = sp.UiScaleSlider.Bounds.X + 10 + (sp.UiScaleSlider.Bounds.W - 20) * 2 / 3;
+        Click(root, sliderX, sp.UiScaleSlider.Bounds.CY);
+        Check("UI-Skalierung: Regler stellt 125 % sofort ein",
+            root.Prefs.UiScalePercent == 125 && ((NullShell)root.Shell).ScaleChanges == 1);
+        root.Resize(1600 / 1.25f, 900 / 1.25f);
+        Program.RenderRoot(root, 1600, 900, 1.25f, null);
+        Check("UI-Skalierung: Regler bleibt nach Neu-Layout synchron", sp.UiScaleSlider.Value == 125);
+        root.SetUiScale(500);
+        root.Resize(900 / 1.5f, 600 / 1.5f);
+        Program.RenderRoot(root, 900, 600, 1.5f, null);
+        Check("UI-Skalierung: 150 % bleibt in schmalem Fenster bedienbar",
+            root.Prefs.UiScalePercent == 150 && sp.UiScaleSlider.Bounds.X >= root.ContentRect.X &&
+            sp.UiScaleSlider.Bounds.Right <= root.ContentRect.Right);
+        Click(root, sp.UiScaleSlider, clicks: 2);
+        root.Resize(1600, 900);
+        Check("UI-Skalierung: Doppelklick setzt 100 % wieder her",
+            root.Prefs.UiScalePercent == 100 && sp.UiScaleSlider.Value == 100 && ((NullShell)root.Shell).ScaleChanges == 3);
         ClickSeg(root, sp.ThemeSeg, 1);
         Check("Einstellungen: 'Hell' schaltet auf hell und merkt es", !Theme.IsDark && root.Prefs.Theme == ThemeMode.Light);
         Program.RenderRoot(root, 1600, 900, 1f, null);

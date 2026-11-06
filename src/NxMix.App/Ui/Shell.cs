@@ -161,7 +161,9 @@ internal sealed class TopBar : Widget
         {
             string t = AudioText(out _);
             float w = Renderer.MeasureWidth(t, Theme.CalloutMedium) + 40;
-            return new RectF(MenuRect.X - 10 - w, Bounds.CY - ButtonH / 2, w, ButtonH);
+            float x = MenuRect.X - 10 - w;
+            float titleEnd = Bounds.X + Theme.Pad + Renderer.MeasureWidth(Root!.CurrentPage.Title, Theme.LargeTitle);
+            return x < titleEnd + 14 ? default : new RectF(x, Bounds.CY - ButtonH / 2, w, ButtonH);
         }
     }
 
@@ -184,9 +186,11 @@ internal sealed class TopBar : Widget
         get
         {
             string? t = UpdateText();
-            if (t == null) return default;
+            if (t == null || AudioRect.IsEmpty) return default;
             float w = Renderer.MeasureWidth(t, Theme.CalloutStrong) + 44;
-            return new RectF(AudioRect.X - 8 - w, Bounds.CY - ButtonH / 2, w, ButtonH);
+            float x = AudioRect.X - 8 - w;
+            float titleEnd = Bounds.X + Theme.Pad + Renderer.MeasureWidth(Root!.CurrentPage.Title, Theme.LargeTitle);
+            return x < titleEnd + 14 ? default : new RectF(x, Bounds.CY - ButtonH / 2, w, ButtonH);
         }
     }
 
@@ -265,7 +269,8 @@ internal sealed class TopBar : Widget
         float tx = b.X + Theme.Pad;
         float tw = Renderer.MeasureWidth(page.Title, Theme.LargeTitle);
         g.Text(page.Title, new RectF(tx, b.Y, tw + 4, b.H), Theme.LargeTitle, Theme.Text, HAlign.Left, VAlign.Middle, false);
-        float right = AudioRect.X - 12;
+        var ar = AudioRect;
+        float right = (ar.IsEmpty ? MenuRect.X : ar.X) - 12;
 
         // Update-Pille (Akzent), nur wenn es etwas gibt
         var ur = UpdateRect;
@@ -283,9 +288,10 @@ internal sealed class TopBar : Widget
         if (m.Engine.LimiterHits > 0)
         {
             string t = $"Limiter {m.Engine.LimiterHits}";
-            right -= Draw.Chip(g, right, b.CY, t, Theme.Orange, true, null, alignRight: true) + 8;
+            if (right - Draw.ChipWidth(t) > tx + tw + 14)
+                right -= Draw.Chip(g, right, b.CY, t, Theme.Orange, true, null, alignRight: true) + 8;
         }
-        if (m.EngineIsDemo)
+        if (m.EngineIsDemo && right - Draw.ChipWidth("Demo-Pegel", false) > tx + tw + 14)
             right -= Draw.Chip(g, right, b.CY, "Demo-Pegel", Theme.Orange, false, null, alignRight: true) + 8;
 
         string? sub = page.Subtitle;
@@ -296,8 +302,9 @@ internal sealed class TopBar : Widget
         }
 
         // Audio-Status als Pille
+        if (!ar.IsEmpty)
         {
-            var r = AudioRect;
+            var r = ar;
             string t = AudioText(out var c);
             bool hot = _hoverKind == TitleHit.Audio;
             bool running = m.HostState == HostState.Running;

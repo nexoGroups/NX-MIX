@@ -94,6 +94,22 @@ internal sealed unsafe class MainWindow : IShell
         InvalidateRect(_hwnd, 0, false);
     }
 
+    public void UiScaleChanged()
+    {
+        if (_hwnd == 0) return;
+        _scale = _dpi / 96f * _prefs.ScaleFactor;
+        _g?.Dispose(); _g = null;
+        _rt?.Dispose(); _rt = null;
+        ResizeTarget();
+        if (!IsMaximized)
+        {
+            GetClientRect(_hwnd, out var rc);
+            _normalW = rc.Width / _scale;
+            _normalH = rc.Height / _scale;
+        }
+        InvalidateRect(_hwnd, 0, false);
+    }
+
     /// <summary>Fensterrahmen passend zum Farbmodus: dunkler/heller Rahmen, runde Ecken, Randfarbe.</summary>
     void ApplyFrameTheme()
     {
@@ -145,7 +161,7 @@ internal sealed unsafe class MainWindow : IShell
 
         _dpi = GetDpiForWindow(_hwnd);
         if (_dpi == 0) _dpi = 96;
-        _scale = _dpi / 96f;
+        _scale = _dpi / 96f * _prefs.ScaleFactor;
 
         // Schatten fuer den rahmenlosen Stil; Rahmenfarbe und Ecken folgen dem Farbmodus
         var margins = new MARGINS { Top = 1 };
@@ -188,7 +204,7 @@ internal sealed unsafe class MainWindow : IShell
         _rt?.Dispose(); _rt = null;
         GetClientRect(_hwnd, out var rc);
         var props = new RenderTargetProperties(RenderTargetType.Default, new Vortice.DCommon.PixelFormat(Format.Unknown, Vortice.DCommon.AlphaMode.Unknown),
-            _dpi, _dpi, RenderTargetUsage.None, FeatureLevel.Default);
+            96f * _scale, 96f * _scale, RenderTargetUsage.None, FeatureLevel.Default);
         var hp = new HwndRenderTargetProperties
         {
             Hwnd = _hwnd,
@@ -315,7 +331,7 @@ internal sealed unsafe class MainWindow : IShell
             case WM_DPICHANGED:
                 {
                     _dpi = (uint)((long)wParam & 0xFFFF);
-                    _scale = _dpi / 96f;
+                    _scale = _dpi / 96f * _prefs.ScaleFactor;
                     var r = (RECT*)lParam;
                     SetWindowPos(hwnd, 0, r->Left, r->Top, r->Width, r->Height, SWP_NOZORDER | SWP_NOACTIVATE);
                     _g?.Dispose(); _g = null; _rt?.Dispose(); _rt = null;

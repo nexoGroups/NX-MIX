@@ -316,6 +316,7 @@ internal sealed class Slider : Widget
     public event Action<double>? Changed;
 
     bool _lastFine;
+    bool _dragRebased;
     double _dragNorm0;
     float _dragX0;
 
@@ -326,6 +327,14 @@ internal sealed class Slider : Widget
     double Val(double t) => FromNorm?.Invoke(t) ?? Min + t * (Max - Min);
 
     public void SetValue(double v) { if (!v.Equals(Value)) { Value = v; Invalidate(); } }
+
+    /// <summary>Hält den Ziehpunkt stabil, wenn die UI während des Ziehens ihre Skalierung ändert.</summary>
+    internal void RebaseDrag(float pointerX)
+    {
+        _dragNorm0 = Math.Clamp(Norm(Value), 0, 1);
+        _dragX0 = pointerX;
+        _dragRebased = true;
+    }
 
     RectF TrackRect => new(Bounds.X + KnobD / 2, Bounds.CY - 2, Math.Max(1, Bounds.W - KnobD), 4);
     static float KnobD => Theme.Touch ? 26 : 20;
@@ -347,8 +356,10 @@ internal sealed class Slider : Widget
         var t = TrackRect;
         float kx = t.X + (float)Math.Clamp(Norm(Value), 0, 1) * t.W;
         bool onKnob = Math.Abs(e.X - kx) <= KnobD / 2 + 2;
+        _dragRebased = false;
         if (!onKnob) Set(Val(Math.Clamp((e.X - t.X) / t.W, 0, 1)), e.Fine);
-        _dragNorm0 = Math.Clamp(Norm(Value), 0, 1); _dragX0 = e.X; _lastFine = e.Fine;
+        if (!_dragRebased) { _dragNorm0 = Math.Clamp(Norm(Value), 0, 1); _dragX0 = e.X; }
+        _lastFine = e.Fine;
         Invalidate();
     }
 
