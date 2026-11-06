@@ -252,6 +252,8 @@ internal static class Program
             case "start-dialog": ((DevicesPage)root.Pages[2]).ShowStartDialog(); break;
             case "sheet-out": Sheet(root, false, 2); break;                 // Hochtoener mit Gain-Sperre
             case "sheet-in": Sheet(root, true, 6); break;                   // Spotify (Stereo-Link)
+            case "eq-out": ChannelSheet.Show(root, root.Model, false, 2, eq: true); break;
+            case "eq-in": ChannelSheet.Show(root, root.Model, true, 6, eq: true); break;
             case "sheet-scroll":
                 {
                     var s = Sheet(root, false, 5);

@@ -64,6 +64,7 @@ internal sealed class ChannelStrip : Widget
     public readonly StripHeader Header;
     public readonly Toggle Mute = new("M", () => Theme.Red);
     public readonly Toggle Solo = new("S", () => Theme.Yellow) { ActiveText = () => Theme.Rgb(0x1A1B1E) };
+    public readonly Button Eq = new("EQ", ButtonStyle.Gray) { Font = Theme.CaptionStrong, Tooltip = "EQ und Live-Spektrum öffnen" };
     public readonly Fader Fader = new();
     public readonly Meter Meter = new();
     public readonly ValueBox Readout = new();
@@ -90,7 +91,8 @@ internal sealed class ChannelStrip : Widget
             Meter.ExtraTooltip = "Master: größter Ausgangspegel";
             return;
         }
-        Add(Mute); Add(Solo);
+        Add(Mute); Add(Solo); Add(Eq);
+        Eq.Clicked += () => OpenSheet(eq: true);
         Mute.Tooltip = "Stumm"; Solo.Tooltip = "Solo";
         Mute.Toggled += on => _m.UpdateChannel(IsInput, Index, c => c with { Mute = on });
         Solo.Toggled += on => _m.UpdateChannel(IsInput, Index, c => c with { Solo = on });
@@ -108,10 +110,10 @@ internal sealed class ChannelStrip : Widget
     /// <summary>Das Kanal-Blatt dieses Streifens ist offen.</summary>
     public bool Selected => !IsMaster && Root != null && Root.Overlays.Any(o => o is ChannelSheet s && s.IsInput == IsInput && s.Index == Index);
 
-    public void OpenSheet()
+    public void OpenSheet(bool eq = false)
     {
         var root = Root; if (root == null || IsMaster) return;
-        ChannelSheet.Show(root, _m, IsInput, Index);
+        ChannelSheet.Show(root, _m, IsInput, Index, eq);
     }
 
     // ---- Zustand aus dem Modell ----------------------------------------------------------------
@@ -192,6 +194,8 @@ internal sealed class ChannelStrip : Widget
                 Mute.Bounds = new RectF(x0, y, w, bh); y += bh + 4;
                 Solo.Bounds = new RectF(x0, y, w, bh); y += bh + 8;
             }
+            Eq.Bounds = new RectF(x0, y, w, Theme.ControlHSmall);
+            y = Eq.Bounds.Bottom + 6;
         }
         else y += 8;
 

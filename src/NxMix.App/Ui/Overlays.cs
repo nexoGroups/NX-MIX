@@ -296,12 +296,14 @@ internal abstract class SheetOverlay : Overlay
     protected RectF Body { get; private set; }
     protected float ScrollOffset => _sc.Offset;
     protected const float HeaderH = 74f;
+    protected virtual float PreferredWidth => Theme.SheetW;
+    protected void ResetScroll() => _sc.Offset = 0;
 
     public override void Layout()
     {
         var b = Bounds;
         float top = Root?.Top.Bounds.Bottom ?? 0;
-        float w = Math.Min(Theme.SheetW, b.W - 40);
+        float w = Math.Min(PreferredWidth, b.W - 40);
         Panel = new RectF(b.Right - w - 12, top + 8, w, Math.Max(100, b.Bottom - top - 20));
         Body = new RectF(Panel.X, Panel.Y + HeaderH, Panel.W, Math.Max(0, Panel.H - HeaderH));
         float contentH = LayoutBody(Body.X + 20, Body.Y + 4 - _sc.Offset, Body.W - 40);

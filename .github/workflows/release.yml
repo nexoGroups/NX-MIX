@@ -5,6 +5,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+    branches: ['release/v*']
 
 permissions:
   contents: write
@@ -23,7 +24,8 @@ jobs:
       - name: Version from tag
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $version = ($env:GITHUB_REF_NAME -split '/')[-1].TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $version" }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # Echtzeit-Tests (zwei Threads, keine Allokation im Audio-Pfad) brauchen freie Kerne: Testklassen nacheinander
@@ -49,5 +51,6 @@ jobs:
           --token ${{ secrets.GITHUB_TOKEN }}
           --outputDir Releases
           --tag v${{ env.VERSION }}
+          --targetCommitish ${{ github.sha }}
           --releaseName "NX-MIX ${{ env.VERSION }}"
           --publish

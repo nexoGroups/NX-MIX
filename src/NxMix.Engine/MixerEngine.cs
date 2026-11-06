@@ -45,12 +45,23 @@ public sealed class MixerEngine : IMixerEngine
     Compiled _cur;
     int _rampLeft;
     long _hits;
+    SpectrumCapture? _spectrum;
 
     public int InputChannels => _nIn;
     public int OutputChannels => _nOut;
     public int SampleRate => _sr;
     public MixerSettings Settings => Volatile.Read(ref _settings);
     public long LimiterHits => Interlocked.Read(ref _hits);
+
+    public SpectrumCapture StartSpectrum(bool input, int channel)
+    {
+        if ((uint)channel >= (uint)(input ? _nIn : _nOut)) throw new ArgumentOutOfRangeException(nameof(channel));
+        var capture = new SpectrumCapture(input, channel, _sr);
+        Volatile.Write(ref _spectrum, capture);
+        return capture;
+    }
+
+    public void StopSpectrum(SpectrumCapture capture) => Interlocked.CompareExchange(ref _spectrum, null, capture);
 
     public MixerEngine(MixerSettings initial)
     {
@@ -130,13 +141,11 @@ public sealed class MixerEngine : IMixerEngine
         return (float)(ch.InvertPhase ? -lin : lin);
     }
 
-    Section[] BuildSections(IReadOnlyList<FilterSpec>? filters, List<BiquadCoefficients> coef, List<int> kinds)
+    Section[] BuildSections(ChannelDsp? channel, bool input, List<BiquadCoefficients> coef, List<int> kinds)
     {
         coef.Clear();
         kinds.Clear();
-        if (filters != null)
-            for (int f = 0; f < filters.Count; f++)
-                FilterDesign.Design(filters[f], _sr, coef, kinds);
+        FilterDesign.DesignChannel(channel, _sr, input, coef, kinds);
         var arr = new Section[coef.Count];
         for (int s = 0; s < arr.Length; s++) arr[s] = new Section(kinds[s], coef[s]);
         return arr;
@@ -185,7 +194,7 @@ public sealed class MixerEngine : IMixerEngine
         c.InDelay = new double[_nIn];
         for (int i = 0; i < _nIn; i++)
         {
-            c.InSections[i] = BuildSections(ins[i]?.Filters, coef, kinds);
+            c.InSections[i] = BuildSections(ins[i], true, coef, kinds);
             c.InDelay[i] = DelaySamples(ins[i]);
         }
 
@@ -195,7 +204,7 @@ public sealed class MixerEngine : IMixerEngine
         c.Ceiling = new float[_nOut];
         for (int o = 0; o < _nOut; o++)
         {
-            c.OutSections[o] = BuildSections(outs[o]?.Filters, coef, kinds);
+            c.OutSections[o] = BuildSections(outs[o], false, coef, kinds);
             c.OutDelay[o] = DelaySamples(outs[o]);
             c.OutGain[o] = ChannelGain(outs[o], soloOut);
             c.Ceiling[o] = Limiter.CeilingToLinear(outs[o]?.CeilingDbfs ?? -1.0);
@@ -288,6 +297,9 @@ public sealed class MixerEngine : IMixerEngine
         var cross = _crossCur;
         var tgt = plan.Cross;
         var used = _used;
+        var spectrum = Volatile.Read(ref _spectrum);
+        int spectrumInput = spectrum is { Input: true } ? spectrum.Channel : -1;
+        int spectrumOutput = spectrum is { Input: false } ? spectrum.Channel : -1;
 
         // welche Eingaenge werden ueberhaupt gebraucht?
         for (int i = 0; i < nIn; i++) used[i] = false;
@@ -311,7 +323,7 @@ public sealed class MixerEngine : IMixerEngine
 
             var rt = _inRt[i];
             rt.Delay.Push(buf, n);                 // Ring laeuft immer mit (Verzoegerung bleibt beim Wieder-Einschalten gueltig)
-            if (!used[i])
+            if (!used[i] && i != spectrumInput)
             {
                 rt.Stale = true;
                 var secs = rt.Sections;
@@ -322,10 +334,12 @@ public sealed class MixerEngine : IMixerEngine
             }
             rt.Stale = false;
             rt.Delay.Read(buf, n, plan.InDelay[i], _rampLen);
+            if (i == spectrumInput) spectrum!.Before(buf.AsSpan(0, n));
             if (SimdEligible(rt, k)) _simdList[simdCnt++] = i;
             else RunChain(rt, buf, n, k, rampBefore);
         }
         RunSimdGroups(_inRt, _inBuf, simdCnt, n);
+        if (spectrumInput >= 0) spectrum!.After(_inBuf[spectrumInput].AsSpan(0, n));
 
         // ---- Matrix: mix[o] = sum_i cross[o][i] * in[i]
         for (int o = 0; o < nOut; o++)
@@ -362,6 +376,7 @@ public sealed class MixerEngine : IMixerEngine
         }
 
         // ---- Ausgaenge: Filterkette
+        if (spectrumOutput >= 0) spectrum!.Before(_mixBuf[spectrumOutput].AsSpan(0, n));
         simdCnt = 0;
         for (int o = 0; o < nOut; o++)
         {
@@ -370,6 +385,7 @@ public sealed class MixerEngine : IMixerEngine
             else RunChain(rt, _mixBuf[o], n, k, rampBefore);
         }
         RunSimdGroups(_outRt, _mixBuf, simdCnt, n);
+        if (spectrumOutput >= 0) spectrum!.After(_mixBuf[spectrumOutput].AsSpan(0, n));
 
         // ---- Ausgaenge: Delay, Gain, Limiter, Pegel
         for (int o = 0; o < nOut; o++)

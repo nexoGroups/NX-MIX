@@ -10,7 +10,7 @@ namespace NxMix.App;
 
 /// <summary>
 /// Selbsttest ohne Fenster und ohne Audio: spielt synthetische Mausereignisse gegen die Oberflaeche und prueft das Modell.
-/// Aufruf: NX-MIX.exe --selftest ergebnis.txt   (schreibt nichts anderes als diese Datei und eine temporaere JSON daneben)
+/// Aufruf: NX-MIX.exe --selftest ergebnis.txt (schreibt den Bericht und temporaere Testdateien daneben).
 /// </summary>
 internal static class SelfTest
 {
@@ -330,6 +330,8 @@ internal static class SelfTest
         // ---- Darstellung: Farbmodus, Touch, Seitenleiste ------------------------------------------
         DisplayTests();
         UpdateTests();
+        RewImportTests(outFile);
+        SpectrumTests();
 
         AppLinkTests(outFile);
         try
@@ -376,6 +378,140 @@ internal static class SelfTest
         }
         Theme.Apply(true, Density.Mouse);
         Check($"Zeichnen in {drawn} Groessen/Seiten/Modi ohne Ausnahme", true);
+    }
+
+    static void SpectrumTests()
+    {
+        var root = NewRoot(out var model);
+        model.AddChannels(true, 1);
+        model.AddChannels(false, 1);
+        var mixer = (MixerPage)root.Pages[0];
+        Click(root, mixer.Inputs.Strips[0].Eq);
+        Check("Spektrum: EQ am Eingangsfader öffnet die EQ-Ansicht", root.Modal is ChannelSheet { EqView: true, IsInput: true });
+        CloseAll(root);
+        Click(root, mixer.Outputs.Strips[0].Eq);
+        Check("Spektrum: EQ am Ausgangsfader öffnet die EQ-Ansicht", root.Modal is ChannelSheet { EqView: true, IsInput: false });
+        Settle(root);
+        Program.RenderRoot(root, 1600, 900, 1f, null);
+        CloseAll(root);
+
+        const int rate = 48000;
+        const int toneBin = 170;
+        double hz = rate * (double)toneBin / 8192;
+        var settings = MixerSettings.Create(rate, 1, 1);
+        settings.MatrixDb[0][0] = 0;
+        var filter = new FilterSpec(FilterType.Peak, hz, 1, -12);
+        settings = settings with { Outputs = new[] { new ChannelDsp { GainDb = -20,
+            Correction = new OutputCorrection("Test", new[] { filter }) } } };
+        var engine = new MixerEngine(settings);
+        var capture = engine.StartSpectrum(false, 0);
+        var before = new float[capture.WindowSize];
+        var after = new float[capture.WindowSize];
+        var signal = new[] { new float[capture.WindowSize] };
+        var output = new[] { new float[capture.WindowSize] };
+        for (int i = 0; i < signal[0].Length; i++) signal[0][i] = (float)(0.1 * Math.Sin(2 * Math.PI * i * hz / rate));
+        engine.Process(signal, output, before.Length);
+        long allocated = GC.GetAllocatedBytesForCurrentThread();
+        engine.Process(signal, output, before.Length);
+        Check("Spektrum: Audio-Abgriffe allokieren im Echtzeitpfad nichts", GC.GetAllocatedBytesForCurrentThread() == allocated);
+
+        const int hop = 480;
+        engine.Process(signal, output, hop);
+        long frame = 0;
+        Check("Spektrum: synchrones Fenster über die Ringgrenze", capture.TryRead(before, after, ref frame) &&
+            frame == 2 * capture.WindowSize + hop && before.AsSpan(0, before.Length - hop).SequenceEqual(signal[0].AsSpan(hop)) &&
+            before.AsSpan(before.Length - hop).SequenceEqual(signal[0].AsSpan(0, hop)));
+        var analyzer = new SpectrumAnalyzer(capture.WindowSize, rate);
+        var pre = new float[SpectrumAnalyzer.Points];
+        var post = new float[SpectrumAnalyzer.Points];
+        analyzer.Analyze(before, pre);
+        analyzer.Analyze(after, post);
+        int peak = Array.IndexOf(pre, pre.Max());
+        Check("Spektrum: FFT zeigt den Testton bei −20 dBFS", Math.Abs(pre[peak] + 20) < 0.1 &&
+            Math.Abs(SpectrumAnalyzer.Frequency(peak / (double)(pre.Length - 1), rate) / hz - 1) < 0.03);
+        Check("Spektrum: Abgriffe zeigen −12 dB EQ vor dem Ausgangsfader", Math.Abs(post[peak] - pre[peak] + 12) < 0.1);
+
+        engine.StopSpectrum(capture);
+        engine.Process(signal, output, before.Length);
+        Check("Spektrum: Stoppen beendet den Abgriff", !capture.TryRead(before, after, ref frame));
+
+        settings.MatrixDb[0][0] = double.NegativeInfinity;
+        engine = new MixerEngine(settings with { Inputs = new[] { new ChannelDsp { Filters = new[] { filter } } } });
+        capture = engine.StartSpectrum(true, 0);
+        engine.Process(signal, output, before.Length);
+        engine.Process(signal, output, before.Length);
+        frame = 0;
+        bool readInput = capture.TryRead(before, after, ref frame);
+        analyzer.Analyze(after, post);
+        Check("Spektrum: Eingangs-EQ auch ohne Matrix-Verbindung sichtbar", readInput && Math.Abs(post[peak] - pre[peak] + 12) < 0.1);
+    }
+
+    static void RewImportTests(string outFile)
+    {
+        var root = NewRoot(out var model, h: 1200);
+        model.AddChannels(true, 1);
+        model.AddChannels(false, 2);
+        model.SetSampleRate(48000);
+        model.SetMatrix(0, 0, 0);
+        model.SetMatrix(0, 1, 0);
+        var protection = new FilterSpec(FilterType.HighPass, 100);
+        model.UpdateChannel(false, 0, c => c with { Filters = new[] { protection }, CeilingDbfs = -6 });
+
+        var sheet = ChannelSheet.Show(root, model, false, 0);
+        var dir = Path.GetDirectoryName(Path.GetFullPath(outFile))!;
+        string filtersFile = Path.Combine(dir, "selftest-rew.txt");
+        string projectFile = Path.Combine(dir, "selftest-rew-project.json");
+        ((NullShell)root.Shell).OpenResult = filtersFile;
+        const string header = "Filter Settings file\n\nEqualiser: Generic\nMessung\n";
+        string fullSet = header + string.Join('\n', Enumerable.Range(1, 20).Select(n => $"Filter {n}: ON PK Fc 22000 Hz Gain -120 dB Q 50"));
+        using var fullSetReader = new StringReader(fullSet);
+        Check("REW: 20 aktive Bänder an den Parametergrenzen von Generic", RewFilterImport.Parse(fullSetReader, 44100).Count == 20);
+        try
+        {
+            File.WriteAllText(filtersFile, header + "Filter 1: ON PK Fc 1000 Hz Gain -60 dB Q 1\n" +
+                "Filter 2: OFF PK Fc 150 Hz Gain 6 dB Q 3\nFilter 1: ON None\nFilter 2: ON None\n");
+            Click(root, sheet.RewImport);
+            Key(root, Win32.VK_ESCAPE);
+            Check("REW: Abbrechen übernimmt keine Filter", model.Channel(false, 0).Correction == null);
+            Click(root, sheet.RewImport);
+            Key(root, Win32.VK_RETURN);
+            var channel = model.Channel(false, 0);
+            var eq = channel.Correction;
+            Check("REW: nur aktive Peak-Filter auf dem gewählten Ausgang", eq?.Filters is [var filter] &&
+                filter == new FilterSpec(FilterType.Peak, 1000, 1, -60) && model.Channel(false, 1).Correction == null);
+            Check("REW: Weiche und Limiter bleiben getrennt", channel.Filters.SequenceEqual(new[] { protection }) && channel.CeilingDbfs == -6);
+
+            var input = new[] { new float[480] };
+            var output = new[] { new float[480], new float[480] };
+            for (int i = 0; i < 480; i++) input[0][i] = (float)(0.1 * Math.Sin(2 * Math.PI * i / 48));
+            double OutputRatio()
+            {
+                var engine = new MixerEngine(model.Settings);
+                for (int i = 0; i < 100; i++) engine.Process(input, output, 480);
+                return Math.Sqrt(output[0].Sum(x => x * x) / output[1].Sum(x => x * x));
+            }
+            Check("REW: echter Audioausgang erreicht −60 dB", Math.Abs(OutputRatio() - 0.001) < 0.00002);
+            Click(root, sheet.RewBypass);
+            Check("REW: Bypass umgeht nur die Korrektur", model.Channel(false, 0).Correction?.Bypassed == true && Math.Abs(OutputRatio() - 1) < 0.001);
+
+            ProjectStore.WriteFile(projectFile, ProjectStore.ToDto(model, null));
+            var dto = ProjectStore.ReadFile(projectFile);
+            var (restored, _) = ProjectStore.FromDto(dto);
+            Check("REW: Filter, Herkunft und Bypass werden im Projekt gespeichert", dto.Version == 2 &&
+                restored.Outputs[0].Correction is { Bypassed: true, SourceName: "selftest-rew.txt", Filters: [var saved] } &&
+                eq != null && saved == eq.Filters[0]);
+
+            File.WriteAllText(filtersFile, "Include: andere-datei.txt\n");
+            Click(root, sheet.RewImport);
+            Check("REW: APO-Konfiguration wird abgelehnt und bestehender EQ bleibt erhalten", root.Modal is ModalDialog d &&
+                d.TitleText == "REW-Import fehlgeschlagen" && model.Channel(false, 0).Correction?.Bypassed == true);
+            Key(root, Win32.VK_RETURN);
+        }
+        finally
+        {
+            try { File.Delete(filtersFile); } catch { }
+            try { File.Delete(projectFile); } catch { }
+        }
     }
 
     // ================================================================================================

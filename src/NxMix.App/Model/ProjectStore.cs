@@ -19,6 +19,8 @@ internal sealed class ChannelDto
     public double CeilingDbfs { get; set; } = -1;
     public double MaxGainDb { get; set; } = 12;
     public List<FilterSpec>? Filters { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OutputCorrection? Correction { get; set; }
 }
 
 internal sealed class BindingDto
@@ -91,6 +93,7 @@ internal static class ProjectStore
     {
         Name = c.Name, GainDb = Fin(c.GainDb), Mute = c.Mute, Solo = c.Solo, InvertPhase = c.InvertPhase,
         DelayMs = c.DelayMs, CeilingDbfs = c.CeilingDbfs, MaxGainDb = c.MaxGainDb, Filters = c.Filters.ToList(),
+        Correction = c.Correction,
     };
 
     static ChannelDsp FromDto(ChannelDto d) => new()
@@ -100,6 +103,7 @@ internal static class ProjectStore
         Mute = d.Mute, Solo = d.Solo, InvertPhase = d.InvertPhase,
         DelayMs = d.DelayMs, CeilingDbfs = d.CeilingDbfs, MaxGainDb = d.MaxGainDb,
         Filters = (IReadOnlyList<FilterSpec>?)d.Filters ?? Array.Empty<FilterSpec>(),
+        Correction = d.Correction,
     };
 
     public static ProjectDto ToDto(AppModel m, WindowDto? window)
@@ -107,6 +111,7 @@ internal static class ProjectStore
         var s = m.Settings;
         return new ProjectDto
         {
+            Version = s.Outputs.Any(c => c.Correction != null) ? 2 : 1,
             SampleRate = s.SampleRate,
             BlockFrames = m.BlockFrames,
             Exclusive = m.Exclusive,
@@ -169,7 +174,7 @@ internal static class ProjectStore
     public static ProjectDto ReadFile(string path)
     {
         var dto = JsonSerializer.Deserialize<ProjectDto>(File.ReadAllText(path), s_json) ?? throw new InvalidDataException("Leere Datei");
-        if (dto.Version > 1) throw new InvalidDataException("Die Datei stammt von einer neueren NX-MIX-Version.");
+        if (dto.Version > 2) throw new InvalidDataException("Die Datei stammt von einer neueren NX-MIX-Version.");
         return dto;
     }
 

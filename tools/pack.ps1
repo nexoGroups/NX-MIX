@@ -21,6 +21,7 @@ $notes = Join-Path $root "docs\release-notes\$Version.md"
 $notesArgs = if (Test-Path $notes) { @('--releaseNotes', $notes) } else { @() }
 
 vpk pack @notesArgs `
+    --runtime 'win-x64' `
     --packId NxMix `
     --packVersion $Version `
     --packDir $publish `

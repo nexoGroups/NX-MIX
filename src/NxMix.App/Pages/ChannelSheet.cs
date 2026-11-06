@@ -1,6 +1,7 @@
 using NxMix.App.Model;
 using NxMix.App.Native;
 using NxMix.App.Ui;
+using NxMix.Audio;
 using NxMix.Engine;
 using Vortice.Mathematics;
 
@@ -36,11 +37,18 @@ internal sealed class ChannelSheet : SheetOverlay
     readonly AppModel _m;
     public bool IsInput { get; }
     public int Index { get; private set; }
+    public bool EqView { get; private set; }
+    protected override float PreferredWidth => EqView ? 680 : base.PreferredWidth;
 
     readonly IconButton _prev = new(Icon.ChevronLeft, "Vorheriger Kanal (←)") { IconSize = 16 };
     readonly IconButton _next = new(Icon.ChevronRight, "Nächster Kanal (→)") { IconSize = 16 };
     readonly IconButton _close = new(Icon.Close, "Schließen (Esc)") { IconSize = 16 };
     public readonly NameField Name = new();
+    readonly Segmented _view = new("Kanal", "EQ & Spektrum");
+    readonly Toggle _showEq = new("EQ-Kurve", () => EqSpectrumGraph.EqColor) { ActiveText = () => Theme.IsDark ? Theme.Black : Theme.White };
+    readonly Toggle _showBefore = new("Vor EQ", () => EqSpectrumGraph.BeforeColor) { ActiveText = () => Theme.Black };
+    readonly Toggle _showAfter = new("Nach EQ", () => EqSpectrumGraph.AfterColor) { ActiveText = () => Theme.Black };
+    readonly EqSpectrumGraph _graph = new();
 
     public readonly Slider Gain = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Default = 0, Step = 0.1, WheelStep = 1 };
     public readonly ValueBox GainBox = new();
@@ -51,6 +59,9 @@ internal sealed class ChannelSheet : SheetOverlay
     readonly Button _lockCustom = new("Eigener Wert …", ButtonStyle.Plain) { Font = Theme.CalloutMedium };
     public readonly Segmented Ceiling = new("−1", "−3", "−6", "−12") { Tooltip = "Limiter-Grenze des Ausgangs in dBFS" };
     readonly Button _ceilCustom = new("Eigener Wert …", ButtonStyle.Plain) { Font = Theme.CalloutMedium };
+    internal readonly Button RewImport = new("REW-Filter importieren …", ButtonStyle.Tinted, Icon.Import);
+    internal readonly Button RewBypass = new("EQ umgehen", ButtonStyle.Gray);
+    readonly Button _rewRemove = new("EQ entfernen", ButtonStyle.DestructiveTinted);
     public readonly Button LinkBind = new("Programm binden …", ButtonStyle.Tinted, Icon.Link);
     public readonly Button LinkRemove = new("Lösen", ButtonStyle.DestructiveTinted);
     readonly Button _left = new("Nach links", ButtonStyle.Gray, Icon.ChevronLeft);
@@ -66,15 +77,23 @@ internal sealed class ChannelSheet : SheetOverlay
     readonly List<(float X, float Y, float W)> _seps = new();
     RectF _linkStatus;
 
-    ChannelSheet(AppModel m, bool input, int index)
+    ChannelSheet(AppModel m, bool input, int index, bool eq)
     {
         _m = m; IsInput = input; Index = index;
         Add(_prev); Add(_next); Add(_close); Add(Name);
         Add(Gain); Add(GainBox); Add(MuteSw); Add(SoloSw); Add(PhaseSw);
         Add(Delay); Add(DelayBox); Add(Lock); Add(_lockCustom);
-        if (!input) { Add(Ceiling); Add(_ceilCustom); }
+        if (!input) { Add(Ceiling); Add(_ceilCustom); Add(RewImport); Add(RewBypass); Add(_rewRemove); }
         if (input) { Add(LinkBind); Add(LinkRemove); }
         Add(_left); Add(_right); Add(Delete);
+        Add(_view); Add(_showEq); Add(_showBefore); Add(_showAfter); Add(_graph);
+
+        _view.Changed += i => SetView(i == 1);
+        _showEq.SetChecked(true); _showBefore.SetChecked(true); _showAfter.SetChecked(true);
+        _showEq.Toggled += on => _graph.ShowEq = on;
+        _showBefore.Toggled += on => _graph.ShowBefore = on;
+        _showAfter.Toggled += on => _graph.ShowAfter = on;
+        SetView(eq);
 
         _prev.Clicked += _ => Go(-1);
         _next.Clicked += _ => Go(+1);
@@ -94,6 +113,13 @@ internal sealed class ChannelSheet : SheetOverlay
         _lockCustom.Clicked += () => EditNumber(_lockCustom.Bounds, Cur.MaxGainDb < Theme.FaderMaxDb - 0.05 ? Cur.MaxGainDb : 0, db => SetMax(Math.Clamp(db, -60, Theme.FaderMaxDb)));
         Ceiling.Changed += i => Upd(c => c with { CeilingDbfs = CeilValues[i] });
         _ceilCustom.Clicked += () => EditNumber(_ceilCustom.Bounds, Cur.CeilingDbfs, db => Upd(c => c with { CeilingDbfs = Math.Min(0, db) }));
+        RewImport.Clicked += ImportRew;
+        RewBypass.Clicked += () =>
+        {
+            if (CanEditRew && Cur.Correction is { } eq) Upd(c => c with { Correction = eq with { Bypassed = !eq.Bypassed } });
+        };
+        _rewRemove.Clicked += () => Root?.Confirm("REW-EQ entfernen?", "Der importierte EQ wird von diesem Ausgang entfernt.",
+            "Entfernen", () => SetCorrection(null), danger: true);
         LinkBind.Clicked += () => OpenPicker();
         LinkRemove.Clicked += () =>
         {
@@ -106,16 +132,39 @@ internal sealed class ChannelSheet : SheetOverlay
         _m.StructureChanged += OnStructure;
     }
 
-    public static ChannelSheet Show(UiRoot root, AppModel m, bool input, int index)
+    public static ChannelSheet Show(UiRoot root, AppModel m, bool input, int index, bool eq = false)
     {
         // nur ein Kanal-Blatt gleichzeitig
         foreach (var o in root.Overlays.ToArray()) if (o is ChannelSheet) root.CloseOverlay(o);
-        var s = new ChannelSheet(m, input, index);
+        var s = new ChannelSheet(m, input, index, eq);
         root.ShowOverlay(s);
+        s.RefreshSpectrum(0);
         return s;
     }
 
-    public override void OnClosed() => _m.StructureChanged -= OnStructure;
+    public override void OnClosed()
+    {
+        _m.StructureChanged -= OnStructure;
+        _graph.Stop();
+    }
+
+    void SetView(bool eq)
+    {
+        EqView = eq;
+        _view.SetSelected(eq ? 1 : 0);
+        _graph.Visible = _showEq.Visible = _showBefore.Visible = _showAfter.Visible = eq;
+        foreach (var w in new Widget[] { Gain, GainBox, MuteSw, SoloSw, PhaseSw, Delay, DelayBox, Lock, _lockCustom,
+                     Ceiling, _ceilCustom, LinkBind, _left, _right, Delete })
+            w.Visible = !eq;
+        if (!eq) _graph.Stop();
+        ResetScroll();
+        if (Root != null) { RefreshSpectrum(0); Layout(); Invalidate(); }
+    }
+
+    bool RefreshSpectrum(float dt) => EqView && Index < Count && _graph.Update(Cur, _m.Settings.SampleRate, IsInput, Index,
+        _m.HostState == HostState.Running ? _m.Engine as MixerEngine : null, dt);
+
+    public override bool Tick(float dt) => RefreshSpectrum(dt) | base.Tick(dt);
 
     void OnStructure()
     {
@@ -184,6 +233,36 @@ internal sealed class ChannelSheet : SheetOverlay
         AppLinkPicker.Show(root, _m, Index, LinkBind.Bounds, manual);
     }
 
+    bool CanEditRew => !IsInput && Index < Count && !_m.HostRunning && !_m.HostBusy;
+
+    void SetCorrection(OutputCorrection? correction)
+    {
+        if (!CanEditRew) return;
+        Upd(c => c with { Correction = correction });
+        Layout();
+    }
+
+    void ImportRew()
+    {
+        var root = Root;
+        if (root == null || !CanEditRew) return;
+        string? path = root.Shell.ShowOpenDialog("REW-Filter importieren", "REW-Filter (*.txt)\0*.txt\0\0");
+        if (string.IsNullOrEmpty(path)) return;
+
+        OutputCorrection eq;
+        try { eq = RewFilterImport.Read(path, _m.Settings.SampleRate); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException)
+        {
+            ModalDialog.Show(root, "REW-Import fehlgeschlagen", ex.Message, new[] { "OK" }, 0, -1, _ => { });
+            return;
+        }
+
+        string name = _m.DisplayName(false, Index);
+        string replace = Cur.Correction == null ? "" : " Der bisherige REW-EQ dieses Ausgangs wird ersetzt.";
+        root.Confirm("REW-EQ übernehmen?", $"„{eq.SourceName}“ enthält {eq.Filters.Count} aktive Filter für „{name}“.{replace}",
+            "Übernehmen", () => SetCorrection(eq));
+    }
+
     void SetMax(double newMax)
     {
         var root = Root; if (root == null) return;
@@ -230,10 +309,13 @@ internal sealed class ChannelSheet : SheetOverlay
         int li = locked ? Array.FindIndex(LockValues, v => Math.Abs(v - c.MaxGainDb) < 0.05) : 0;
         Lock.SetSelected(li);
         Ceiling.SetSelected(Array.FindIndex(CeilValues, v => Math.Abs(v - c.CeilingDbfs) < 0.05));
+        RewImport.Enabled = RewBypass.Enabled = _rewRemove.Enabled = CanEditRew;
+        RewBypass.Visible = _rewRemove.Visible = c.Correction != null;
+        RewBypass.Text = c.Correction?.Bypassed == true ? "EQ aktivieren" : "EQ umgehen";
         bool run = _m.HostRunning;
         LinkBind.Text = link != null ? "Ändern …" : "Programm binden …";
         LinkBind.Enabled = !run;
-        LinkRemove.Visible = link != null;
+        LinkRemove.Visible = !EqView && link != null;
         LinkRemove.Enabled = !run;
         _left.Enabled = Index > 0 && _m.CanMoveChannel(IsInput, Index, -1);
         _right.Enabled = Index < Count - 1 && _m.CanMoveChannel(IsInput, Index, +1);
@@ -275,6 +357,21 @@ internal sealed class ChannelSheet : SheetOverlay
         float ip = 14; // Innenabstand der Gruppen
         float boxW = 92, boxH = Theme.Touch ? 32 : 26;
         var c = Index < Count ? Cur : new ChannelDsp();
+
+        _view.Bounds = new RectF(x, y, w, Theme.ControlHSmall + 4);
+        y = _view.Bounds.Bottom + 14;
+        if (EqView)
+        {
+            float bw = (w - 12) / 3;
+            float bh = Theme.ControlHSmall + 4;
+            _showEq.Bounds = new RectF(x, y, bw, bh);
+            _showBefore.Bounds = new RectF(_showEq.Bounds.Right + 6, y, bw, bh);
+            _showAfter.Bounds = new RectF(_showBefore.Bounds.Right + 6, y, bw, bh);
+            _graph.Bounds = new RectF(x, y + bh + 8, w, 252);
+            y = Footer(x, _graph.Bounds.Bottom, w, "Live-Abgriff direkt vor und nach der Filterkette.") + 12;
+            if (!IsInput) y = LayoutRew(c, x, y, w, ip);
+            return y - y0;
+        }
 
         // ---- Pegel ----
         y = Section(x, y, w, "PEGEL");
@@ -329,6 +426,8 @@ internal sealed class ChannelSheet : SheetOverlay
         y = Footer(x, y, w, lockText);
         y += 16;
 
+        if (!IsInput) y = LayoutRew(c, x, y, w, ip);
+
         // ---- App-Link ----
         if (IsInput)
         {
@@ -368,6 +467,29 @@ internal sealed class ChannelSheet : SheetOverlay
         return y - y0;
     }
 
+    float LayoutRew(ChannelDsp c, float x, float y, float w, float ip)
+    {
+        y = Section(x, y, w, "REW-EQ");
+        float start = y;
+        float bh = Theme.ControlHSmall + 4;
+        RewImport.Bounds = new RectF(x + ip, y + 12, w - 2 * ip, bh);
+        y = RewImport.Bounds.Bottom;
+        if (c.Correction is { } eq)
+        {
+            float bw = (w - 2 * ip - 8) / 2;
+            RewBypass.Bounds = new RectF(x + ip, y + 8, bw, bh);
+            _rewRemove.Bounds = new RectF(RewBypass.Bounds.Right + 8, y + 8, bw, bh);
+            y = RewBypass.Bounds.Bottom;
+            string state = eq.Bypassed ? "Bypass" : "Aktiv";
+            Label($"{eq.SourceName} · {eq.Filters.Count} Filter · {state}", new RectF(x + ip, y + 6, w - 2 * ip, 20),
+                Theme.Caption, () => Theme.TextSecondary);
+            y += 24;
+        }
+        y += 12;
+        _groups.Add(new RectF(x, start, w, y - start));
+        return Footer(x, y, w, CanEditRew ? "REW Generic: bis zu 20 parametrische Filter (PK)." : "Zum Ändern zuerst Audio stoppen.") + 16;
+    }
+
     // ---- Zeichnen ------------------------------------------------------------------------------
     protected override void PaintHeader(Renderer g, RectF h)
     {
@@ -386,7 +508,7 @@ internal sealed class ChannelSheet : SheetOverlay
         foreach (var r in _groups) g.FillRound(r, 12, Theme.IsDark ? Theme.Surface2 : Theme.Surface2);
         foreach (var (x, y, w) in _seps) g.Fill(new RectF(x, y, w, 1), Theme.Separator);
         foreach (var l in _labels) g.Text(l.Text, l.Rect, l.Style, l.Color(), HAlign.Left, l.Wrap ? VAlign.Top : VAlign.Middle, !l.Wrap, l.Wrap);
-        if (IsInput && !_linkStatus.IsEmpty) PaintLinkStatus(g);
+        if (IsInput && !EqView && !_linkStatus.IsEmpty) PaintLinkStatus(g);
     }
 
     void PaintLinkStatus(Renderer g)

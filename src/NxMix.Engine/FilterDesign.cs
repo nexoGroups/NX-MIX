@@ -25,6 +25,8 @@ public static class FilterDesign
 {
     public const double MinFrequencyHz = 1.0;
     public const double MaxFilterGainDb = 36.0;
+    public const double MinCorrectionGainDb = -120.0;
+    public static double MaxCorrectionFrequencyHz(int sampleRate) => Math.Min(22000.0, 0.499 * sampleRate);
 
     /// <summary>Alle Biquad-Sektionen (a0 = 1) fuer einen Filter. Deaktivierte/ungueltige Filter liefern eine leere Liste.</summary>
     public static IReadOnlyList<BiquadCoefficients> Design(FilterSpec spec, int sampleRate)
@@ -55,13 +57,34 @@ public static class FilterDesign
         return h;
     }
 
+    /// <summary>Die tatsächlich verwendete Filterkette des Kanals, ohne Fader, Delay und Limiter.</summary>
+    public static IReadOnlyList<BiquadCoefficients> DesignChannel(ChannelDsp channel, int sampleRate, bool input)
+    {
+        var coefficients = new List<BiquadCoefficients>();
+        DesignChannel(channel, sampleRate, input, coefficients, new List<int>());
+        return coefficients;
+    }
+
+    internal static void DesignChannel(ChannelDsp? channel, int sampleRate, bool input,
+        List<BiquadCoefficients> coefficients, List<int> kinds)
+    {
+        if (channel?.Filters is { } filters)
+            foreach (var filter in filters)
+                Design(filter, sampleRate, coefficients, kinds);
+        if (!input && channel?.Correction is { Bypassed: false, Filters: { } correction })
+            foreach (var filter in correction)
+                Design(filter, sampleRate, coefficients, kinds, outputCorrection: true);
+    }
+
     /// <summary>Wie oben, zusaetzlich mit einem Strukturschluessel je Sektion (gleicher Schluessel = Zustand uebernehmbar).</summary>
-    internal static void Design(FilterSpec spec, int sampleRate, List<BiquadCoefficients> coefficients, List<int> kinds)
+    internal static void Design(FilterSpec spec, int sampleRate, List<BiquadCoefficients> coefficients, List<int> kinds,
+        bool outputCorrection = false)
     {
         if (spec is null || !spec.Enabled || sampleRate <= 0) return;
         double f0 = spec.FrequencyHz;
         if (double.IsNaN(f0) || double.IsInfinity(f0)) return;
-        f0 = Math.Clamp(f0, MinFrequencyHz, 0.49 * sampleRate);
+        double maxHz = outputCorrection ? MaxCorrectionFrequencyHz(sampleRate) : 0.49 * sampleRate;
+        f0 = Math.Clamp(f0, MinFrequencyHz, maxHz);
 
         double q = spec.Q;
         if (double.IsNaN(q) || q <= 0) q = 0.7071067811865476;
@@ -69,7 +92,7 @@ public static class FilterDesign
 
         double gainDb = spec.GainDb;
         if (double.IsNaN(gainDb)) gainDb = 0;
-        gainDb = Math.Clamp(gainDb, -MaxFilterGainDb, MaxFilterGainDb);
+        gainDb = Math.Clamp(gainDb, outputCorrection ? MinCorrectionGainDb : -MaxFilterGainDb, MaxFilterGainDb);
 
         switch (spec.Type)
         {

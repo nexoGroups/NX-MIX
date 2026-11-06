@@ -25,6 +25,9 @@ public sealed record FilterSpec(
     FilterType Type, double FrequencyHz, double Q = 0.7071, double GainDb = 0, int Order = 2,
     bool LinkwitzRiley = false, bool Enabled = true);
 
+/// <summary>Importierte Raumkorrektur eines Ausgangs. Separat von der normalen Filterkette schaltbar.</summary>
+public sealed record OutputCorrection(string SourceName, IReadOnlyList<FilterSpec> Filters, bool Bypassed = false);
+
 /// <summary>DSP eines einzelnen Kanals (Eingang oder Ausgang).</summary>
 public sealed record ChannelDsp
 {
@@ -35,6 +38,7 @@ public sealed record ChannelDsp
     public bool InvertPhase { get; init; }
     public double DelayMs { get; init; }
     public IReadOnlyList<FilterSpec> Filters { get; init; } = Array.Empty<FilterSpec>();
+    public OutputCorrection? Correction { get; init; }
     /// <summary>Harte Sicherheitsgrenze: Spitzen werden auf diesen Pegel (dBFS) begrenzt. Nur AUSGANGSKANAELE nutzen das.</summary>
     public double CeilingDbfs { get; init; } = -1.0;
     /// <summary>Obergrenze fuer GainDb. Der Aufrufer (UI) und die Engine klemmen darauf. Schutz z. B. fuer Hochtoener.</summary>
