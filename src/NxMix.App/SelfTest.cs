@@ -335,6 +335,7 @@ internal static class SelfTest
         DisplayTests();
         UpdateTests();
         RewImportTests(outFile);
+        DeckBusTests(outFile);
         SpectrumTests();
 
         AppLinkTests(outFile);
@@ -382,6 +383,50 @@ internal static class SelfTest
         }
         Theme.Apply(true, Density.Mouse);
         Check($"Zeichnen in {drawn} Groessen/Seiten/Modi ohne Ausnahme", true);
+    }
+
+    static void DeckBusTests(string outFile)
+    {
+        var root = NewRoot(out var m);
+        m.AddChannels(true, 2); m.AddChannels(false, 2);
+        var input = m.Settings.Inputs[0].Id;
+        var output = m.Settings.Outputs[0].Id;
+        m.SetMatrix(0, 0, 0);
+        var bus = m.AddBus(2);
+        var first = new BusRoute(new RoutePort(RouteKind.Input, input), new RoutePort(RouteKind.Bus, bus));
+        Check("Bus: Zuweisung löst direkte Matrix-Verbindungen", m.AddBusRoute(first) == null && double.IsNegativeInfinity(m.Settings.MatrixDb[0][0]));
+        Check("Bus: Ausgang patchen", m.AddBusRoute(new BusRoute(new RoutePort(RouteKind.Bus, bus), new RoutePort(RouteKind.Output, output))) == null);
+        Check("Bus: Rückkopplung wird ohne Änderung abgelehnt", m.AddBusRoute(new BusRoute(new RoutePort(RouteKind.Bus, bus), new RoutePort(RouteKind.Bus, bus, 1))) != null && m.Settings.BusRoutes.Count == 2);
+        var deck = new MixerDeck { Name = "Testdeck", Columns = 3, Rows = 2, Slots = new FaderSlot?[] { new(RouteKind.Input, input), null, new(RouteKind.Bus, bus), new(RouteKind.Output, output) } };
+        m.SaveDeck(deck);
+        var workspace = root.Pages[0].Children.OfType<DeckWorkspace>().Single();
+        Check("Deck: Eingänge, Ausgänge, Busse und Leerstellen in einer Ansicht", workspace.Custom && workspace.SlotAt(0) is ChannelStrip && workspace.SlotAt(2) is BusStrip && workspace.SlotAt(3) is ChannelStrip);
+        var strip = (ChannelStrip)workspace.SlotAt(0);
+        Click(root, strip.Readout, 2); Type(root, "-9"); Key(root, Win32.VK_RETURN);
+        Check("Deck: Fader bearbeitet denselben Audiokanal", m.Settings.Inputs[0].GainDb == -9);
+        workspace.BeginEditing();
+        var a = workspace.SlotAt(0).Bounds; var b = workspace.SlotAt(1).Bounds;
+        Drag(root, a.CX, a.CY, b.CX - a.CX, b.CY - a.CY);
+        var edited = m.LayoutSettings.Decks.Single();
+        Check("Deck: Ziehen tauscht Plätze ohne Audio-Routing zu ändern", edited.Slots[0] == null && edited.Slots[1]?.ChannelId == input && m.Settings.BusRoutes.Count == 2);
+        m.MoveChannel(true, 0, 1);
+        Check("Deck: Zuordnung überlebt Kanalumsortierung", m.Settings.Inputs[1].Id == input && m.LayoutSettings.Decks[0].Slots[1]?.ChannelId == input);
+        string path = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outFile))!, "selftest-deck-project.json");
+        try
+        {
+            ProjectStore.WriteFile(path, ProjectStore.ToDto(m, null));
+            var dto = ProjectStore.ReadFile(path); var (settings, bindings) = ProjectStore.FromDto(dto);
+            var copy = NewRoot(out var restored);
+            restored.LoadProject(settings, bindings, dto.BlockFrames, dto.Exclusive, ProjectStore.AppLinksFromDto(dto), dto.Layout);
+            Check("Projekt: Deck, IDs, Busse und Patch bleiben gespeichert", dto.Version == 3 && restored.LayoutSettings.Decks[0].Slots[1]?.ChannelId == input && restored.Settings.BusRoutes.SequenceEqual(m.Settings.BusRoutes));
+            Program.RenderRoot(copy, 1600, 900, 1, null);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+        m.RemoveChannel(true, 1);
+        Check("Kanal löschen entfernt Bus-Send und behält festen Deck-Platz", m.Settings.BusRoutes.All(r => r.Source.Id != input) && m.LayoutSettings.Decks[0].Slots[1]?.ChannelId == input);
+        m.RemoveBus(bus);
+        Check("Bus löschen entfernt dessen Routing", m.Settings.Buses.Count == 0 && m.Settings.BusRoutes.Count == 0);
+        CloseAll(root);
     }
 
     static void SpectrumTests()

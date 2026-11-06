@@ -138,7 +138,7 @@ internal sealed unsafe class MasterDeviceStream : StreamBase
 
     protected override void OpenDevice()
     {
-        _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: false, loopback: false, Run.EngineRate, Run.Chunk, Run.Config.UseExclusiveMode);
+        _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: false, loopback: false, Spec.SampleRate ?? Run.EngineRate, Spec.BufferFrames ?? Run.Chunk, Spec.Exclusive ?? Run.Config.UseExclusiveMode);
         Name = _ep.Name;
         if (_ep.SampleRate != Run.EngineRate)
             throw new AudioException(0, $"Master-Geraet '{_ep.Name}' laeuft nicht mit {Run.EngineRate} Hz (nur {_ep.SampleRate} Hz moeglich).");
@@ -368,7 +368,7 @@ internal sealed unsafe class CaptureStream : StreamBase
 
     protected override void OpenDevice()
     {
-        _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: true, Spec.Loopback, Run.EngineRate, Run.Chunk, Run.Config.UseExclusiveMode);
+        _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: true, Spec.Loopback, Spec.SampleRate ?? Run.EngineRate, Spec.BufferFrames ?? Run.Chunk, Spec.Exclusive ?? Run.Config.UseExclusiveMode);
         Name = _ep.Name;
         ValidateMaps(_ep);
 
@@ -475,7 +475,7 @@ internal sealed unsafe class RenderStream : StreamBase
 
     protected override void OpenDevice()
     {
-        _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: false, loopback: false, Run.EngineRate, Run.Chunk, Run.Config.UseExclusiveMode);
+        _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: false, loopback: false, Spec.SampleRate ?? Run.EngineRate, Spec.BufferFrames ?? Run.Chunk, Spec.Exclusive ?? Run.Config.UseExclusiveMode);
         Name = _ep.Name;
         ValidateMaps(_ep);
 

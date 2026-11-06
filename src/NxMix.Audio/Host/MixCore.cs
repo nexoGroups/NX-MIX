@@ -17,6 +17,7 @@ internal sealed class MixCore
     private readonly CaptureStream[] _captures;
     private readonly RenderStream[] _renders;
     private readonly AppLinkSlot[] _apps;
+    private readonly AsioStream[] _asios;
     private readonly bool[] _inputBound;
     private readonly float[] _gains;
 
@@ -30,8 +31,9 @@ internal sealed class MixCore
     public long Blocks;
     public long Frames;
 
-    public MixCore(IBlockProcessor processor, int rate, int chunk, CaptureStream[] captures, RenderStream[] renders, AppLinkSlot[]? apps = null)
+    public MixCore(IBlockProcessor processor, int rate, int chunk, CaptureStream[] captures, RenderStream[] renders, AppLinkSlot[]? apps = null, AsioStream[]? asios = null)
     {
+        _asios = asios ?? Array.Empty<AsioStream>();
         _apps = apps ?? Array.Empty<AppLinkSlot>();
         _processor = processor;
         _rate = rate;
@@ -47,6 +49,7 @@ internal sealed class MixCore
         _gainTarget = 1f;
         _gainStep = (float)(1.0 / (FadeInSeconds * rate));
         _hold = (int)(HoldSeconds * rate);
+        foreach (var asio in _asios) foreach (int ch in asio.BoundInputs) _inputBound[ch] = true;
 
         foreach (CaptureStream c in captures)
         {
@@ -65,6 +68,7 @@ internal sealed class MixCore
     /// <summary>Verdrahtet die Leser mit den Eingangspuffern (zero-copy). Nach dem Oeffnen aller Capture-Streams aufrufen.</summary>
     public void Prepare()
     {
+        foreach (var asio in _asios) asio.Bind(Inputs);
         foreach (CaptureStream c in _captures)
         {
             var dst = new float[c.Spec!.Slots][];
@@ -90,6 +94,7 @@ internal sealed class MixCore
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public void ProcessChunk(int n)
     {
+        foreach (var asio in _asios) asio.ReadInputs(n);
         CaptureStream[] captures = _captures;
         for (int i = 0; i < captures.Length; i++)
             captures[i].Reader!.Read(captures[i].Dst!, 0, n);
@@ -150,6 +155,7 @@ internal sealed class MixCore
 
     private void DistributeToRings(int n)
     {
+        foreach (var asio in _asios) asio.WriteOutputs(Outputs, n);
         RenderStream[] renders = _renders;
         for (int r = 0; r < renders.Length; r++)
         {
@@ -173,3 +179,4 @@ internal sealed class MixCore
         }
     }
 }
+

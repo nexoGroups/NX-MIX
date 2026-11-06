@@ -35,6 +35,7 @@ internal sealed class HostRun
     public StreamBase Master = null!;
     public CaptureStream[] Captures = Array.Empty<CaptureStream>();
     public RenderStream[] Renders = Array.Empty<RenderStream>();
+    public AsioStream[] Asios = Array.Empty<AsioStream>();
 
     /// <summary>App-Links (Prozess-Loopback + Pro-App-Umleitung); null, wenn keine AppBindings konfiguriert sind.</summary>
     public AppLinkEngine? Apps;
@@ -69,16 +70,26 @@ internal sealed class HostRun
                     $"Bindung auf '{b.DeviceId}': Engine-{(capture ? "Eingang" : "Ausgang")} {b.EngineFirstChannel}..{b.EngineFirstChannel + b.Count - 1} " +
                     $"existiert nicht (Prozessor hat {engineChannels}).");
 
-            var probe = new StreamSpec(b.DeviceId ?? "", capture, b.Loopback);
+            if (AsioCatalog.IsAsio(b.DeviceId))
+            {
+                if (b.Loopback) throw new ArgumentException("ASIO verwendet direkte Eingänge, keinen Windows-Loopback.");
+                continue;
+            }
+            var probe = new StreamSpec(b.DeviceId ?? "", capture, b.Loopback)
+            { SampleRate = b.SampleRate, BufferFrames = b.BufferFrames, Exclusive = b.Exclusive };
             if (!byKey.TryGetValue(probe.Key, out StreamSpec? spec))
             {
                 spec = probe;
                 byKey[probe.Key] = spec;
                 _specs.Add(spec);
             }
+            if (spec.SampleRate != b.SampleRate || spec.BufferFrames != b.BufferFrames || spec.Exclusive != b.Exclusive)
+                throw new ArgumentException("Alle Zuordnungen eines Geräts müssen dieselben Geräteeinstellungen verwenden.");
             spec.Add(b.DeviceFirstChannel, b.EngineFirstChannel, b.Count);
         }
-        _masterSpec = _specs.FirstOrDefault(s => !s.IsCapture);
+        _masterSpec = _specs.FirstOrDefault(s => !s.IsCapture && (s.SampleRate == null || s.SampleRate == EngineRate));
+        Asios = config.Bindings.Where(b => AsioCatalog.IsAsio(b.DeviceId)).GroupBy(b => AsioCatalog.DriverName(b.DeviceId))
+            .Select(g => new AsioStream(this, g.Key, g.ToArray())).ToArray();
 
         if (config.AppBindings is { Count: > 0 })
         {
@@ -122,8 +133,8 @@ internal sealed class HostRun
         }
         Captures = captures.ToArray();
         Renders = renders.ToArray();
-        _all = new StreamBase[] { Master }.Concat(Captures).Concat(Renders).ToArray();
-        Core = new MixCore(Processor, EngineRate, Chunk, Captures, Renders, Apps?.Slots);
+        _all = new StreamBase[] { Master }.Concat(Captures).Concat(Renders).Concat(Asios).ToArray();
+        Core = new MixCore(Processor, EngineRate, Chunk, Captures, Renders, Apps?.Slots, Asios);
 
         // Master zuerst: seine Periode bestimmt die Sollfuellstaende der uebrigen Geraete.
         Master.StartThread();
@@ -134,6 +145,7 @@ internal sealed class HostRun
             if (!ReferenceEquals(s, Master)) WaitOpened(s);
 
         Core.Prepare();
+        if (_masterSpec == null && Asios.Length > 0) OutputLatencyMs = Asios.Max(a => a.OutputLatencyMs);
         Go.Set();
         Apps?.StartThread();
     }
@@ -196,6 +208,7 @@ internal sealed class HostRun
             devices.Add(rs.GetStat());
             if (rs.Reader is { } r) { underruns += r.Underruns; overruns += r.Overruns; }
         }
+        foreach (var asio in Asios) { devices.Add(asio.GetStat()); underruns += asio.Underruns; overruns += asio.Overruns; }
 
         return new HostStats(state, lastError, Chunk, Volatile.Read(ref CpuLoad), underruns, overruns,
             Volatile.Read(ref OutputLatencyMs), devices);

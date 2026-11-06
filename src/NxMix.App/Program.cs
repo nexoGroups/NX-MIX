@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using NxMix.App.Model;
 using NxMix.App.Native;
@@ -145,6 +145,7 @@ internal static class Program
         {
             model.InitOptions(dto.BlockFrames, dto.Exclusive);
             model.InitAppLinks(ProjectStore.AppLinksFromDto(dto)); // fehlendes Feld in alten Dateien = keine Links
+            model.InitLayout(dto.Layout);
         }
         var win = new MainWindow(model, dto?.Window, o.ExitAfterMs, UiPrefs.Load(), new VelopackUpdateBackend());
         return win.Run();
@@ -258,6 +259,24 @@ internal static class Program
             case "sheet-in": Sheet(root, true, 6); break;                   // Spotify (Stereo-Link)
             case "eq-out": ChannelSheet.Show(root, root.Model, false, 2, eq: true); break;
             case "eq-in": ChannelSheet.Show(root, root.Model, true, 6, eq: true); break;
+            case "device-add": DeviceAddSheet.Show(root, root.Model); break;
+            case "deck": case "deck-edit": case "bus":
+                {
+                    var m = root.Model;
+                    Guid bus = m.AddBus(2);
+                    m.UpdateBus(bus, b => b with { Name = "Musik", GainDb = -6 });
+                    m.AddBusRoute(new BusRoute(new RoutePort(RouteKind.Input, m.Settings.Inputs[0].Id), new RoutePort(RouteKind.Bus, bus)));
+                    m.AddBusRoute(new BusRoute(new RoutePort(RouteKind.Bus, bus), new RoutePort(RouteKind.Output, m.Settings.Outputs[0].Id)));
+                    m.SaveDeck(new MixerDeck { Name = "Mein Mixer", Columns = 8, Rows = 1, Slots = new FaderSlot?[]
+                    {
+                        new(RouteKind.Input, m.Settings.Inputs[0].Id), new(RouteKind.Input, m.Settings.Inputs[1].Id), null,
+                        new(RouteKind.Input, m.Settings.Inputs[6].Id), new(RouteKind.Bus, bus), null,
+                        new(RouteKind.Output, m.Settings.Outputs[0].Id), new(RouteKind.Output, m.Settings.Outputs[1].Id),
+                    } });
+                    if (what == "deck-edit") root.Pages[0].Children.OfType<DeckWorkspace>().Single().BeginEditing();
+                    if (what == "bus") BusSheet.Show(root, m, bus);
+                    break;
+                }
             case "sheet-scroll":
                 {
                     var s = Sheet(root, false, 5);

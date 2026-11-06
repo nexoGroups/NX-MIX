@@ -10,6 +10,7 @@ namespace NxMix.App.Model;
 
 internal sealed class ChannelDto
 {
+    public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
     public double? GainDb { get; set; } = 0;
     public bool Mute { get; set; }
@@ -25,6 +26,9 @@ internal sealed class ChannelDto
 
 internal sealed class BindingDto
 {
+    public int? SampleRate { get; set; }
+    public int? BufferFrames { get; set; }
+    public bool? Exclusive { get; set; }
     public string DeviceId { get; set; } = "";
     public string? DeviceName { get; set; }
     public DeviceFlow Flow { get; set; }
@@ -52,6 +56,9 @@ internal sealed class WindowDto
 
 internal sealed class ProjectDto
 {
+    public List<MixBus> Buses { get; set; } = new();
+    public List<BusRoute> BusRoutes { get; set; } = new();
+    public MixerLayout? Layout { get; set; }
     public int Version { get; set; } = 1;
     public int SampleRate { get; set; } = AppModel.DefaultSampleRate;
     public int BlockFrames { get; set; } = AppModel.DefaultBlockFrames;
@@ -91,6 +98,7 @@ internal static class ProjectStore
 
     static ChannelDto ToDto(ChannelDsp c) => new()
     {
+        Id = c.Id,
         Name = c.Name, GainDb = Fin(c.GainDb), Mute = c.Mute, Solo = c.Solo, InvertPhase = c.InvertPhase,
         DelayMs = c.DelayMs, CeilingDbfs = c.CeilingDbfs, MaxGainDb = c.MaxGainDb, Filters = c.Filters.ToList(),
         Correction = c.Correction,
@@ -98,6 +106,7 @@ internal static class ProjectStore
 
     static ChannelDsp FromDto(ChannelDto d) => new()
     {
+        Id = d.Id,
         Name = d.Name ?? "",
         GainDb = d.GainDb ?? double.NegativeInfinity,
         Mute = d.Mute, Solo = d.Solo, InvertPhase = d.InvertPhase,
@@ -111,7 +120,8 @@ internal static class ProjectStore
         var s = m.Settings;
         return new ProjectDto
         {
-            Version = s.Outputs.Any(c => c.Correction != null) ? 2 : 1,
+            Version = s.Buses.Count > 0 || m.LayoutSettings.Decks.Count > 0 || m.Bindings.Any(b => b.SampleRate != null || b.BufferFrames != null || b.Exclusive != null || AsioCatalog.IsAsio(b.DeviceId)) ? 3 : s.Outputs.Any(c => c.Correction != null) ? 2 : 1,
+            Buses = s.Buses.ToList(), BusRoutes = s.BusRoutes.ToList(), Layout = m.LayoutSettings,
             SampleRate = s.SampleRate,
             BlockFrames = m.BlockFrames,
             Exclusive = m.Exclusive,
@@ -123,6 +133,7 @@ internal static class ProjectStore
             {
                 DeviceId = b.DeviceId, DeviceName = m.FindDevice(b.DeviceId)?.Name, Flow = b.Flow, DeviceFirstChannel = b.DeviceFirstChannel,
                 EngineFirstChannel = b.EngineFirstChannel, Count = b.Count, Loopback = b.Loopback,
+                SampleRate = b.SampleRate, BufferFrames = b.BufferFrames, Exclusive = b.Exclusive,
             }).ToList(),
             AppLinks = m.AppLinks.Select(l => new AppLinkDto { ExeName = l.ExeName, Channel = l.FirstChannel, Count = l.Count, DisplayName = l.DisplayName }).ToList(),
             AppLinksEnabled = m.AppLinksEnabled,
@@ -155,9 +166,12 @@ internal static class ProjectStore
         {
             SampleRate = d.SampleRate > 0 ? d.SampleRate : AppModel.DefaultSampleRate,
             Inputs = ins, Outputs = outs, MatrixDb = matrix, MasterGainDb = d.MasterGainDb,
+            Buses = d.Buses, BusRoutes = d.BusRoutes,
         };
         var bindings = d.Bindings.Select(b => new DeviceBinding(b.DeviceId ?? "", b.Flow, Math.Max(0, b.DeviceFirstChannel),
-            Math.Max(0, b.EngineFirstChannel), Math.Max(1, b.Count), b.Loopback)).ToList();
+            Math.Max(0, b.EngineFirstChannel), Math.Max(1, b.Count), b.Loopback)
+            { SampleRate = b.SampleRate, BufferFrames = b.BufferFrames, Exclusive = b.Exclusive }).ToList();
+        if (settings.Buses.Count > 0 || settings.BusRoutes.Count > 0) BusRouting.Compile(settings);
         return (settings, bindings);
     }
 
@@ -174,7 +188,7 @@ internal static class ProjectStore
     public static ProjectDto ReadFile(string path)
     {
         var dto = JsonSerializer.Deserialize<ProjectDto>(File.ReadAllText(path), s_json) ?? throw new InvalidDataException("Leere Datei");
-        if (dto.Version > 2) throw new InvalidDataException("Die Datei stammt von einer neueren NX-MIX-Version.");
+        if (dto.Version > 3) throw new InvalidDataException("Die Datei stammt von einer neueren NX-MIX-Version.");
         return dto;
     }
 

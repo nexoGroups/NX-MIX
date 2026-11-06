@@ -30,6 +30,7 @@ internal sealed class PopupMenu : Overlay
     RectF _box;
     int _hover = -1;
     float _t;
+    float _scroll, _contentH;
     static float ItemH => Theme.MenuItemH;
     const float SepH = 9f, Pad = 5f;
     float HeaderH => Theme.Touch ? 30 : 24;
@@ -57,7 +58,10 @@ internal sealed class PopupMenu : Overlay
             if (it.Shortcut != null) tw += Renderer.MeasureWidth(it.Shortcut, Theme.Callout) + 28;
             w = Math.Max(w, tw);
         }
-        float h = Pad * 2 + _items.Sum(H);
+        _contentH = Pad * 2 + _items.Sum(H);
+        w = Math.Min(w, Math.Max(80, Bounds.W - 16));
+        float h = Math.Min(_contentH, Math.Max(50, Bounds.H - 16));
+        _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _contentH - h));
         float x = _anchor.X, y = _anchor.Bottom + 6;
         if (x + w > Bounds.W - 8) x = Bounds.W - 8 - w;
         if (x < 8) x = 8;
@@ -67,7 +71,7 @@ internal sealed class PopupMenu : Overlay
 
     RectF ItemRect(int idx)
     {
-        float y = _box.Y + Pad;
+        float y = _box.Y + Pad - _scroll;
         for (int i = 0; i < idx; i++) y += H(_items[i]);
         return new RectF(_box.X + Pad, y, _box.W - Pad * 2, H(_items[idx]));
     }
@@ -94,6 +98,13 @@ internal sealed class PopupMenu : Overlay
     public override void OnMouseDown(in MouseEvent e)
     {
         if (!_box.Contains(e.X, e.Y)) Close();
+    }
+
+    public override bool OnMouseWheel(in MouseEvent e)
+    {
+        _scroll = Math.Clamp(_scroll - e.Wheel * ItemH * 3, 0, Math.Max(0, _contentH - _box.H));
+        _hover = IndexAt(e.X, e.Y);
+        Invalidate(); return true;
     }
 
     public override void OnMouseUp(in MouseEvent e)
@@ -130,7 +141,15 @@ internal sealed class PopupMenu : Overlay
         for (int n = 0; n < _items.Count; n++)
         {
             i = ((i < 0 ? (d > 0 ? -1 : 0) : i) + d + _items.Count) % _items.Count;
-            if (!_items[i].IsSeparator && !_items[i].IsHeader && _items[i].Enabled) { _hover = i; break; }
+            if (!_items[i].IsSeparator && !_items[i].IsHeader && _items[i].Enabled)
+            {
+                _hover = i;
+                var r = ItemRect(i);
+                if (r.Y < _box.Y + Pad) _scroll -= _box.Y + Pad - r.Y;
+                else if (r.Bottom > _box.Bottom - Pad) _scroll += r.Bottom - _box.Bottom + Pad;
+                _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _contentH - _box.H));
+                break;
+            }
         }
         Invalidate();
     }
@@ -150,6 +169,7 @@ internal sealed class PopupMenu : Overlay
         g.FillRound(box, Theme.RadiusCard, Theme.Elevated);
         g.StrokeRound(box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         bool icons = HasIcons;
+        g.PushClip(box.Deflate(Pad));
         for (int i = 0; i < _items.Count; i++)
         {
             var it = _items[i];
@@ -172,6 +192,13 @@ internal sealed class PopupMenu : Overlay
             }
             g.Text(it.Text, new RectF(tx, r.Y, r.Right - tx - 10, r.H), Theme.Body, col);
             if (it.Shortcut != null) g.Text(it.Shortcut, new RectF(r.X, r.Y, r.W - 10, r.H), Theme.Callout, hot ? Theme.OnAccent.With(0.8f) : Theme.TextTertiary, HAlign.Right);
+        }
+        g.PopClip();
+        if (_contentH > box.H)
+        {
+            float track = box.H - 2 * Pad;
+            float thumb = Math.Max(20, track * box.H / _contentH);
+            g.FillRound(new RectF(box.Right - 5, box.Y + Pad + (track - thumb) * _scroll / (_contentH - box.H), 3, thumb), 1, Theme.TextTertiary);
         }
     }
 }

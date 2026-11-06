@@ -174,6 +174,7 @@ public sealed class MixerEngine : IMixerEngine
 
         c.Cross = new float[_nOut * _nIn];
         var m = s.MatrixDb;
+        var bus = s.Buses.Count > 0 || s.BusRoutes.Count > 0 ? BusRouting.Compile(s) : null;
         for (int o = 0; o < _nOut; o++)
         {
             for (int i = 0; i < _nIn; i++)
@@ -181,7 +182,7 @@ public sealed class MixerEngine : IMixerEngine
                 double db = double.NegativeInfinity;
                 if (m != null && i < m.Length && m[i] != null && o < m[i].Length) db = m[i][o];
                 double lin = Dsp.DbToLin(Math.Min(db, MaxMatrixDb));    // NaN und -inf -> 0
-                double v = inGain[i] * master * lin;
+                double v = inGain[i] * master * (lin + (bus?[i, o] ?? 0));
                 if (Math.Abs(v) < 1e-9) v = 0;
                 c.Cross[o * _nIn + i] = (float)v;
             }

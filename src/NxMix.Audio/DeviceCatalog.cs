@@ -39,6 +39,7 @@ public sealed class DeviceCatalog : IDeviceCatalog
         {
             WasapiEndpoint.ReleaseCom(enumerator);
         }
+        try { result.AddRange(AsioCatalog.List()); } catch { }
         return result;
     }
 

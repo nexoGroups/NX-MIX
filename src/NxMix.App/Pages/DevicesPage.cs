@@ -9,6 +9,7 @@ namespace NxMix.App.Pages;
 internal sealed class DeviceListView : Widget
 {
     readonly AppModel _m;
+    public AudioBackend Backend { get; set; } = AudioBackend.Windows;
     readonly VScroll _sc = new();
     readonly IconButton _refresh = new(Icon.Refresh, "Geräteliste neu einlesen") { IconSize = 17 };
     public readonly Segmented Filter = new("Alle", "Eingabe", "Ausgabe");
@@ -27,7 +28,7 @@ internal sealed class DeviceListView : Widget
     public override bool AcceptsMouse => true;
 
     List<AudioDeviceInfo> Filtered() =>
-        _m.Devices.Where(d => Filter.Selected == 0 || (Filter.Selected == 1 ? d.Flow == DeviceFlow.Capture : d.Flow == DeviceFlow.Render)).ToList();
+        _m.Devices.Where(d => d.Backend == Backend && (Filter.Selected == 0 || (Filter.Selected == 1 ? d.Flow == DeviceFlow.Capture : d.Flow == DeviceFlow.Render))).ToList();
 
     public override void Layout()
     {
@@ -44,7 +45,7 @@ internal sealed class DeviceListView : Widget
     {
         var list = new List<(int, RectF, string)>();
         float x = row.Right - 10, h = Theme.ControlHSmall;
-        if (d.Flow == DeviceFlow.Render)
+        if (d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows)
         {
             float w = Renderer.MeasureWidth("Loopback", Theme.CalloutMedium) + 24;
             x -= w; list.Add((1, new RectF(x, row.CY - h / 2, w, h), "Loopback")); x -= 6;
@@ -96,11 +97,15 @@ internal sealed class DeviceListView : Widget
 
     void Assign(AudioDeviceInfo d, bool loopback)
     {
+        if (d.Channels <= 0) { Root?.Notify.Flash(d.UnavailableReason ?? "Der Treiber konnte nicht geöffnet werden.", true); return; }
         var flow = d.Flow == DeviceFlow.Render && !loopback ? DeviceFlow.Render : DeviceFlow.Capture;
-        int count = Math.Clamp(Math.Min(d.Channels, 2), 1, 64);
-        int devStart = _m.Bindings.Where(b => b.DeviceId == d.Id && b.Flow == flow && b.Loopback == loopback)
-            .Select(b => b.DeviceFirstChannel + b.Count).DefaultIfEmpty(0).Max();
-        if (devStart + count > Math.Max(1, d.Channels)) devStart = 0;
+        if (_m.Bindings.Any(b => b.DeviceId == d.Id && b.Flow == flow && b.Loopback == loopback))
+        {
+            if (Root is { } r) DeviceSettingsSheet.Show(r, _m, d.Id);
+            return;
+        }
+        int count = Math.Clamp(d.Channels, 1, 64);
+        int devStart = 0;
         var refusal = _m.AddBinding(new DeviceBinding(d.Id, flow, devStart, _m.NextFreeEngineChannel(flow), count, loopback));
         if (refusal != null) Root?.Notify.Flash(refusal, true);
         else Root?.Notify.Flash($"Zuordnung angelegt: {d.Name}");
@@ -534,7 +539,7 @@ internal sealed class BindingTableView : Widget
 internal sealed class DevicesPage : Page
 {
     readonly AppModel _m;
-    readonly DeviceListView _list;
+    readonly DeviceOverview _list;
     readonly BindingTableView _table;
     public readonly Button StartButton = new("Audio starten", ButtonStyle.Filled, Icon.Play) { Font = new TextStyle(14f, Vortice.DirectWrite.FontWeight.SemiBold) };
     readonly Dropdown _rate = new() { Tooltip = "Samplerate der Engine (nur im Stillstand änderbar)" };
@@ -549,7 +554,7 @@ internal sealed class DevicesPage : Page
     public DevicesPage(AppModel m)
     {
         _m = m;
-        _list = Add(new DeviceListView(m));
+        _list = Add(new DeviceOverview(m));
         _table = Add(new BindingTableView(m));
         Add(StartButton); Add(_rate); Add(_block); Add(_excl);
         StartButton.Clicked += OnStartClicked;

@@ -4,13 +4,25 @@ namespace NxMix.Audio;
 
 public enum DeviceFlow { Render, Capture }
 
-public sealed record AudioDeviceInfo(string Id, string Name, DeviceFlow Flow, int Channels, int SampleRate, bool IsDefault);
+public enum AudioBackend { Windows, Asio }
+public sealed record AudioDeviceInfo(string Id, string Name, DeviceFlow Flow, int Channels, int SampleRate, bool IsDefault)
+{
+    public AudioBackend Backend { get; init; }
+    public IReadOnlyList<int> SupportedRates { get; init; } = Array.Empty<int>();
+    public IReadOnlyList<int> SupportedBuffers { get; init; } = Array.Empty<int>();
+    public string? UnavailableReason { get; init; }
+}
 
 /// <summary>Eine Anbindung eines Geraets an Engine-Kanaele.
 /// Capture: Geraetekanaele [DeviceFirstChannel, +Count) -> Engine-Eingang [EngineFirstChannel, +Count).
 /// Render: Engine-Ausgang [EngineFirstChannel, +Count) -> Geraetekanaele [DeviceFirstChannel, +Count).
 /// Loopback=true: nimmt das auf, was ein RENDER-Geraet abspielt (nur lesend, aendert nichts am Geraet).</summary>
-public sealed record DeviceBinding(string DeviceId, DeviceFlow Flow, int DeviceFirstChannel, int EngineFirstChannel, int Count, bool Loopback = false);
+public sealed record DeviceBinding(string DeviceId, DeviceFlow Flow, int DeviceFirstChannel, int EngineFirstChannel, int Count, bool Loopback = false)
+{
+    public int? SampleRate { get; init; }
+    public int? BufferFrames { get; init; }
+    public bool? Exclusive { get; init; }
+}
 
 public sealed record AudioHostConfig(
     int SampleRate,

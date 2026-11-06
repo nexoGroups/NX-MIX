@@ -25,6 +25,7 @@
     <!-- Schrift Inter (SIL Open Font License 1.1), wird zur Laufzeit aus dem Ordner Fonts geladen -->
     <None Include="Fonts\Inter-*.ttf;Fonts\Inter-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- Lizenz und Fremdkomponenten liegen auch im Programmordner -->
+    <None Update="Licenses\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\LICENSE.txt;..\..\THIRD-PARTY.md" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

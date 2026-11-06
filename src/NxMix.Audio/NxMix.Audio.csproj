@@ -6,4 +6,7 @@
   <ItemGroup>
     <ProjectReference Include="..\NxMix.Engine\NxMix.Engine.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio.Asio" Version="3.3.0" />
+  </ItemGroup>
 </Project>

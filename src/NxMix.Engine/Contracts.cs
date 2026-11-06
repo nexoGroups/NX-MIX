@@ -31,6 +31,7 @@ public sealed record OutputCorrection(string SourceName, IReadOnlyList<FilterSpe
 /// <summary>DSP eines einzelnen Kanals (Eingang oder Ausgang).</summary>
 public sealed record ChannelDsp
 {
+    public Guid Id { get; init; } = Guid.NewGuid();
     public string Name { get; init; } = "";
     public double GainDb { get; init; } = 0;
     public bool Mute { get; init; }
@@ -48,6 +49,8 @@ public sealed record ChannelDsp
 /// <summary>Kompletter, unveraenderlicher Zustand. Die UI baut einen neuen Snapshot und uebergibt ihn per SetSettings.</summary>
 public sealed record MixerSettings
 {
+    public IReadOnlyList<MixBus> Buses { get; init; } = Array.Empty<MixBus>();
+    public IReadOnlyList<BusRoute> BusRoutes { get; init; } = Array.Empty<BusRoute>();
     public int SampleRate { get; init; } = 96000;
     public IReadOnlyList<ChannelDsp> Inputs { get; init; } = Array.Empty<ChannelDsp>();
     public IReadOnlyList<ChannelDsp> Outputs { get; init; } = Array.Empty<ChannelDsp>();

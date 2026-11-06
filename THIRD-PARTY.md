@@ -9,4 +9,6 @@ Die Projektlizenz von NX-MIX ([LICENSE.txt](LICENSE.txt)) gilt ausschließlich f
 | Vortice.Mathematics | 2.1.0 | MIT; [amerkoleci/Vortice.Mathematics](https://github.com/amerkoleci/Vortice.Mathematics) |
 | SharpGen.Runtime, SharpGen.Runtime.COM | 2.4.2-beta | MIT; [SharpGenTools/SharpGenTools](https://github.com/SharpGenTools/SharpGenTools) |
 | Velopack (Installer und Updates) | 1.2.161 | MIT; [velopack/velopack](https://github.com/velopack/velopack) |
+| NAudio.Asio, NAudio.Core | 3.3.0 | MIT; [naudio/NAudio](https://github.com/naudio/NAudio). Native ASIO-Treiberanbindung. |
+| System.Numerics.Tensors | 9.0.0 | MIT; [dotnet/runtime](https://github.com/dotnet/runtime). Abhängigkeit von NAudio.Core. |
 | Schrift Inter | 4.1 | SIL Open Font License 1.1; [rsms/inter](https://github.com/rsms/inter). Der Lizenztext liegt neben den Schriftdateien als `Fonts/Inter-LICENSE.txt`. |

@@ -18,6 +18,9 @@ internal sealed class StreamSpec
     public string DeviceId { get; }
     public bool IsCapture { get; }
     public bool Loopback { get; }
+    public int? SampleRate { get; init; }
+    public int? BufferFrames { get; init; }
+    public bool? Exclusive { get; init; }
 
     /// <summary>Summe aller Kanaele = Breite eines Ringpuffer-Frames.</summary>
     public int Slots { get; private set; }

@@ -451,7 +451,7 @@ internal sealed class UiRoot : Widget
             Confirm("Projekt importieren?", $"Das aktuelle Projekt wird durch „{Path.GetFileName(path)}“ ersetzt ({Fmt.Inputs(s.Inputs.Count)}, {Fmt.Outputs(s.Outputs.Count)}). Gain-Sperren der Datei werden übernommen – bitte danach prüfen.",
                 "Importieren", () =>
                 {
-                    Model.LoadProject(s, b, dto.BlockFrames, dto.Exclusive, ProjectStore.AppLinksFromDto(dto));
+                    Model.LoadProject(s, b, dto.BlockFrames, dto.Exclusive, ProjectStore.AppLinksFromDto(dto), dto.Layout);
                     Notify.Flash("Projekt importiert: " + Path.GetFileName(path));
                 });
         }

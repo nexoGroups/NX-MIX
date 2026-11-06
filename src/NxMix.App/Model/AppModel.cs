@@ -199,6 +199,7 @@ internal sealed partial class AppModel
         var outs = Settings.Outputs.ToList();
         var target = input ? ins : outs;
         if (idx < 0 || idx >= target.Count) return;
+        var removedId = target[idx].Id;
         target.RemoveAt(idx);
         var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToList();
         if (input) m.RemoveAt(idx);
@@ -215,7 +216,8 @@ internal sealed partial class AppModel
             if (end - first <= 0) continue;
             nb.Add(b with { EngineFirstChannel = first, Count = end - first });
         }
-        ApplyStructural(Settings with { Inputs = ins, Outputs = outs, MatrixDb = m.ToArray() }, nb);
+        ApplyStructural(Settings with { Inputs = ins, Outputs = outs, MatrixDb = m.ToArray(),
+            BusRoutes = Settings.BusRoutes.Where(r => r.Source.Id != removedId && r.Target.Id != removedId).ToArray() }, nb);
     }
 
     public void MoveChannel(bool input, int idx, int dir)
@@ -269,6 +271,7 @@ internal sealed partial class AppModel
     // ---- Projekt -----------------------------------------------------------------------------
     public void NewProject()
     {
+        InitLayout(null);
         if (HostRunning) StopHostNow();
         BlockFrames = DefaultBlockFrames;
         Exclusive = false;
@@ -278,8 +281,9 @@ internal sealed partial class AppModel
         HostError = null;
     }
 
-    public void LoadProject(MixerSettings settings, IReadOnlyList<DeviceBinding> bindings, int blockFrames, bool exclusive, AppLinkSetup? appLinks = null)
+    public void LoadProject(MixerSettings settings, IReadOnlyList<DeviceBinding> bindings, int blockFrames, bool exclusive, AppLinkSetup? appLinks = null, MixerLayout? layout = null)
     {
+        InitLayout(layout);
         if (HostRunning) StopHostNow();
         BlockFrames = blockFrames > 0 ? blockFrames : DefaultBlockFrames;
         Exclusive = exclusive;
@@ -318,6 +322,9 @@ internal sealed partial class AppModel
     public string? AddBinding(DeviceBinding b)
     {
         if (HostRunning) return "Zum Ändern zuerst Audio stoppen.";
+        var existing = Bindings.FirstOrDefault(other => other.DeviceId == b.DeviceId ||
+            (AsioCatalog.IsAsio(other.DeviceId) && AsioCatalog.IsAsio(b.DeviceId) && AsioCatalog.DriverName(other.DeviceId) == AsioCatalog.DriverName(b.DeviceId)));
+        if (existing != null) b = b with { SampleRate = existing.SampleRate, BufferFrames = existing.BufferFrames, Exclusive = existing.Exclusive };
         var refusal = BindingLinkConflict(b);
         if (refusal != null) return refusal;
         bool input = b.Flow == DeviceFlow.Capture;

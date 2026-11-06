@@ -219,6 +219,7 @@ internal sealed class MixerPage : Page
     readonly GroupPanel _in, _out;
     readonly MasterPanel _masterPanel = new();
     readonly ChannelStrip _master;
+    readonly DeckWorkspace _decks;
     float[] _inPeaks = Array.Empty<float>();
     float[] _outPeaks = Array.Empty<float>();
 
@@ -247,6 +248,7 @@ internal sealed class MixerPage : Page
         _out = Add(new GroupPanel(m, false));
         Add(_masterPanel);
         _master = _masterPanel.Add(new ChannelStrip(m, false, 0, master: true));
+        _decks = Add(new DeckWorkspace(m));
         m.StructureChanged += Rebuild;
         m.ValuesChanged += SyncAll;
         m.HostChanged += SyncAll;
@@ -288,6 +290,10 @@ internal sealed class MixerPage : Page
     void LayoutPanels()
     {
         var area = new RectF(Bounds.X + Theme.Pad, Bounds.Y + 2, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - Theme.Pad - 2));
+        _decks.Bounds = area;
+        _decks.Layout();
+        _in.Visible = _out.Visible = _masterPanel.Visible = !_decks.Custom;
+        area = new RectF(area.X, area.Y + DeckWorkspace.HeaderHeight, area.W, Math.Max(0, area.H - DeckWorkspace.HeaderHeight));
         float gap = Theme.Gap;
         int ni = _m.InputCount, no = _m.OutputCount;
         float inner = GroupPanel.Inner, sg = Theme.StripGap;
@@ -306,8 +312,7 @@ internal sealed class MixerPage : Page
             float fixedW = (ni == 0 ? emptyW : 0) + (no == 0 ? emptyW : 0);
             float overhead = (ni > 0 ? 2 * inner + (ni - 1) * sg : 0) + (no > 0 ? 2 * inner + (no - 1) * sg : 0);
             int count = ni + no;
-            s = (free - fixedW - overhead) / count;
-            s = Math.Clamp(s, Theme.StripMinW, Theme.StripMaxW);
+            s = Theme.Touch ? 104 : 92;
             const float minPanel = 260f;
             win = ni > 0 ? Math.Max(minPanel, 2 * inner + ni * s + (ni - 1) * sg) : emptyW;
             wout = no > 0 ? Math.Max(minPanel, 2 * inner + no * s + (no - 1) * sg) : emptyW;
@@ -327,7 +332,7 @@ internal sealed class MixerPage : Page
         _in.SetStripWidth(s);
         _out.SetStripWidth(s);
         float used = win + wout + masterW + 2 * gap;
-        float startX = area.X + Math.Max(0, (area.W - used) / 2);
+        float startX = area.X;
         _in.Bounds = new RectF(startX, area.Y, Math.Max(0, win), area.H);
         _out.Bounds = new RectF(_in.Bounds.Right + gap, area.Y, Math.Max(0, wout), area.H);
         _masterPanel.Bounds = new RectF(_out.Bounds.Right + gap, area.Y, masterW, area.H);
@@ -356,6 +361,7 @@ internal sealed class MixerPage : Page
             }
         }
         changed |= _master.FeedMeter(max, dt);
+        _decks.FeedMeters(_inPeaks, _outPeaks, dt);
         if (changed) Invalidate();
     }
 }
