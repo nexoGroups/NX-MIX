@@ -98,20 +98,27 @@ jobs:
       - name: Velopack CLI installieren
         run: dotnet tool install -g vpk --version $env:VPK_VERSION
 
-      # LÃ¤dt die letzte Version desselben Kanals herunter, damit Velopack kleine Delta-Pakete erzeugen kann
-      - name: Vorheriges Kanal-Release fÃ¼r Delta-Pakete laden
+      # Lädt die letzte Version desselben Kanals herunter, damit Velopack kleine Delta-Pakete erzeugen kann
+      - name: Vorheriges Kanal-Release für Delta-Pakete laden
         continue-on-error: true
         shell: pwsh
         run: |
-          $preArg = if ($env:IS_PRERELEASE -eq 'true') { @('--pre') } else { @() }
-          vpk --skip-updates download github `
-            --repoUrl "https://github.com/${{ github.repository }}" `
-            --token "${{ secrets.GITHUB_TOKEN }}" `
-            --channel $env:VPK_CHANNEL `
-            --outputDir Releases `
-            @preArg
+          if ($env:IS_PRERELEASE -eq 'true') {
+            vpk --skip-updates download github `
+              --repoUrl "https://github.com/${{ github.repository }}" `
+              --token "${{ secrets.GITHUB_TOKEN }}" `
+              --channel $env:VPK_CHANNEL `
+              --outputDir Releases `
+              --pre
+          } else {
+            vpk --skip-updates download github `
+              --repoUrl "https://github.com/${{ github.repository }}" `
+              --token "${{ secrets.GITHUB_TOKEN }}" `
+              --channel $env:VPK_CHANNEL `
+              --outputDir Releases
+          }
 
-      - name: Kanalgerechtes Velopack-Paket schnÃ¼ren
+      - name: Kanalgerechtes Velopack-Paket schnüren
         shell: pwsh
         run: ./tools/pack.ps1 -Version $env:VERSION -Channel $env:CHANNEL -OutputDir Releases
 
@@ -147,20 +154,31 @@ jobs:
             Releases/releases.${{ env.VPK_CHANNEL }}.json
             Releases/assets.${{ env.VPK_CHANNEL }}.json
 
-      - name: GitHub Release / Prerelease verÃ¶ffentlichen (nur bei echtem Git-Tag)
+      - name: GitHub Release / Prerelease veröffentlichen (nur bei echtem Git-Tag)
         if: env.DRY_RUN == 'false'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $preArg = if ($env:IS_PRERELEASE -eq 'true') { @('--pre') } else { @() }
-          vpk --skip-updates upload github `
-            --repoUrl "https://github.com/${{ github.repository }}" `
-            --token "${{ secrets.GITHUB_TOKEN }}" `
-            --channel $env:VPK_CHANNEL `
-            --outputDir Releases `
-            --tag "v$($env:VERSION)" `
-            --targetCommitish "${{ github.sha }}" `
-            --releaseName "$($env:RELEASE_TITLE)" `
-            --publish `
-            @preArg
+          if ($env:IS_PRERELEASE -eq 'true') {
+            vpk --skip-updates upload github `
+              --repoUrl "https://github.com/${{ github.repository }}" `
+              --token "${{ secrets.GITHUB_TOKEN }}" `
+              --channel $env:VPK_CHANNEL `
+              --outputDir Releases `
+              --tag "v$($env:VERSION)" `
+              --targetCommitish "${{ github.sha }}" `
+              --releaseName "$($env:RELEASE_TITLE)" `
+              --publish `
+              --pre
+          } else {
+            vpk --skip-updates upload github `
+              --repoUrl "https://github.com/${{ github.repository }}" `
+              --token "${{ secrets.GITHUB_TOKEN }}" `
+              --channel $env:VPK_CHANNEL `
+              --outputDir Releases `
+              --tag "v$($env:VERSION)" `
+              --targetCommitish "${{ github.sha }}" `
+              --releaseName "$($env:RELEASE_TITLE)" `
+              --publish
+          }
           if ($LASTEXITCODE -ne 0) { throw "vpk upload github fehlgeschlagen" }
