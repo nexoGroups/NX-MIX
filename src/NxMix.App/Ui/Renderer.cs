@@ -25,6 +25,7 @@ internal sealed class Renderer : IDisposable
     readonly ID2D1StrokeStyle _round;
     ID2D1LinearGradientBrush? _meterBrush;
     ID2D1GradientStopCollection? _meterStops;
+    ID2D1Layer? _opacityLayer;
     static readonly Dictionary<(float, FontWeight, int, bool, bool), IDWriteTextFormat> s_formats = new();
     static readonly Dictionary<(string, float, FontWeight), float> s_widths = new();
     readonly Dictionary<(int, int, int), ID2D1PathGeometry> _arcs = new();
@@ -161,6 +162,19 @@ internal sealed class Renderer : IDisposable
     public void PushClip(RectF r) => Rt.PushAxisAlignedClip(Raw(r), AntialiasMode.Aliased);
     public void PopClip() => Rt.PopAxisAlignedClip();
 
+    public void PushOpacity(RectF bounds, float opacity)
+    {
+        _opacityLayer ??= Rt.CreateLayer();
+        Rt.PushLayer(new LayerParameters
+        {
+            ContentBounds = Raw(bounds),
+            MaskTransform = Matrix3x2.Identity,
+            Opacity = opacity,
+        }, _opacityLayer);
+    }
+
+    public void PopOpacity() => Rt.PopLayer();
+
     /// <summary>Weicher Schatten: mehrere abgestufte transparente Rundrechtecke unter r.</summary>
     public void Shadow(RectF r, float radius, float blur, float strength = 1f, float dy = 2f)
     {
@@ -290,6 +304,7 @@ internal sealed class Renderer : IDisposable
         foreach (var g in _arcs.Values) g.Dispose();
         _arcs.Clear();
         _meterBrush?.Dispose(); _meterStops?.Dispose();
+        _opacityLayer?.Dispose();
         _round.Dispose(); _solid.Dispose();
     }
 }

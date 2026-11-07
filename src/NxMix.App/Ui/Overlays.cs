@@ -13,7 +13,7 @@ internal sealed class MenuItem
     /// <summary>Graue Zwischenueberschrift (nicht waehlbar).</summary>
     public bool IsHeader;
     public bool Checked;
-    public bool Danger;
+    public bool Danger { get; set; }
     public Icon Icon;
 
     public MenuItem(string text, string? shortcut, Action? action, bool enabled = true) { Text = text; Shortcut = shortcut; Action = action; Enabled = enabled; }
@@ -28,14 +28,23 @@ internal sealed class PopupMenu : Overlay
     readonly RectF _anchor;
     readonly float _minWidth;
     RectF _box;
-    int _hover = -1;
-    float _t;
-    float _scroll, _contentH;
+    int _hover = -1, _press = -1;
+    readonly float[] _rowOffsets;
+    readonly bool _hasIcons;
+    readonly VScroll _scroll = new();
+    RectF ItemView => _box.Deflate(Pad, Pad, _scroll.Needed ? 14 : Pad, Pad);
     static float ItemH => Theme.MenuItemH;
     const float SepH = 9f, Pad = 5f;
     float HeaderH => Theme.Touch ? 30 : 24;
 
-    PopupMenu(RectF anchor, List<MenuItem> items, float minWidth) { _anchor = anchor; _items = items; _minWidth = minWidth; }
+    PopupMenu(RectF anchor, List<MenuItem> items, float minWidth)
+    {
+        _anchor = anchor;
+        _items = items.Count > 0 ? items : new List<MenuItem> { MenuItem.Header("Keine Einträge") };
+        _minWidth = minWidth;
+        _rowOffsets = new float[_items.Count];
+        _hasIcons = _items.Any(i => i.Icon != Icon.None || i.Checked);
+    }
 
     public static PopupMenu Show(UiRoot root, RectF anchor, List<MenuItem> items, float minWidth = 0)
     {
@@ -47,33 +56,35 @@ internal sealed class PopupMenu : Overlay
     public IReadOnlyList<MenuItem> Items => _items;
 
     float H(MenuItem it) => it.IsSeparator ? SepH : it.IsHeader ? HeaderH : ItemH;
-    bool HasIcons => _items.Any(i => i.Icon != Icon.None || i.Checked);
-
     public override void Layout()
     {
         float w = Math.Max(_minWidth, 180);
-        foreach (var it in _items)
+        float yOffset = 0;
+        for (int i = 0; i < _items.Count; i++)
         {
-            float tw = Renderer.MeasureWidth(it.Text, it.IsHeader ? Theme.CaptionStrong : Theme.Body) + 24 + (HasIcons ? 26 : 0);
+            var it = _items[i];
+            _rowOffsets[i] = yOffset;
+            yOffset += H(it);
+            float tw = Renderer.MeasureWidth(it.Text, it.IsHeader ? Theme.CaptionStrong : Theme.Body) + 24 + (_hasIcons ? 26 : 0);
             if (it.Shortcut != null) tw += Renderer.MeasureWidth(it.Shortcut, Theme.Callout) + 28;
             w = Math.Max(w, tw);
         }
-        _contentH = Pad * 2 + _items.Sum(H);
-        w = Math.Min(w, Math.Max(80, Bounds.W - 16));
-        float h = Math.Min(_contentH, Math.Max(50, Bounds.H - 16));
-        _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _contentH - h));
+        var area = Bounds.Deflate(8);
+        w = Math.Min(w, area.W);
+        float h = Math.Min(Pad * 2 + yOffset, area.H);
         float x = _anchor.X, y = _anchor.Bottom + 6;
-        if (x + w > Bounds.W - 8) x = Bounds.W - 8 - w;
-        if (x < 8) x = 8;
-        if (y + h > Bounds.H - 8) y = Math.Max(8, _anchor.Y - 6 - h);
+        x = Math.Clamp(x, area.X, area.Right - w);
+        if (y + h > area.Bottom) y = _anchor.Y - 6 - h;
+        y = Math.Clamp(y, area.Y, area.Bottom - h);
         _box = new RectF(x, y, w, h);
+        _scroll.Update(_box.Deflate(0, Pad), yOffset);
     }
 
     RectF ItemRect(int idx)
     {
-        float y = _box.Y + Pad - _scroll;
-        for (int i = 0; i < idx; i++) y += H(_items[i]);
-        return new RectF(_box.X + Pad, y, _box.W - Pad * 2, H(_items[idx]));
+        var view = ItemView;
+        float y = view.Y + _rowOffsets[idx] - _scroll.Offset;
+        return new RectF(view.X, y, view.W, H(_items[idx]));
     }
 
     public int IndexOf(string text) => _items.FindIndex(i => i.Text == text);
@@ -81,16 +92,22 @@ internal sealed class PopupMenu : Overlay
 
     int IndexAt(float x, float y)
     {
-        if (!_box.Contains(x, y)) return -1;
-        for (int i = 0; i < _items.Count; i++)
-            if (!_items[i].IsSeparator && !_items[i].IsHeader && ItemRect(i).Contains(x, y)) return i;
-        return -1;
+        if (!ItemView.Contains(x, y)) return -1;
+        int i = RowAt(y - ItemView.Y + _scroll.Offset);
+        return !_items[i].IsSeparator && !_items[i].IsHeader && ItemRect(i).Contains(x, y) ? i : -1;
+    }
+
+    int RowAt(float offset)
+    {
+        int i = Array.BinarySearch(_rowOffsets, offset);
+        return i >= 0 ? i : Math.Max(0, ~i - 1);
     }
 
     public override CursorKind CursorAt(float x, float y) { int i = IndexAt(x, y); return i >= 0 && _items[i].Enabled ? CursorKind.Hand : CursorKind.Arrow; }
 
     public override void OnMouseMove(in MouseEvent e)
     {
+        if (_scroll.Dragging) { _scroll.Drag(e.Y); Invalidate(); return; }
         int i = IndexAt(e.X, e.Y);
         if (i != _hover) { _hover = i; Invalidate(); }
     }
@@ -98,19 +115,29 @@ internal sealed class PopupMenu : Overlay
     public override void OnMouseDown(in MouseEvent e)
     {
         if (!_box.Contains(e.X, e.Y)) Close();
+        else if (e.Button == 0)
+        {
+            if (_scroll.Down(e.X, e.Y)) _hover = -1;
+            else _press = IndexAt(e.X, e.Y);
+            Invalidate();
+        }
     }
 
     public override bool OnMouseWheel(in MouseEvent e)
     {
-        _scroll = Math.Clamp(_scroll - e.Wheel * ItemH * 3, 0, Math.Max(0, _contentH - _box.H));
+        if (!_box.Contains(e.X, e.Y)) return true;
+        _scroll.Wheel(e.Wheel);
         _hover = IndexAt(e.X, e.Y);
         Invalidate(); return true;
     }
 
     public override void OnMouseUp(in MouseEvent e)
     {
+        if (_scroll.Dragging) { _scroll.Up(); Invalidate(); return; }
         int i = IndexAt(e.X, e.Y);
-        if (i < 0 || !_items[i].Enabled) return;
+        int pressed = _press;
+        _press = -1;
+        if (e.Button != 0 || i < 0 || i != pressed || !_items[i].Enabled) return;
         Activate(i);
     }
 
@@ -144,36 +171,28 @@ internal sealed class PopupMenu : Overlay
             if (!_items[i].IsSeparator && !_items[i].IsHeader && _items[i].Enabled)
             {
                 _hover = i;
-                var r = ItemRect(i);
-                if (r.Y < _box.Y + Pad) _scroll -= _box.Y + Pad - r.Y;
-                else if (r.Bottom > _box.Bottom - Pad) _scroll += r.Bottom - _box.Bottom + Pad;
-                _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _contentH - _box.H));
+                float top = _rowOffsets[i], bottom = top + H(_items[i]);
+                if (top < _scroll.Offset) _scroll.Offset = top;
+                else if (bottom > _scroll.Offset + ItemView.H)
+                    _scroll.Offset = Math.Min(bottom - ItemView.H, Math.Max(0, _scroll.ContentH - ItemView.H));
                 break;
             }
         }
         Invalidate();
     }
 
-    public override bool Tick(float dt)
-    {
-        if (_t >= 1) return false;
-        _t = Math.Min(1, _t + dt / 0.12f);
-        return true;
-    }
-
     public override void Paint(Renderer g)
     {
-        float a = 1 - MathF.Pow(1 - _t, 3);
-        var box = _box.Offset(0, (1 - a) * -4);
-        g.Shadow(box, 12, 16, 1.4f * a, 6);
+        var box = _box;
+        g.Shadow(box, 12, 16, 1.4f, 6);
         g.FillRound(box, Theme.RadiusCard, Theme.Elevated);
         g.StrokeRound(box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
-        bool icons = HasIcons;
-        g.PushClip(box.Deflate(Pad));
-        for (int i = 0; i < _items.Count; i++)
+        g.PushClip(ItemView);
+        for (int i = RowAt(_scroll.Offset); i < _items.Count; i++)
         {
             var it = _items[i];
-            var r = ItemRect(i).Offset(0, box.Y - _box.Y);
+            var r = ItemRect(i);
+            if (r.Y >= ItemView.Bottom) break;
             if (it.IsSeparator) { g.Fill(new RectF(r.X + 8, r.CY, r.W - 16, 1), Theme.Separator); continue; }
             if (it.IsHeader)
             {
@@ -184,22 +203,18 @@ internal sealed class PopupMenu : Overlay
             if (hot) g.FillRound(r, 7, it.Danger ? Theme.Soft(Theme.Red) : Theme.Accent);
             var col = !it.Enabled ? Theme.TextTertiary : it.Danger ? Theme.Red : hot ? Theme.OnAccent : Theme.Text;
             float tx = r.X + 10;
-            if (icons)
+            if (_hasIcons)
             {
                 if (it.Checked) Icons.Draw(g, Icon.Check, r.X + 18, r.CY, 15, hot ? Theme.OnAccent : Theme.AccentText);
                 else if (it.Icon != Icon.None) Icons.Draw(g, it.Icon, r.X + 18, r.CY, 16, it.Danger && it.Enabled ? Theme.Red : hot ? Theme.OnAccent : it.Enabled ? Theme.TextSecondary : Theme.TextTertiary);
                 tx = r.X + 34;
             }
-            g.Text(it.Text, new RectF(tx, r.Y, r.Right - tx - 10, r.H), Theme.Body, col);
+            float shortcutSpace = it.Shortcut == null ? 0 : Renderer.MeasureWidth(it.Shortcut, Theme.Callout) + 16;
+            g.Text(it.Text, new RectF(tx, r.Y, r.Right - tx - 10 - shortcutSpace, r.H), Theme.Body, col);
             if (it.Shortcut != null) g.Text(it.Shortcut, new RectF(r.X, r.Y, r.W - 10, r.H), Theme.Callout, hot ? Theme.OnAccent.With(0.8f) : Theme.TextTertiary, HAlign.Right);
         }
         g.PopClip();
-        if (_contentH > box.H)
-        {
-            float track = box.H - 2 * Pad;
-            float thumb = Math.Max(20, track * box.H / _contentH);
-            g.FillRound(new RectF(box.Right - 5, box.Y + Pad + (track - thumb) * _scroll / (_contentH - box.H), 3, thumb), 1, Theme.TextTertiary);
-        }
+        _scroll.Paint(g);
     }
 }
 
@@ -214,7 +229,8 @@ internal sealed class ModalDialog : Overlay
     RectF _box;
     RectF[] _btnRects = Array.Empty<RectF>();
     int _hover = -1, _press = -1;
-    float _t;
+    RectF _messageView;
+    readonly VScroll _messageScroll = new();
 
     ModalDialog(string title, string message, string[] buttons, int def, int danger, Action<int> result, Icon icon)
     { _title = title; _message = message; _buttons = buttons; _default = def; _danger = danger; _result = result; _icon = icon; }
@@ -237,13 +253,32 @@ internal sealed class ModalDialog : Overlay
     }
 
     public override CursorKind CursorAt(float x, float y) => HitBtn(x, y) >= 0 ? CursorKind.Hand : CursorKind.Arrow;
-    public override void OnMouseMove(in MouseEvent e) { int h = HitBtn(e.X, e.Y); if (h != _hover) { _hover = h; Invalidate(); } }
-    public override void OnMouseDown(in MouseEvent e) { _press = HitBtn(e.X, e.Y); Invalidate(); }
+    public override void OnMouseMove(in MouseEvent e)
+    {
+        if (_messageScroll.Dragging) { _messageScroll.Drag(e.Y); Invalidate(); return; }
+        int h = HitBtn(e.X, e.Y);
+        if (h != _hover) { _hover = h; Invalidate(); }
+    }
+    public override void OnMouseLeave() { _hover = -1; Invalidate(); }
+    public override void OnMouseDown(in MouseEvent e)
+    {
+        if (e.Button != 0) return;
+        if (!_messageScroll.Down(e.X, e.Y)) _press = HitBtn(e.X, e.Y);
+        Invalidate();
+    }
     public override void OnMouseUp(in MouseEvent e)
     {
+        _messageScroll.Up();
         int h = HitBtn(e.X, e.Y);
-        if (h >= 0 && h == _press) Finish(h);
+        int pressed = _press;
         _press = -1;
+        if (e.Button == 0 && h >= 0 && h == pressed) Finish(h);
+    }
+
+    public override bool OnMouseWheel(in MouseEvent e)
+    {
+        if (_box.Contains(e.X, e.Y) && _messageScroll.Wheel(e.Wheel)) Invalidate();
+        return true;
     }
 
     public override void OnKeyDown(int vk, bool ctrl, bool shift)
@@ -252,41 +287,40 @@ internal sealed class ModalDialog : Overlay
         else if (vk == Win32.VK_RETURN) Finish(_default);
     }
 
-    public override bool Tick(float dt)
-    {
-        if (_t >= 1) return false;
-        _t = Math.Min(1, _t + dt / 0.16f);
-        return true;
-    }
-
     public override void Layout()
     {
-        var b = Bounds;
-        float btnSum = _buttons.Sum(t => Math.Max(96, Renderer.MeasureWidth(t, Theme.BodyMedium) + 32) + 10) + 38;
-        float w = Math.Min(Math.Max(Theme.Touch ? 500 : 460, btnSum), b.W - 40);
-        float textW = w - 48;
-        float mh = Renderer.TextHeight(_message, Theme.Body, textW);
+        var b = Bounds.Deflate(20);
+        var widths = _buttons.Select(t => Math.Max(96, Renderer.MeasureWidth(t, Theme.BodyMedium) + 32)).ToArray();
+        float btnSum = widths.Sum();
+        float gaps = (_buttons.Length - 1) * 10;
+        float w = Math.Min(Math.Max(Theme.Touch ? 500 : 460, btnSum + gaps + 48), b.W);
+        float textW = Math.Max(0, w - 48 - 12);
+        float mh = Renderer.TextHeight(_message, Theme.Body, textW) + 4;
         float bh = Theme.ControlH;
-        float h = 24 + (_icon != Icon.None ? 52 : 0) + 26 + 10 + mh + 24 + bh + 20;
-        _box = RectF.Centered(b.CX, b.CY, w, Math.Min(h, b.H - 40));
+        float head = 24 + (_icon != Icon.None ? 52 : 0) + 36;
+        float h = Math.Min(head + mh + 20 + bh + 20, b.H);
+        _box = RectF.Centered(b.CX, b.CY, w, h);
         _btnRects = new RectF[_buttons.Length];
         float x = _box.Right - 24;
         float by = _box.Bottom - 20 - bh;
+        float fit = Math.Clamp((w - 48 - gaps) / btnSum, 0, 1);
         for (int i = _buttons.Length - 1; i >= 0; i--)
         {
-            float bw = Math.Max(96, Renderer.MeasureWidth(_buttons[i], Theme.BodyMedium) + 32);
+            float bw = widths[i] * fit;
             x -= bw;
             _btnRects[i] = new RectF(x, by, bw, bh);
             x -= 10;
         }
+        float y = _box.Y + head;
+        _messageView = RectF.FromLTRB(_box.X + 24, y, _box.Right - 24, by - 20);
+        _messageScroll.Update(_messageView, mh);
     }
 
     public override void Paint(Renderer g)
     {
-        float a = 1 - MathF.Pow(1 - _t, 3);
-        g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * a));
+        g.Fill(Bounds, Theme.Scrim);
         var box = _box;
-        g.Shadow(box, 16, 28, 1.6f * a, 10);
+        g.Shadow(box, 16, 28, 1.6f, 10);
         g.FillRound(box, Theme.RadiusCard, Theme.Elevated);
         g.StrokeRound(box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         float y = box.Y + 24;
@@ -299,9 +333,11 @@ internal sealed class ModalDialog : Overlay
         }
         float textW = box.W - 48;
         g.Text(_title, new RectF(box.X + 24, y, textW, 26), Theme.Title, Theme.Text);
-        y += 36;
-        float mh = Renderer.TextHeight(_message, Theme.Body, textW);
-        g.Text(_message, new RectF(box.X + 24, y, textW, mh + 4), Theme.Body, Theme.TextSecondary, HAlign.Left, VAlign.Top, false, true);
+        g.PushClip(_messageView);
+        g.Text(_message, new RectF(_messageView.X, _messageView.Y - _messageScroll.Offset, _messageView.W - 12, _messageScroll.ContentH),
+            Theme.Body, Theme.TextSecondary, HAlign.Left, VAlign.Top, false, true);
+        g.PopClip();
+        _messageScroll.Paint(g);
 
         for (int i = 0; i < _buttons.Length; i++)
         {
@@ -317,16 +353,25 @@ internal sealed class ModalDialog : Overlay
 /// </summary>
 internal abstract class SheetOverlay : Overlay
 {
-    float _t;
     readonly VScroll _sc = new();
+    readonly List<Widget> _header = new();
+    Motion _bodyReveal;
     protected RectF Panel { get; private set; }
     protected RectF Body { get; private set; }
+    RectF BodyClip => Body.Deflate(1, 0, 13, 8);
     protected float ScrollOffset => _sc.Offset;
     protected const float HeaderH = 74f;
     protected virtual float PreferredWidth => Theme.SheetW;
     /// <summary>Breite Kanalbearbeitung innerhalb des App-Arbeitsbereichs.</summary>
     protected virtual bool FullPage => false;
     protected void ResetScroll() => _sc.Offset = 0;
+    protected void AddHeader(Widget widget) => _header.Add(Add(widget));
+    protected void RevealBody()
+    {
+        if (Root is not { } root) return;
+        _bodyReveal.Start(0.55f, 1, root.Time);
+        Invalidate();
+    }
 
     public override void Layout()
     {
@@ -337,13 +382,11 @@ internal abstract class SheetOverlay : Overlay
             ? new RectF(root.ContentRect.X + 8, top + 8, Math.Max(100, root.ContentRect.W - 16), Math.Max(100, b.Bottom - top - 16))
             : new RectF(b.Right - w - 12, top + 8, w, Math.Max(100, b.Bottom - top - 20));
         Body = new RectF(Panel.X, Panel.Y + HeaderH, Panel.W, Math.Max(0, Panel.H - HeaderH));
-        float contentH = LayoutBody(Body.X + 20, Body.Y + 4 - _sc.Offset, Body.W - 40);
-        _sc.Update(Body, contentH + 24);
-        if (_sc.Offset > 0 && _sc.Offset > Math.Max(0, contentH + 24 - Body.H))
-        {
-            _sc.Update(Body, contentH + 24);
+        float oldOffset = _sc.Offset;
+        float contentH = LayoutBody(Body.X + 20, Body.Y + 4 - oldOffset, Body.W - 40);
+        _sc.Update(Body.Deflate(0, 0, 0, 8), contentH + 16);
+        if (oldOffset != _sc.Offset)
             LayoutBody(Body.X + 20, Body.Y + 4 - _sc.Offset, Body.W - 40);
-        }
     }
 
     /// <summary>Verteilt die Kinder ab (x, y) mit Breite w und liefert die Inhaltshoehe.</summary>
@@ -354,25 +397,26 @@ internal abstract class SheetOverlay : Overlay
     public override Widget? HitTest(float x, float y)
     {
         if (!Visible) return null;
-        if (Body.Contains(x, y) || Panel.Contains(x, y))
+        if (BodyClip.Contains(x, y))
         {
             for (int i = Children.Count - 1; i >= 0; i--)
             {
                 var c = Children[i];
-                if (!c.Visible) continue;
-                // Kinder im Inhaltsbereich nur innerhalb des sichtbaren Ausschnitts
-                if (c.Bounds.Y >= Body.Y - 1 && !Body.Contains(x, y)) continue;
+                if (_header.Contains(c)) continue;
                 var h = c.HitTest(x, y);
                 if (h != null) return h;
             }
         }
+        else if (Panel.Contains(x, y) && y < Body.Y)
+            foreach (var c in _header)
+                if (c.HitTest(x, y) is { } h) return h;
         return this;
     }
 
     public override void OnMouseDown(in MouseEvent e)
     {
         if (!Panel.Contains(e.X, e.Y)) { Close(); return; }
-        if (_sc.Down(e.X, e.Y)) { Layout(); Invalidate(); }
+        if (e.Button == 0 && _sc.Down(e.X, e.Y)) { Layout(); Invalidate(); }
     }
 
     public override void OnMouseMove(in MouseEvent e)
@@ -393,32 +437,26 @@ internal abstract class SheetOverlay : Overlay
         if (vk == Win32.VK_ESCAPE) Close();
     }
 
-    public override bool Tick(float dt)
-    {
-        if (_t >= 1) return false;
-        _t = Math.Min(1, _t + dt / 0.18f);
-        return true;
-    }
-
     public override void Paint(Renderer g)
     {
-        float a = 1 - MathF.Pow(1 - _t, 3);
-        if (!FullPage) g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * 0.55f * a));
+        if (!FullPage) g.Fill(Bounds, Theme.Scrim.With(Theme.Scrim.A * 0.55f));
         var p = Panel;
         if (FullPage) g.Fill(p, Theme.Elevated);
         else
         {
-            g.Shadow(p, Theme.RadiusCard, 24, 1.5f * a, 8);
+            g.Shadow(p, Theme.RadiusCard, 24, 1.5f, 8);
             g.FillRound(p, Theme.RadiusCard, Theme.Elevated);
             g.StrokeRound(p, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         }
         PaintHeader(g, new RectF(p.X, p.Y, p.W, HeaderH));
         g.Fill(new RectF(p.X, p.Y + HeaderH - 1, p.W, 1), Theme.Separator);
-        // Kopf-Elemente (Name, Pfeile, Schliessen) ungeschnitten, Inhalt im scrollbaren Ausschnitt
-        foreach (var c in Children) if (c.Visible && c.Bounds.Bottom <= Body.Y + 1 && c.Bounds.Y >= p.Y) c.Paint(g);
-        g.PushClip(Body.Deflate(1, 0, 1, 8));
+        foreach (var c in _header) if (c.Visible) c.Paint(g);
+        g.PushClip(BodyClip);
         PaintBody(g);
-        foreach (var c in Children) if (c.Visible && !(c.Bounds.Bottom <= Body.Y + 1 && c.Bounds.Y >= p.Y)) c.Paint(g);
+        foreach (var c in Children)
+            if (c.Visible && !_header.Contains(c) && !c.Bounds.Intersect(BodyClip).IsEmpty) c.Paint(g);
+        float reveal = _bodyReveal.At(Root, 1, Motion.Selection);
+        if (reveal < 1) g.Fill(BodyClip, Theme.Elevated.With(1 - reveal));
         g.PopClip();
         _sc.Paint(g);
     }

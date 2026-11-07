@@ -3,30 +3,73 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Ui;
 
-internal enum TitleHit { None, Drag, Nav, Collapse, Update, Audio, Menu, Min, Max, Close }
+internal enum TitleHit { None, Drag, Nav, Collapse, Update, Audio, Snapshots, PanicMute, Min, Max, Close }
 
-/// <summary>Seitenleiste wie im UniFi-Webinterface: Logo, Seiten als Symbole (ausgeklappt mit Text), unten Einstellungen und Einklappen.</summary>
+/// <summary>Seitenleiste der Live-Konsole mit 8 Bereichen (Strg+1 .. Strg+8):
+/// Mixer, Decks, Geräte, Patching Matrix, Virtual I/O, Outputs / DSP, Snapshots und unten Engine.</summary>
 internal sealed class Sidebar : Widget
 {
-    static readonly string[] s_keys = { "Strg+1", "Strg+2", "Strg+3", "Strg+4" };
+    static readonly string[] s_keys = { "Strg+1", "Strg+2", "Strg+3", "Strg+4", "Strg+5", "Strg+6", "Strg+7", "Strg+8" };
     int _hot = -1;
     bool _hotCollapse;
+    int _pressed = -1;
+    Motion _expansion;
+    readonly Motion[] _navHover = new Motion[9];
+    readonly Motion[] _navActive = new Motion[8];
 
     public bool Expanded { get; set; }
-    public float Width => Expanded ? Theme.SidebarExpandedW : Theme.SidebarCollapsedW;
-    public override bool AcceptsMouse => true;
+    public float Width { get; private set; }
+    float _labelOpacity;
 
-    public RectF LogoRect => new(Bounds.X, Bounds.Y, Bounds.W, Theme.TopBarH);
-
-    /// <summary>Seite 0..2 oben, Einstellungen (3) unten ueber dem Einklapp-Knopf.</summary>
-    public RectF ItemRect(int i)
+    public bool AdvanceWidth()
     {
-        float h = Theme.NavItemH, x = Bounds.X + 10, w = Bounds.W - 20;
-        if (i < 3) return new RectF(x, Bounds.Y + Theme.TopBarH + 8 + i * (h + 4), w, h);
-        return new RectF(x, CollapseRect.Y - 8 - h, w, h);
+        float amount = _expansion.At(Root, Expanded ? 1 : 0, Motion.Reveal);
+        float next = Theme.SidebarCollapsedW + (Theme.SidebarExpandedW - Theme.SidebarCollapsedW) * amount;
+        _labelOpacity = Math.Clamp((amount - 0.25f) / 0.75f, 0, 1);
+        if (Width == next) return false;
+        Width = next;
+        return true;
     }
 
-    public RectF CollapseRect => new(Bounds.X + 10, Bounds.Bottom - 12 - Theme.NavItemH, Bounds.W - 20, Theme.NavItemH);
+    public override bool AcceptsMouse => true;
+    public RectF LogoRect => new(Bounds.X, Bounds.Y, Bounds.W, Theme.TopBarH);
+
+    (float ItemH, float Gap) Metrics()
+    {
+        int n = Root?.Pages.Length ?? 8;
+        float topY = Bounds.Y + Theme.TopBarH + 6;
+        float botY = Bounds.Bottom - 10;
+        float avail = Math.Max(120, botY - topY);
+        // n Nav-Einträge + 1 Einklappen-Knopf + Abstände
+        float desiredH = Theme.NavItemH;
+        float gap = 3f;
+        float needed = (n + 1) * desiredH + (n + 2) * gap;
+        if (needed > avail)
+        {
+            gap = 2f;
+            desiredH = Math.Clamp((avail - (n + 2) * gap) / (n + 1), 24f, Theme.NavItemH);
+        }
+        return (desiredH, gap);
+    }
+
+    public RectF CollapseRect
+    {
+        get
+        {
+            var (h, _) = Metrics();
+            return new RectF(Bounds.X + 10, Bounds.Bottom - 10 - h, Bounds.W - 20, h);
+        }
+    }
+
+    public RectF ItemRect(int i)
+    {
+        int n = Root?.Pages.Length ?? 8;
+        var (h, gap) = Metrics();
+        float x = Bounds.X + 10, w = Bounds.W - 20;
+        if (i == n - 1)
+            return new RectF(x, CollapseRect.Y - gap * 2 - h, w, h);
+        return new RectF(x, Bounds.Y + Theme.TopBarH + 6 + i * (h + gap), w, h);
+    }
 
     int ItemAt(float x, float y)
     {
@@ -54,18 +97,24 @@ internal sealed class Sidebar : Widget
 
     public override void OnMouseLeave() { _hot = -1; _hotCollapse = false; Invalidate(); }
 
+    int ControlAt(float x, float y) => CollapseRect.Contains(x, y) ? 99 : ItemAt(x, y);
+
+    public override void OnMouseDown(in MouseEvent e) => _pressed = e.Button == 0 ? ControlAt(e.X, e.Y) : -1;
+
     public override void OnMouseUp(in MouseEvent e)
     {
-        if (e.Button != 0 || Root == null) return;
-        int i = ItemAt(e.X, e.Y);
-        if (i >= 0) Root.SwitchPage(i);
-        else if (CollapseRect.Contains(e.X, e.Y)) Root.SetSidebarExpanded(!Expanded);
+        int i = ControlAt(e.X, e.Y);
+        int pressed = _pressed;
+        _pressed = -1;
+        if (e.Button != 0 || Root == null || i < 0 || i != pressed) return;
+        if (i == 99) Root.SetSidebarExpanded(!Expanded);
+        else Root.SwitchPage(i);
     }
 
     public override string? TooltipAt(float x, float y)
     {
         int i = ItemAt(x, y);
-        if (i >= 0) return Expanded ? s_keys[i] : $"{Root!.Pages[i].Title}  ·  {s_keys[i]}";
+        if (i >= 0 && i < s_keys.Length) return Expanded ? s_keys[i] : $"{Root!.Pages[i].Title}  ·  {s_keys[i]}";
         if (CollapseRect.Contains(x, y)) return Expanded ? "Seitenleiste einklappen" : "Seitenleiste ausklappen";
         return null;
     }
@@ -77,7 +126,6 @@ internal sealed class Sidebar : Widget
         g.Fill(b, Theme.Chrome);
         g.Fill(new RectF(b.Right - 1, b.Y, 1, b.H), Theme.Separator);
 
-        // Logo: abgerundetes Quadrat im Akzent mit drei Fadern, daneben die Wortmarke
         var logo = RectF.Centered(b.X + Theme.SidebarCollapsedW / 2, b.Y + Theme.TopBarH / 2, 34, 34);
         g.FillRound(logo, 10, Theme.Accent);
         float[] ks = { 0.62f, 0.32f, 0.70f };
@@ -87,32 +135,46 @@ internal sealed class Sidebar : Widget
             g.Line(lx, logo.Y + 8, lx, logo.Bottom - 8, Theme.White.With(0.45f), 1.6f, true);
             g.FillRound(RectF.Centered(lx, logo.Y + 8 + (logo.H - 16) * ks[k], 5.5f, 3.5f), 1.5f, Theme.White);
         }
-        if (Expanded)
-            g.Text("NX-MIX", new RectF(logo.Right + 12, logo.Y, 140, logo.H), new TextStyle(16f, Vortice.DirectWrite.FontWeight.Bold), Theme.Text);
+        bool isBeta = root.Updater.IsCurrentBetaBuild;
+        if (isBeta && _labelOpacity <= 0.1f)
+            g.FillCircle(logo.Right - 3, logo.Y + 3, 4.5f, Theme.Orange);
 
-        for (int i = 0; i < root.Pages.Length; i++) PaintItem(g, ItemRect(i), root.Pages[i].Icon, root.Pages[i].Title, i == root.PageIndex, i == _hot);
-        PaintItem(g, CollapseRect, Icon.Sidebar, "Einklappen", false, _hotCollapse, secondary: true);
+        if (_labelOpacity > 0)
+        {
+            g.Text("NX-MIX", new RectF(logo.Right + 12, logo.Y, b.Right - logo.Right - 22, logo.H),
+                new TextStyle(16f, Vortice.DirectWrite.FontWeight.Bold), Theme.Text.With(_labelOpacity));
+            if (isBeta && _labelOpacity > 0.65f && b.W >= 188f)
+                Draw.Chip(g, b.Right - 12, logo.CY, "BETA", Theme.Orange, dot: false, Theme.MicroStrong, alignRight: true);
+        }
+
+        for (int i = 0; i < root.Pages.Length; i++)
+        {
+            float active = _navActive[i].At(root, i == root.PageIndex ? 1 : 0, Motion.Selection);
+            float hov = _navHover[i].At(root, i == _hot ? 1 : 0, Motion.Feedback);
+            PaintItem(g, ItemRect(i), root.Pages[i].Icon, root.Pages[i].Title, active, hov);
+        }
+        PaintItem(g, CollapseRect, Icon.Sidebar, "Einklappen", 0, _navHover[8].At(root, _hotCollapse ? 1 : 0, Motion.Feedback), secondary: true);
     }
 
-    void PaintItem(Renderer g, RectF r, Icon icon, string label, bool active, bool hot, bool secondary = false)
+    void PaintItem(Renderer g, RectF r, Icon icon, string label, float active, float hot, bool secondary = false)
     {
-        if (active) g.FillRound(r, Theme.RadiusControl, Theme.AccentSoft);
-        else if (hot) g.FillRound(r, Theme.RadiusControl, Theme.ControlHover.With(Theme.IsDark ? 0.8f : 1f));
-        var ic = active ? Theme.AccentText : hot ? Theme.Text : secondary ? Theme.TextTertiary : Theme.TextSecondary;
-        float icx = Expanded ? r.X + 22 : r.CX;
-        Icons.Draw(g, icon, icx, r.CY, 20, ic);
-        if (Expanded)
-            g.Text(label, new RectF(r.X + 44, r.Y, r.W - 50, r.H), active ? Theme.BodyStrong : Theme.BodyMedium,
-                active ? Theme.Text : hot ? Theme.Text : Theme.TextSecondary, HAlign.Left, VAlign.Middle, true);
+        var bg = Theme.ControlHover.With(hot * (Theme.IsDark ? 0.8f : 1f));
+        g.FillRound(r, Theme.RadiusControl, Theme.Mix(bg, Theme.AccentSoft, active));
+        if (active > 0) g.FillPill(new RectF(r.X, r.CY - Math.Min(9, r.H * 0.35f), 3, Math.Min(18, r.H * 0.7f)), Theme.AccentText.With(active));
+        var ic = Theme.Mix(Theme.Mix(secondary ? Theme.TextTertiary : Theme.TextSecondary, Theme.Text, hot), Theme.AccentText, active);
+        float icx = r.X + (Theme.SidebarCollapsedW - 20) / 2;
+        Icons.Draw(g, icon, icx, r.CY, Math.Min(20f, r.H - 6), ic);
+        if (_labelOpacity > 0)
+            g.Text(label, new RectF(r.X + 44, r.Y, r.W - 50, r.H), Theme.BodyMedium,
+                Theme.Mix(Theme.TextSecondary, Theme.Text, Math.Max(active, hot)).With(_labelOpacity), HAlign.Left, VAlign.Middle, true);
     }
 }
 
-/// <summary>Kopfleiste: Seitentitel, Audio-Status (Klick: Seite Geraete), Projekt-Menue, Fensterknoepfe.</summary>
+/// <summary>Kopfleiste der Live-Konsole: Seitentitel, Engine/Audio-Status-Pille, Snapshot-Schnellwahl, Panic-Mute und Fensterknöpfe.</summary>
 internal sealed class TopBar : Widget
 {
     const float BtnW = 46f;
     TitleHit _hoverKind, _pressKind;
-    /// <summary>Hover/Druck des Maximieren-Knopfs, wenn er als Nicht-Client-Bereich gemeldet wird (Snap-Layouts).</summary>
     public TitleHit NcHover { get; private set; }
     public bool NcPressed { get; private set; }
 
@@ -125,33 +187,68 @@ internal sealed class TopBar : Widget
         Invalidate();
     }
 
-    // ---- Geometrie -----------------------------------------------------------------------------
     RectF CloseRect => new(Bounds.Right - BtnW, Bounds.Y, BtnW, 40);
     RectF MaxRect => new(Bounds.Right - BtnW * 2, Bounds.Y, BtnW, 40);
     RectF MinRect => new(Bounds.Right - BtnW * 3, Bounds.Y, BtnW, 40);
     float ButtonH => Theme.Touch ? 38 : 32;
 
-    public RectF MenuRect
+    string PanicText => Root?.Model.PanicMuted == true ? "MUTE AKTIV" : "Panic";
+
+    public RectF PanicRect
     {
         get
         {
-            float w = Renderer.MeasureWidth("Projekt", Theme.BodyMedium) + 62;
-            return new RectF(MinRect.X - 14 - w, Bounds.CY - ButtonH / 2, w, ButtonH);
+            float w = Renderer.MeasureWidth(PanicText, Theme.CalloutStrong) + 42;
+            return new RectF(MinRect.X - 12 - w, Bounds.CY - ButtonH / 2, w, ButtonH);
+        }
+    }
+
+    string SnapshotText()
+    {
+        var m = Root?.Model;
+        if (m == null) return "Snapshots";
+        if (m.ActiveSnapshotId is { } id && m.Snapshots.FirstOrDefault(s => s.Id == id) is { } active)
+            return active.Name.Length > 18 ? active.Name[..17] + "…" : active.Name;
+        return "Snapshots";
+    }
+
+    public RectF SnapshotRect
+    {
+        get
+        {
+            string t = SnapshotText();
+            float w = Renderer.MeasureWidth(t, Theme.BodyMedium) + 56;
+            float x = PanicRect.X - 8 - w;
+            float titleEnd = Bounds.X + Theme.Pad + Renderer.MeasureWidth(Root!.CurrentPage.Title, Theme.LargeTitle);
+            return x < titleEnd + 14 ? default : new RectF(x, Bounds.CY - ButtonH / 2, w, ButtonH);
         }
     }
 
     string AudioText(out Color4 color)
     {
         var m = Root!.Model;
+        if (!m.IsConnected)
+        {
+            color = Theme.Orange;
+            return "Verbinde mit Engine …";
+        }
         string sr = $"{m.Settings.SampleRate / 1000.0:0.#} kHz";
         switch (m.HostState)
         {
             case HostState.Running:
                 color = Theme.Green;
-                return m.Stats != null ? $"Audio läuft  ·  {sr}  ·  {m.Stats.OutputLatencyMs:0.0} ms" : $"Audio läuft  ·  {sr}";
-            case HostState.Starting: color = Theme.Orange; return "Audio startet …";
-            case HostState.Faulted: color = Theme.Red; return "Audio-Fehler";
-            default: color = Theme.TextTertiary; return (m.HostBusy ? "Audio stoppt …" : "Audio gestoppt") + $"  ·  {sr}";
+                return m.Stats.OutputLatencyMs > 0
+                    ? $"Engine aktiv  ·  {sr}  ·  {m.Stats.OutputLatencyMs:0.0} ms"
+                    : $"Engine aktiv  ·  {sr}";
+            case HostState.Starting:
+                color = Theme.Orange;
+                return "Audio startet …";
+            case HostState.Faulted:
+                color = Theme.Red;
+                return "Audio-Fehler";
+            default:
+                color = Theme.AccentText;
+                return $"Engine bereit  ·  {sr}";
         }
     }
 
@@ -160,21 +257,24 @@ internal sealed class TopBar : Widget
         get
         {
             string t = AudioText(out _);
-            float w = Renderer.MeasureWidth(t, Theme.CalloutMedium) + 40;
-            float x = MenuRect.X - 10 - w;
+            float w = Renderer.MeasureWidth(t, Theme.CalloutMedium) + 38;
+            var snapR = SnapshotRect;
+            float anchorX = snapR.IsEmpty ? PanicRect.X : snapR.X;
+            float x = anchorX - 8 - w;
             float titleEnd = Bounds.X + Theme.Pad + Renderer.MeasureWidth(Root!.CurrentPage.Title, Theme.LargeTitle);
             return x < titleEnd + 14 ? default : new RectF(x, Bounds.CY - ButtonH / 2, w, ButtonH);
         }
     }
 
-    /// <summary>Text der Update-Pille oder null, wenn nichts anzuzeigen ist.</summary>
     string? UpdateText()
     {
         var u = Root?.Updater;
         if (u == null) return null;
         return u.Stage switch
         {
-            Model.UpdateStage.Available => $"Update {u.Offer?.Version}",
+            Model.UpdateStage.Available => u.Offer?.IsDowngrade == true
+                ? $"Stable {u.Offer.Version}"
+                : $"Update {u.Offer?.Version}",
             Model.UpdateStage.Downloading => $"Update lädt … {u.Progress} %",
             Model.UpdateStage.Ready => u.InstallOnExitPending ? "Update beim Beenden" : "Update bereit",
             _ => null,
@@ -186,10 +286,13 @@ internal sealed class TopBar : Widget
         get
         {
             string? t = UpdateText();
-            if (t == null || AudioRect.IsEmpty) return default;
-            float w = Renderer.MeasureWidth(t, Theme.CalloutStrong) + 44;
-            float x = AudioRect.X - 8 - w;
+            if (t == null) return default;
+            float w = Renderer.MeasureWidth(t, Theme.CalloutStrong) + 42;
+            var audio = AudioRect;
+            var snap = SnapshotRect;
+            float rightAnchor = !audio.IsEmpty ? audio.X : !snap.IsEmpty ? snap.X : PanicRect.X;
             float titleEnd = Bounds.X + Theme.Pad + Renderer.MeasureWidth(Root!.CurrentPage.Title, Theme.LargeTitle);
+            float x = rightAnchor - 8 - w;
             return x < titleEnd + 14 ? default : new RectF(x, Bounds.CY - ButtonH / 2, w, ButtonH);
         }
     }
@@ -200,13 +303,13 @@ internal sealed class TopBar : Widget
         if (CloseRect.Contains(x, y)) return (TitleHit.Close, -1);
         if (MaxRect.Contains(x, y)) return (TitleHit.Max, -1);
         if (MinRect.Contains(x, y)) return (TitleHit.Min, -1);
-        if (MenuRect.Contains(x, y)) return (TitleHit.Menu, -1);
-        if (AudioRect.Contains(x, y)) return (TitleHit.Audio, -1);
-        if (UpdateRect.Contains(x, y)) return (TitleHit.Update, -1);
+        if (PanicRect.Contains(x, y)) return (TitleHit.PanicMute, -1);
+        if (!SnapshotRect.IsEmpty && SnapshotRect.Contains(x, y)) return (TitleHit.Snapshots, -1);
+        if (!AudioRect.IsEmpty && AudioRect.Contains(x, y)) return (TitleHit.Audio, -1);
+        if (!UpdateRect.IsEmpty && UpdateRect.Contains(x, y)) return (TitleHit.Update, -1);
         return (TitleHit.Drag, -1);
     }
 
-    // ---- Maus ----------------------------------------------------------------------------------
     public override void OnMouseMove(in MouseEvent e)
     {
         var (k, _) = HitAt(e.X, e.Y);
@@ -228,20 +331,36 @@ internal sealed class TopBar : Widget
         var pk = _pressKind;
         _pressKind = TitleHit.None;
         Invalidate();
-        if (k != pk || Root == null) return;
+        if (e.Button != 0 || k != pk || Root == null) return;
         switch (k)
         {
-            case TitleHit.Menu: Root.ShowProjectMenu(MenuRect); break;
-            case TitleHit.Audio: Root.SwitchPage(2); break;
-            case TitleHit.Update: Root.ShowUpdate(); break;
-            case TitleHit.Min: Root.Shell.Minimize(); break;
-            case TitleHit.Max: Root.Shell.ToggleMaximize(); break;
-            case TitleHit.Close: Root.Shell.Close(); break;
+            case TitleHit.PanicMute:
+                Root.Model.SetPanicMute(!Root.Model.PanicMuted);
+                break;
+            case TitleHit.Snapshots:
+                Root.ShowQuickSnapshotMenu(SnapshotRect);
+                break;
+            case TitleHit.Audio:
+                Root.SwitchPage(7); // Engine-Tab
+                break;
+            case TitleHit.Update:
+                Root.ShowUpdate();
+                break;
+            case TitleHit.Min:
+                Root.Shell.Minimize();
+                break;
+            case TitleHit.Max:
+                Root.Shell.ToggleMaximize();
+                break;
+            case TitleHit.Close:
+                Root.Shell.Close();
+                break;
         }
     }
 
     public override CursorKind CursorAt(float x, float y) =>
-        HitAt(x, y).Kind is TitleHit.Menu or TitleHit.Audio or TitleHit.Update or TitleHit.Min or TitleHit.Max or TitleHit.Close ? CursorKind.Hand : CursorKind.Arrow;
+        HitAt(x, y).Kind is TitleHit.PanicMute or TitleHit.Snapshots or TitleHit.Audio or TitleHit.Update or TitleHit.Min or TitleHit.Max or TitleHit.Close
+            ? CursorKind.Hand : CursorKind.Arrow;
 
     public override string? TooltipAt(float x, float y)
     {
@@ -250,29 +369,33 @@ internal sealed class TopBar : Widget
         {
             TitleHit.Min => "Minimieren",
             TitleHit.Max => Root!.Shell.IsMaximized ? "Verkleinern" : "Maximieren",
-            TitleHit.Close => "Schließen",
-            TitleHit.Menu => "Projekt: neu, exportieren, importieren",
-            TitleHit.Audio => "Audio-Engine: starten, stoppen, Geräte (Strg+3)",
-            TitleHit.Update => "Neue Version von NX-MIX: Klick zeigt, was neu ist, und lädt sie auf Wunsch",
+            TitleHit.Close => "Oberfläche schließen (Hintergrund-Engine & Audio laufen weiter)",
+            TitleHit.PanicMute => "Panic-Mute: alle Ausgänge sofort stummschalten / freigeben (Strg+M)",
+            TitleHit.Snapshots => "Snapshots: schnell abrufen, speichern oder verwalten (Strg+7)",
+            TitleHit.Audio => "Hintergrund-Engine, Takt, Latenz & Status (Strg+8)",
+            TitleHit.Update => "Neue Version von NX-MIX verfügbar",
             _ => null,
         };
     }
 
-    // ---- Zeichnen ------------------------------------------------------------------------------
     public override void Paint(Renderer g)
     {
         var b = Bounds;
         var root = Root!;
         var page = root.CurrentPage;
+        var m = root.Model;
+        g.Fill(b, Theme.Chrome);
+        g.Fill(new RectF(b.X, b.Bottom - 1, b.W, 1), Theme.Separator);
 
-        // Titel + Untertitel
         float tx = b.X + Theme.Pad;
         float tw = Renderer.MeasureWidth(page.Title, Theme.LargeTitle);
-        g.Text(page.Title, new RectF(tx, b.Y, tw + 4, b.H), Theme.LargeTitle, Theme.Text, HAlign.Left, VAlign.Middle, false);
         var ar = AudioRect;
-        float right = (ar.IsEmpty ? MenuRect.X : ar.X) - 12;
+        var sr = SnapshotRect;
+        var pr = PanicRect;
+        float rightMost = !ar.IsEmpty ? ar.X : !sr.IsEmpty ? sr.X : pr.X;
+        g.Text(page.Title, new RectF(tx, b.Y, Math.Max(40, Math.Min(tw + 4, rightMost - tx - 8)), b.H), Theme.LargeTitle, Theme.Text);
 
-        // Update-Pille (Akzent), nur wenn es etwas gibt
+        float right = rightMost - 12;
         var ur = UpdateRect;
         if (!ur.IsEmpty)
         {
@@ -283,46 +406,55 @@ internal sealed class TopBar : Widget
             right = ur.X - 12;
         }
 
-        // Hinweis-Chips (Demo, Limiter)
-        var m = root.Model;
-        if (m.Engine.LimiterHits > 0)
+        if (m.LimiterHits > 0)
         {
-            string t = $"Limiter {m.Engine.LimiterHits}";
+            string t = $"Limiter {m.LimiterHits}";
             if (right - Draw.ChipWidth(t) > tx + tw + 14)
                 right -= Draw.Chip(g, right, b.CY, t, Theme.Orange, true, null, alignRight: true) + 8;
         }
-        if (m.EngineIsDemo && right - Draw.ChipWidth("Demo-Pegel", false) > tx + tw + 14)
-            right -= Draw.Chip(g, right, b.CY, "Demo-Pegel", Theme.Orange, false, null, alignRight: true) + 8;
 
         string? sub = page.Subtitle;
         if (!string.IsNullOrEmpty(sub))
         {
             float sx = tx + tw + 14;
-            g.Text(sub, new RectF(sx, b.Y + 2, Math.Max(0, right - sx - 8), b.H), Theme.Callout, Theme.TextSecondary, HAlign.Left, VAlign.Middle, true);
+            float available = right - sx - 8;
+            if (available >= 90) g.Text(sub, new RectF(sx, b.Y + 2, available, b.H), Theme.Callout, Theme.TextSecondary);
         }
 
-        // Audio-Status als Pille
+        // Audio / Daemon-Status-Pille
         if (!ar.IsEmpty)
         {
-            var r = ar;
             string t = AudioText(out var c);
             bool hot = _hoverKind == TitleHit.Audio;
-            bool running = m.HostState == HostState.Running;
+            bool running = m.HostState == HostState.Running && m.IsConnected;
             var bg = running ? Theme.Soft(Theme.Green) : m.HostState == HostState.Faulted ? Theme.Soft(Theme.Red) : Theme.Control;
             if (hot) bg = running ? Theme.Green.With(Theme.IsDark ? 0.26f : 0.2f) : Theme.ControlHover;
-            g.FillPill(r, bg);
-            Icons.StatusDot(g, r.X + 16, r.CY, c, 3.5f, running);
-            g.Text(t, new RectF(r.X + 28, r.Y, r.W - 32, r.H), Theme.CalloutMedium, running ? Theme.Text : Theme.TextSecondary, HAlign.Left, VAlign.Middle, false);
+            g.FillPill(ar, bg);
+            Icons.StatusDot(g, ar.X + 16, ar.CY, c, 3.5f, running);
+            g.Text(t, new RectF(ar.X + 28, ar.Y, ar.W - 32, ar.H), Theme.CalloutMedium, running ? Theme.Text : Theme.TextSecondary, HAlign.Left, VAlign.Middle, false);
         }
 
-        // Projekt-Menue
+        // Snapshots-Schnellwahl
+        if (!sr.IsEmpty)
         {
-            var r = MenuRect;
-            bool hot = _hoverKind == TitleHit.Menu || root.Modal is PopupMenu;
-            g.FillRound(r, Theme.RadiusControl, hot ? Theme.ControlHover : Theme.Control);
-            Icons.Draw(g, Icon.Document, r.X + 18, r.CY, 16, Theme.TextSecondary);
-            g.Text("Projekt", new RectF(r.X + 32, r.Y, r.W - 50, r.H), Theme.BodyMedium, Theme.Text);
-            Icons.Draw(g, Icon.ChevronDown, r.Right - 16, r.CY + 0.5f, 13, Theme.TextSecondary);
+            bool hot = _hoverKind == TitleHit.Snapshots || root.Modal is PopupMenu;
+            g.FillRound(sr, Theme.RadiusControl, hot ? Theme.ControlHover : Theme.Control);
+            Icons.Draw(g, Icon.Snapshots, sr.X + 17, sr.CY, 15, m.ActiveSnapshotId.HasValue ? Theme.AccentText : Theme.TextSecondary);
+            g.Text(SnapshotText(), new RectF(sr.X + 31, sr.Y, sr.W - 48, sr.H), Theme.BodyMedium, Theme.Text);
+            Icons.Draw(g, Icon.ChevronDown, sr.Right - 15, sr.CY + 0.5f, 13, Theme.TextSecondary);
+        }
+
+        // Panic-Mute-Schalter
+        {
+            bool muted = m.PanicMuted;
+            bool hot = _hoverKind == TitleHit.PanicMute;
+            var bg = muted
+                ? (hot ? Theme.Mix(Theme.Red, Theme.White, 0.14f) : Theme.Red)
+                : (hot ? Theme.Red.With(Theme.IsDark ? 0.22f : 0.15f) : Theme.Control);
+            var fg = muted ? Theme.White : (hot ? Theme.Red : Theme.TextSecondary);
+            g.FillRound(pr, Theme.RadiusControl, bg);
+            Icons.Draw(g, Icon.Mute, pr.X + 17, pr.CY, 15, fg);
+            g.Text(PanicText, new RectF(pr.X + 30, pr.Y, pr.W - 36, pr.H), Theme.CalloutStrong, fg, HAlign.Left, VAlign.Middle, false);
         }
 
         PaintCaptionButton(g, MinRect, TitleHit.Min, root);
@@ -363,13 +495,13 @@ internal sealed class TopBar : Widget
     }
 }
 
-/// <summary>Kurzmeldungen unten mittig (Apple-Toast) statt einer Statusleiste.</summary>
+/// <summary>Kurzmeldungen unten mittig (Apple-Toast).</summary>
 internal sealed class Toasts : Widget
 {
+    const float FadeIn = 0.15f, FadeOut = 0.35f;
     sealed class Item { public string Text = ""; public bool Error; public float Left, Age; }
     readonly List<Item> _items = new();
 
-    /// <summary>Letzte Meldung (fuer Selbsttest).</summary>
     public string? Last { get; private set; }
     public bool LastWasError { get; private set; }
 
@@ -385,9 +517,15 @@ internal sealed class Toasts : Widget
     public bool Tick(float dt)
     {
         if (_items.Count == 0) return false;
-        foreach (var i in _items) { i.Left -= dt; i.Age += dt; }
-        _items.RemoveAll(i => i.Left <= 0);
-        return true;
+        bool animate = Root?.ReduceMotion != true;
+        bool changed = false;
+        foreach (var i in _items)
+        {
+            i.Left -= dt;
+            changed |= animate && (i.Age < FadeIn || i.Left <= FadeOut);
+            i.Age += dt;
+        }
+        return _items.RemoveAll(i => i.Left <= 0) > 0 || changed;
     }
 
     public override void Paint(Renderer g)
@@ -397,8 +535,9 @@ internal sealed class Toasts : Widget
         for (int k = _items.Count - 1; k >= 0; k--)
         {
             var it = _items[k];
-            float a = Math.Clamp(Math.Min(it.Age / 0.15f, it.Left / 0.35f), 0, 1);
+            float a = Root?.ReduceMotion == true ? 1 : Math.Clamp(Math.Min(it.Age / FadeIn, it.Left / FadeOut), 0, 1);
             float maxW = Math.Min(640, area.W - 40);
+            if (maxW <= 64) break;
             float tw = Renderer.MeasureWidth(it.Text, Theme.BodyMedium);
             bool wrap = tw + 64 > maxW;
             float w = Math.Min(maxW, tw + 64);

@@ -12,5 +12,8 @@
     <Using Include="Xunit" />
     <ProjectReference Include="..\..\src\NxMix.Engine\NxMix.Engine.csproj" />
     <ProjectReference Include="..\..\src\NxMix.Audio\NxMix.Audio.csproj" />
+    <ProjectReference Include="..\..\src\NxMix.Ipc\NxMix.Ipc.csproj" />
+    <ProjectReference Include="..\..\src\NxMix.Daemon\NxMix.Daemon.csproj" />
+    <ProjectReference Include="..\..\src\NxMix.App\NxMix.App.csproj" />
   </ItemGroup>
 </Project>

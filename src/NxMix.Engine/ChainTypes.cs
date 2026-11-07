@@ -45,7 +45,7 @@ internal sealed class ChannelRt
     public Section[] OldSections = Array.Empty<Section>();   // alte Kette, laeuft waehrend der Kreuzblende nach Strukturwechsel weiter
     public int XfadeLeft;       // verbleibende Samples der Kreuzblende alt -> neu (gegen Knacken)
     public bool Stale;          // Filterzustaende veraltet (Kanal wurde uebersprungen)
-    public float GainCur;       // nur Ausgaenge: aktuelle Verstaerkung
+    public float GainCur;       // nur Ausgaenge: aktuelle Verstaerkung (Kanal-Gain * Device-Master * Global-Master)
     public readonly Limiter? Lim;
 
     public ChannelRt(DelayLine delay, Limiter? lim) { Delay = delay; Lim = lim; }
@@ -55,12 +55,20 @@ internal sealed class ChannelRt
 internal sealed class Compiled
 {
     public MixerSettings Settings = null!;
-    /// <summary>Ziel-Verstaerkung je Kreuzungspunkt [o * nIn + i]: Eingangsgain*Mute/Solo*Phase*Master*Matrix.</summary>
+    public int ActiveInputs;
+    public int ActiveOutputs;
+    public int RampFrames;
+    /// <summary>Ziel-Verstaerkung je direktem Kreuzungspunkt [o * capIn + i]: EingangsGain * EingangsDeviceMaster * Matrix * Pan.</summary>
     public float[] Cross = Array.Empty<float>();
+    public CompiledBusPlan? BusPlan;
     public Section[][] InSections = Array.Empty<Section[]>();
     public Section[][] OutSections = Array.Empty<Section[]>();
     public double[] InDelay = Array.Empty<double>();    // Samples
     public double[] OutDelay = Array.Empty<double>();
-    public float[] OutGain = Array.Empty<float>();       // inkl. Mute/Solo/Phase
+    public float[] OutGain = Array.Empty<float>();       // OutChannelGain * OutDeviceMaster * GlobalMaster
     public float[] Ceiling = Array.Empty<float>();       // linear
+    /// <summary>Zuordnung jedes Eingangs-/Ausgangskanals auf seinen DeviceMaster-Index (-1 = keiner) fuer aggregiertes Device-Metering.</summary>
+    public int[] InDeviceIndex = Array.Empty<int>();
+    public int[] OutDeviceIndex = Array.Empty<int>();
+    public int DeviceMasterCount;
 }

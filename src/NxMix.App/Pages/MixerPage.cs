@@ -1,127 +1,124 @@
 using NxMix.App.Model;
 using NxMix.App.Ui;
+using NxMix.Audio;
+using NxMix.Engine;
+using NxMix.Ipc;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Karte "Eingaenge" oder "Ausgaenge": Kopf mit Zahl und Hinzufuegen-Taste, Kanalstreifen, Leerzustand, waagrechtes Scrollen.</summary>
-internal sealed class GroupPanel : Widget
+/// <summary>Horizontale Fader-Bank (für Hauptpult-Sektionen oder ein aktives benutzerdefiniertes Fader-Deck).</summary>
+internal sealed class StripBankPanel : Widget
 {
-    readonly AppModel _m;
-    readonly bool _input;
-    public readonly List<ChannelStrip> Strips = new();
-    public readonly Button AddButton;
-    public readonly Button EmptyMono, EmptyPair;
+    public string Title { get; set; } = "";
+    public Icon EmptyIcon { get; set; } = Icon.Mixer;
+    public string EmptyTitle { get; set; } = "Keine Streifen";
+    public string EmptyBody { get; set; } = "";
+    public readonly List<Widget> Items = new();
+    public readonly List<(int FirstItem, int LastItem, string Label, Color4 Color)> Brackets = new();
+    public readonly Button HeaderAction;
+
     RectF _viewport;
     float _scroll;
-    float _stripW = 80;
+    float _stripW = 90;
     RectF _barTrack, _barThumb;
     bool _dragBar;
     float _dragBarOff;
-    const float HeadH = 52f;
+    const float HeadH = 48f;
+    public const float Inner = 12f;
 
-    public GroupPanel(AppModel m, bool input)
+    public StripBankPanel(string title, string actionText, Icon actionIcon, Action onAction)
     {
-        _m = m; _input = input;
-        string noun = input ? "Eingang" : "Ausgang";
-        AddButton = Add(new Button("Hinzufügen", ButtonStyle.Tinted, Icon.Plus) { Font = Theme.CalloutMedium, Tooltip = $"{noun} oder Stereo-Paar hinzufügen" });
-        AddButton.Clicked += ShowAddMenu;
-        EmptyMono = Add(new Button(noun, ButtonStyle.Filled, Icon.Plus));
-        EmptyPair = Add(new Button("Stereo-Paar", ButtonStyle.Gray, Icon.Plus));
-        EmptyMono.Clicked += AddMono;
-        EmptyPair.Clicked += AddPair;
-        EmptyMono.Tooltip = $"Einen {noun} hinzufügen";
-        EmptyPair.Tooltip = $"Zwei {noun}-Kanäle als Stereo-Paar (L/R) hinzufügen";
+        Title = title;
+        HeaderAction = Add(new Button(actionText, ButtonStyle.Tinted, actionIcon) { Font = Theme.CalloutMedium });
+        HeaderAction.Clicked += onAction;
     }
 
-    void AddMono() => _m.AddChannels(_input, 1);
-    void AddPair() => _m.AddChannels(_input, 2, _m.NextPairNames(_input));
-
-    void ShowAddMenu()
+    public void ClearItems()
     {
-        var root = Root; if (root == null) return;
-        string noun = _input ? "Eingang" : "Ausgang";
-        PopupMenu.Show(root, AddButton.Bounds, new List<MenuItem>
-        {
-            new($"{noun} (mono)", null, AddMono) { Icon = _input ? Icon.Mic : Icon.Speaker },
-            new("Stereo-Paar (L/R)", null, AddPair) { Icon = Icon.Plus },
-        }, 220);
+        foreach (var w in Items) { Children.Remove(w); w.Parent = null; }
+        Items.Clear();
+        Brackets.Clear();
     }
 
-    public int Count => _input ? _m.InputCount : _m.OutputCount;
-    public string Title => _input ? "Eingänge" : "Ausgänge";
-
-    public void Rebuild()
+    public T AddStrip<T>(T w) where T : Widget
     {
-        foreach (var s in Strips) Children.Remove(s);
-        Strips.Clear();
-        for (int i = 0; i < Count; i++)
+        Items.Add(w);
+        Children.Insert(0, w);
+        w.Parent = this;
+        return w;
+    }
+
+    public void SetStripWidth(float w) => _stripW = w;
+
+    float WidthOf(Widget w) => w is DeckSpacerWidget ? 26f : _stripW;
+
+    public float ContentWidth
+    {
+        get
         {
-            var s = new ChannelStrip(_m, _input, i);
-            Strips.Add(s);
-            Children.Insert(0, s);
-            s.Parent = this;
-            s.Sync();
+            if (Items.Count == 0) return 0;
+            float sum = 0;
+            for (int i = 0; i < Items.Count; i++) sum += WidthOf(Items[i]) + (i > 0 ? Theme.StripGap : 0);
+            return sum;
         }
     }
 
-    public void SyncAll() { foreach (var s in Strips) s.Sync(); }
-    public void SetStripWidth(float w) => _stripW = w;
-    float ContentWidth => Count * _stripW + Math.Max(0, Count - 1) * Theme.StripGap;
-    public static float Inner => 12f;
+    public bool NeedsScrollbar => ContentWidth > Bounds.W - 2 * Inner + 0.5f;
+
+    public void RevealItem(int idx)
+    {
+        if (idx < 0 || idx >= Items.Count) return;
+        float x = 0;
+        for (int i = 0; i < idx; i++) x += WidthOf(Items[i]) + Theme.StripGap;
+        float w = WidthOf(Items[idx]);
+        if (x < _scroll) _scroll = x;
+        else if (x + w > _scroll + _viewport.W) _scroll = x + w - _viewport.W;
+        Layout();
+    }
 
     public override void Layout()
     {
         var b = Bounds;
-        bool empty = Count == 0;
-        AddButton.Visible = !empty;
-        EmptyMono.Visible = EmptyPair.Visible = empty;
-        float bw = AddButton.PreferredWidth;
-        AddButton.Bounds = new RectF(b.Right - Theme.CardPad - bw + 4, b.Y + (HeadH - Theme.ControlHSmall) / 2 + 2, bw, Theme.ControlHSmall);
+        float bw = Math.Min(HeaderAction.PreferredWidth, Math.Max(36, b.W - 140));
+        HeaderAction.Bounds = new RectF(b.Right - Theme.CardPad - bw + 4, b.Y + (HeadH - Theme.ControlHSmall) / 2, bw, Theme.ControlHSmall);
 
-        var emptyArea = RectF.FromLTRB(b.X, b.Y + HeadH, b.Right, b.Bottom);
-        float eh = Draw.EmptyHeight(b.W, EmptyBody) + 8 + Theme.ControlH;
-        float ey = emptyArea.Y + Math.Max(10, (emptyArea.H - eh) / 2);
-        float btnY = ey + Draw.EmptyHeight(b.W, EmptyBody) + 4;
-        float w1 = EmptyMono.PreferredWidth + 10, w2 = EmptyPair.PreferredWidth + 10;
-        float x0 = b.CX - (w1 + w2 + 10) / 2;
-        EmptyMono.Bounds = new RectF(x0, btnY, w1, Theme.ControlH);
-        EmptyPair.Bounds = new RectF(x0 + w1 + 10, btnY, w2, Theme.ControlH);
-        _emptyY = ey;
-
-        float top = b.Y + HeadH;
-        float barH = ContentWidth > b.W - 2 * Inner + 0.5f ? 14 : 0;
-        _viewport = new RectF(b.X + Inner, top, b.W - 2 * Inner, Math.Max(0, b.Bottom - Inner - top - barH));
+        float top = b.Y + HeadH + (Brackets.Count > 0 ? 10f : 0f);
+        float barH = NeedsScrollbar ? 14f : 0f;
+        _viewport = new RectF(b.X + Inner, top, Math.Max(0, b.W - 2 * Inner), Math.Max(0, b.Bottom - Inner - top - barH));
         float maxScroll = Math.Max(0, ContentWidth - _viewport.W);
         _scroll = Math.Clamp(_scroll, 0, maxScroll);
+
         float x = _viewport.X - _scroll;
-        foreach (var s in Strips)
+        foreach (var s in Items)
         {
-            s.Bounds = new RectF(x, _viewport.Y, _stripW, _viewport.H);
+            float sw = WidthOf(s);
+            s.Bounds = new RectF(x, _viewport.Y, sw, _viewport.H);
             s.Layout();
-            x += _stripW + Theme.StripGap;
+            x += sw + Theme.StripGap;
         }
-        if (barH > 0)
+
+        if (NeedsScrollbar && _viewport.W > 0 && ContentWidth > 0)
         {
-            _barTrack = new RectF(_viewport.X, _viewport.Bottom + 6, _viewport.W, 6);
-            float tw = Math.Max(40, _barTrack.W * _viewport.W / ContentWidth);
+            _barTrack = new RectF(_viewport.X, _viewport.Bottom + 5, _viewport.W, 6);
+            float tw = Math.Min(_barTrack.W * 0.85f, Math.Max(36, _barTrack.W * _viewport.W / ContentWidth));
             float tx = _barTrack.X + (_barTrack.W - tw) * (maxScroll <= 0 ? 0 : _scroll / maxScroll);
             _barThumb = new RectF(tx, _barTrack.Y, tw, 6);
         }
         else _barTrack = _barThumb = default;
     }
 
-    float _emptyY;
-
     public override Widget? HitTest(float x, float y)
     {
         if (!Visible || !Bounds.Contains(x, y)) return null;
-        for (int i = Children.Count - 1; i >= 0; i--)
+        if (HeaderAction.Visible && HeaderAction.Bounds.Contains(x, y)) return HeaderAction;
+        if (_viewport.Contains(x, y))
         {
-            var c = Children[i];
-            if (c is ChannelStrip && !_viewport.Contains(x, y)) continue;
-            var h = c.HitTest(x, y);
-            if (h != null) return h;
+            for (int i = Items.Count - 1; i >= 0; i--)
+            {
+                var h = Items[i].HitTest(x, y);
+                if (h != null) return h;
+            }
         }
         return this;
     }
@@ -130,7 +127,7 @@ internal sealed class GroupPanel : Widget
 
     public override void OnMouseDown(in MouseEvent e)
     {
-        if (_barThumb.W > 0 && _barTrack.Inflate(5).Contains(e.X, e.Y))
+        if (e.Button == 0 && _barThumb.W > 0 && _barTrack.Inflate(5).Contains(e.X, e.Y))
         {
             _dragBar = true;
             _dragBarOff = _barThumb.Contains(e.X, e.Y) ? e.X - _barThumb.X : _barThumb.W / 2;
@@ -153,215 +150,485 @@ internal sealed class GroupPanel : Widget
 
     public override bool OnMouseWheel(in MouseEvent e)
     {
-        // Rad ueber Fadern verbrauchen diese; hier landen nur freie Stellen.
         if (ContentWidth <= _viewport.W) return false;
         _scroll = Math.Clamp(_scroll - e.Wheel * 70, 0, Math.Max(0, ContentWidth - _viewport.W));
         Layout();
         return true;
     }
 
-    /// <summary>Scrollt so, dass Streifen i sichtbar ist.</summary>
-    public void Reveal(int i)
-    {
-        float l = i * (_stripW + Theme.StripGap), r = l + _stripW;
-        if (l < _scroll) _scroll = l;
-        else if (r > _scroll + _viewport.W) _scroll = r - _viewport.W;
-        Layout();
-    }
-
     public override void Paint(Renderer g)
     {
         var b = Bounds;
         Draw.Card(g, b);
-        Draw.CardTitle(g, new RectF(b.X + Theme.CardPad, b.Y + 2, 200, HeadH), Title, Count > 0 ? Count : null);
+        Draw.CardTitle(g, new RectF(b.X + Theme.CardPad, b.Y + 2, Math.Max(60, HeaderAction.Bounds.X - b.X - 24), HeadH),
+            Title, Items.Count > 0 ? Items.Count : null);
 
-        if (Count == 0)
+        if (Items.Count == 0)
         {
-            Draw.Empty(g, b, _emptyY, _input ? Icon.Mic : Icon.Speaker, _input ? "Noch keine Eingänge" : "Noch keine Ausgänge", EmptyBody);
-            PaintChildrenExceptStrips(g);
+            float ey = b.Y + HeadH + Math.Max(12, (b.H - HeadH - Draw.EmptyHeight(b.W, EmptyBody)) / 2);
+            Draw.Empty(g, b, ey, EmptyIcon, EmptyTitle, EmptyBody);
+            if (HeaderAction.Visible) HeaderAction.Paint(g);
             return;
         }
 
-        g.PushClip(_viewport.Inflate(2));
-        foreach (var s in Strips) if (s.Bounds.Right > _viewport.X && s.Bounds.X < _viewport.Right) s.Paint(g);
-        if (_input)
+        g.PushClip(new RectF(_viewport.X - 2, _viewport.Y - 12, _viewport.W + 4, _viewport.H + 14));
+        foreach (var br in Brackets)
         {
-            // Stereo-App-Links: eine Bruecke verbindet die Koepfe des Paares
-            foreach (var l in _m.AppLinks)
-            {
-                for (int k = l.FirstChannel; k < l.End - 1 && k + 1 < Strips.Count; k++)
-                {
-                    var a = Strips[k].Header.Bounds; var c = Strips[k + 1].Header.Bounds;
-                    var col = _m.AppLinksEnabled ? LinkLook.Color(_m.ViewOf(l).State) : Theme.BorderStrong;
-                    g.FillPill(new RectF(a.Right - 2, a.Y + 3, c.X - a.Right + 4, 3), col);
-                }
-            }
+            if (br.FirstItem < 0 || br.LastItem >= Items.Count || br.FirstItem > br.LastItem) continue;
+            float x1 = Items[br.FirstItem].Bounds.X + 4;
+            float x2 = Items[br.LastItem].Bounds.Right - 4;
+            if (x2 > x1)
+                g.FillPill(new RectF(x1, _viewport.Y - 7, x2 - x1, 3.5f), br.Color.With(0.75f));
         }
+        foreach (var s in Items)
+            if (s.Bounds.Right > _viewport.X && s.Bounds.X < _viewport.Right)
+                s.Paint(g);
         g.PopClip();
-        if (_barTrack.W > 0) g.FillPill(_barThumb, _dragBar ? Theme.TextSecondary.With(0.8f) : Theme.TextTertiary.With(0.5f));
-        PaintChildrenExceptStrips(g);
-    }
 
-    void PaintChildrenExceptStrips(Renderer g)
-    {
-        foreach (var c in Children) if (c.Visible && c is not ChannelStrip) c.Paint(g);
+        if (_barTrack.W > 0)
+            g.FillPill(_barThumb, _dragBar ? Theme.TextSecondary.With(0.8f) : Theme.TextTertiary.With(0.5f));
+        if (HeaderAction.Visible) HeaderAction.Paint(g);
     }
-
-    string EmptyBody => _input
-        ? "Eingänge sind deine Signalquellen. Lege sie hier an und weise ihnen auf der Seite „Geräte“ eine Aufnahme-Quelle zu – oder binde ein Programm per App-Link."
-        : "Ausgänge gehen an Lautsprecher und Endstufen. Die Matrix verteilt die Eingänge darauf. Für Hochtöner lässt sich pro Kanal eine Gain-Sperre setzen.";
 }
 
-/// <summary>Mixer: Eingaenge, Ausgaenge und Master nebeneinander (Anordnung wie Mixing Station).</summary>
+internal sealed class DeckSpacerWidget : Widget
+{
+    readonly string? _label;
+    public DeckSpacerWidget(string? label = null) => _label = label;
+    public override void Paint(Renderer g)
+    {
+        var b = Bounds;
+        g.FillRound(new RectF(b.CX - 1, b.Y + 14, 2, Math.Max(10, b.H - 28)), 1, Theme.Separator);
+        if (!string.IsNullOrWhiteSpace(_label))
+            g.Text(_label!, new RectF(b.X, b.Y + 2, b.W, 14), Theme.Micro, Theme.TextTertiary, HAlign.Center);
+    }
+}
+
+internal sealed class MasterContainerWidget : Widget { }
+
+/// <summary>Haupt-Mischpult-Seite im Mixing-Station-Stil:
+/// Oben Deck-Schnellwahl („Hauptpult (Geräte)“ + eigene Fader-Decks + Kompakt/Detailliert).
+/// Im Hauptpult erscheint pro Mehrkanal-Gerät / VAIO genau 1 DeviceMasterStrip mit Inline-Ausklappung der Einzelkanäle.</summary>
 internal sealed class MixerPage : Page
 {
     readonly AppModel _m;
-    readonly GroupPanel _in, _out;
-    readonly MasterPanel _masterPanel = new();
-    readonly ChannelStrip _master;
-    readonly DeckWorkspace _decks;
-    float[] _inPeaks = Array.Empty<float>();
-    float[] _outPeaks = Array.Empty<float>();
+    readonly StripBankPanel _inBank;
+    readonly StripBankPanel _busBank;
+    readonly StripBankPanel _outBank;
+    readonly StripBankPanel _customDeckBank;
+    readonly MasterContainerWidget _masterCard = new();
+    readonly ChannelStrip _masterStrip;
+
+    readonly List<Button> _deckButtons = new();
+    readonly Button _manageDecksBtn = new("Decks …", ButtonStyle.Gray, Icon.Decks) { Font = Theme.CalloutMedium };
+    readonly Segmented _densitySeg = new("Detailliert", "Kompakt") { Font = Theme.CaptionMedium };
+    bool _compactMain;
 
     public override string Title => "Mixer";
     public override Icon Icon => Icon.Mixer;
-    public override string? Subtitle => _m.InputCount + _m.OutputCount == 0 ? null
-        : $"{Fmt.Inputs(_m.InputCount)}  ·  {Fmt.Outputs(_m.OutputCount)}  ·  Klick auf einen Kanalnamen öffnet seine Einstellungen";
-    internal GroupPanel Inputs => _in;
-    internal GroupPanel Outputs => _out;
-    internal ChannelStrip Master => _master;
+    public override string? Subtitle =>
+        $"{Fmt.Inputs(_m.InputCount)}  ·  {_m.BusCount} Busse  ·  {Fmt.Outputs(_m.OutputCount)}";
 
-    sealed class MasterPanel : Widget
-    {
-        public override void Paint(Renderer g)
-        {
-            Draw.Card(g, Bounds);
-            Draw.CardTitle(g, new RectF(Bounds.X + Theme.CardPad, Bounds.Y + 2, 100, 52), "Master");
-            PaintChildren(g);
-        }
-    }
+    internal IReadOnlyList<ChannelStrip> InputChannelStrips => _inBank.Items.OfType<ChannelStrip>().ToList();
+    internal IReadOnlyList<ChannelStrip> OutputChannelStrips => _outBank.Items.OfType<ChannelStrip>().ToList();
+    internal ChannelStrip Master => _masterStrip;
 
     public MixerPage(AppModel m)
     {
         _m = m;
-        _in = Add(new GroupPanel(m, true));
-        _out = Add(new GroupPanel(m, false));
-        Add(_masterPanel);
-        _master = _masterPanel.Add(new ChannelStrip(m, false, 0, master: true));
-        _decks = Add(new DeckWorkspace(m));
-        m.StructureChanged += Rebuild;
+        _inBank = Add(new StripBankPanel("Eingänge & Quellen", "+ Kanal", Icon.Plus, () => ShowAddChannelMenu(true))
+        {
+            EmptyIcon = Icon.Mic,
+            EmptyTitle = "Noch keine Eingänge",
+            EmptyBody = "Binde auf „Geräte“ ein Audio-Interface ein, aktiviere unter „Virtual I/O“ ein App-Capture oder lege einen Kanal an.",
+        });
+        _busBank = Add(new StripBankPanel("Busse", "+ Bus", Icon.Plus, () => _m.AddBus(2))
+        {
+            EmptyIcon = Icon.Matrix,
+            EmptyTitle = "Keine Busse",
+            EmptyBody = "Lege Stereo- oder Subgruppen-Busse für gemeinsames Routing an.",
+        });
+        _outBank = Add(new StripBankPanel("Ausgänge", "+ Ausgang", Icon.Plus, () => ShowAddChannelMenu(false))
+        {
+            EmptyIcon = Icon.Speaker,
+            EmptyTitle = "Noch keine Ausgänge",
+            EmptyBody = "Wähle unter „Geräte“ dein Ausgabegerät (ASIO oder WASAPI), um sofort einen Geräte-Master samt Einzelkanälen zu erhalten.",
+        });
+        _customDeckBank = Add(new StripBankPanel("Deck", "Deck bearbeiten", Icon.Edit, () => Root?.SwitchPage(UiRoot.TabDecks))
+        {
+            EmptyIcon = Icon.Decks,
+            EmptyTitle = "Dieses Fader-Deck ist noch leer",
+            EmptyBody = "Füge im Tab „Decks“ beliebige Geräte-Master, Einzelkanäle, Busse oder Virtual-I/O-Slots hinzu.",
+        });
+
+        Add(_masterCard);
+        _masterStrip = _masterCard.Add(new ChannelStrip(m, false, 0, master: true));
+
+        Add(_manageDecksBtn);
+        Add(_densitySeg);
+        _manageDecksBtn.Clicked += () => Root?.SwitchPage(UiRoot.TabDecks);
+        _densitySeg.Changed += idx =>
+        {
+            if (_m.ActiveCustomDeck is { } cd)
+                _m.UpdateDeck(cd.Id, d => d with { Density = idx == 1 ? DeckDensity.Compact : DeckDensity.Detailed });
+            else
+            {
+                _compactMain = idx == 1;
+                Layout();
+                Invalidate();
+            }
+        };
+
+        m.StructureChanged += RebuildAll;
+        m.DecksChanged += RebuildAll;
         m.ValuesChanged += SyncAll;
         m.HostChanged += SyncAll;
-        Rebuild();
+        RebuildAll();
     }
 
-    void Rebuild()
+    void ShowAddChannelMenu(bool input)
     {
-        _in.Rebuild();
-        _out.Rebuild();
-        _master.Sync();
-        _inPeaks = new float[_m.InputCount];
-        _outPeaks = new float[_m.OutputCount];
-        LayoutPanels();
+        if (Root is not { } root) return;
+        string noun = input ? "Eingang" : "Ausgang";
+        PopupMenu.Show(root, (input ? _inBank : _outBank).HeaderAction.Bounds, new List<MenuItem>
+        {
+            new($"{noun} (Mono)", null, () => _m.AddChannels(input, 1)) { Icon = input ? Icon.Mic : Icon.Speaker },
+            new($"Stereo-Paar (L/R)", null, () => _m.AddChannels(input, 2, _m.NextPairNames(input))) { Icon = Icon.Plus },
+            MenuItem.Sep,
+            new("Hardware-Gerät einbinden …", "Strg+3", () => root.SwitchPage(UiRoot.TabDevices)) { Icon = Icon.Devices },
+            new("App / Virtual Cable einbinden …", "Strg+5", () => root.SwitchPage(UiRoot.TabVirtualIo)) { Icon = Icon.Vaio },
+        }, 240);
+    }
+
+    public ChannelSheet? OpenSheet(bool input, int index)
+    {
+        if (Root == null) return null;
+        int count = input ? _m.InputCount : _m.OutputCount;
+        if (count == 0) return null;
+        index = Math.Clamp(index, 0, count - 1);
+        return ChannelSheet.Show(Root, _m, input, index);
+    }
+
+    void RebuildAll()
+    {
+        RebuildDeckBarButtons();
+        if (_m.ActiveCustomDeck is { } customDeck)
+            RebuildCustomDeck(customDeck);
+        else
+            RebuildMainConsole();
+        SyncAll();
+        Layout();
         Invalidate();
+    }
+
+    void RebuildDeckBarButtons()
+    {
+        foreach (var b in _deckButtons) { Children.Remove(b); b.Parent = null; }
+        _deckButtons.Clear();
+
+        bool mainActive = _m.ActiveCustomDeck == null;
+        var mainBtn = Add(new Button("Hauptpult (Geräte)", mainActive ? ButtonStyle.Filled : ButtonStyle.Gray) { Font = Theme.CalloutMedium });
+        mainBtn.Clicked += () => _m.SelectDeck(null);
+        _deckButtons.Add(mainBtn);
+
+        foreach (var d in _m.Decks.Decks.Where(x => x.VisibleInTopBar))
+        {
+            var deck = d;
+            bool active = _m.Decks.ActiveDeckId == deck.Id;
+            var btn = Add(new Button(deck.Name, active ? ButtonStyle.Filled : ButtonStyle.Gray) { Font = Theme.CalloutMedium });
+            btn.Clicked += () => _m.SelectDeck(deck.Id);
+            _deckButtons.Add(btn);
+        }
+
+        var plusBtn = Add(new Button("+ Deck", ButtonStyle.Tinted) { Font = Theme.CalloutMedium, Tooltip = "Neues Fader-Deck anlegen" });
+        plusBtn.Clicked += () =>
+        {
+            _m.CreateDeck();
+            Root?.SwitchPage(UiRoot.TabDecks);
+        };
+        _deckButtons.Add(plusBtn);
+    }
+
+    void RebuildMainConsole()
+    {
+        _inBank.ClearItems();
+        _busBank.ClearItems();
+        _outBank.ClearItems();
+
+        PopulateDeviceGroupedBank(_inBank, isInput: true);
+        PopulateDeviceGroupedBank(_outBank, isInput: false);
+
+        foreach (var bus in _m.Settings.Buses)
+            _busBank.AddStrip(new BusStrip(_m, bus.Id));
+    }
+
+    void PopulateDeviceGroupedBank(StripBankPanel bank, bool isInput)
+    {
+        var channels = isInput ? _m.Settings.Inputs : _m.Settings.Outputs;
+        var handled = new bool[channels.Count];
+
+        // Alle bekannten Geräte-Master in Richtung (Hardware + VAIO)
+        var groups = new List<(Guid Id, string Title)>();
+        foreach (var d in _m.Config.Devices.Where(d => (d.Flow == DeviceFlow.Capture) == isInput))
+            groups.Add((d.Id, d.DisplayTitle));
+        foreach (var v in _m.Config.Vaios.Where(v => (v.Flow == DeviceFlow.Capture) == isInput))
+            groups.Add((v.Id, v.Name));
+        foreach (var dm in _m.Settings.DeviceMasters.Where(dm => dm.IsInput == isInput))
+            if (groups.All(g => g.Id != dm.Id))
+                groups.Add((dm.Id, string.IsNullOrWhiteSpace(dm.Name) ? "Gerät" : dm.Name));
+
+        foreach (var (devId, title) in groups)
+        {
+            var memberIndices = new List<int>();
+            for (int i = 0; i < channels.Count; i++)
+            {
+                if (channels[i].DeviceId == devId)
+                {
+                    memberIndices.Add(i);
+                    handled[i] = true;
+                }
+            }
+            if (memberIndices.Count == 0 && _m.Config.Devices.All(d => d.Id != devId) && _m.Config.Vaios.All(v => v.Id != devId))
+                continue;
+
+            int firstSlot = bank.Items.Count;
+            Guid capturedId = devId;
+            bank.AddStrip(new DeviceMasterStrip(
+                _m,
+                capturedId,
+                title,
+                isInput,
+                memberIndices.Count,
+                () => _m.IsMainDeviceExpanded(capturedId),
+                () => _m.ToggleMainDeviceExpanded(capturedId)));
+
+            if (_m.IsMainDeviceExpanded(capturedId) && memberIndices.Count > 0)
+            {
+                foreach (int chIdx in memberIndices)
+                    bank.AddStrip(new ChannelStrip(_m, isInput, chIdx));
+                int lastSlot = bank.Items.Count - 1;
+                bank.Brackets.Add((firstSlot, lastSlot, title, isInput ? Theme.Teal : Theme.Accent));
+            }
+        }
+
+        // Übrige Kanäle ohne Geräte-Zugehörigkeit (z. B. App-Links oder manuelle Einzelkanäle)
+        for (int i = 0; i < channels.Count; i++)
+        {
+            if (!handled[i])
+                bank.AddStrip(new ChannelStrip(_m, isInput, i));
+        }
+    }
+
+    void RebuildCustomDeck(UiDeckDefinition deck)
+    {
+        _customDeckBank.Title = $"Deck: {deck.Name}";
+        _customDeckBank.ClearItems();
+
+        foreach (var item in deck.Items)
+        {
+            var slot = item;
+            switch (slot.Kind)
+            {
+                case DeckItemKind.DeviceMaster:
+                case DeckItemKind.VaioSlot:
+                    {
+                        var dm = _m.GetDeviceMaster(slot.TargetId);
+                        var devNode = _m.Config.Devices.FirstOrDefault(d => d.Id == slot.TargetId);
+                        var vaio = _m.Config.Vaios.FirstOrDefault(v => v.Id == slot.TargetId);
+                        bool isInput = dm?.IsInput ?? (devNode != null ? devNode.Flow == DeviceFlow.Capture : vaio?.Flow == DeviceFlow.Capture);
+                        string title = slot.CustomLabel ?? devNode?.DisplayTitle ?? vaio?.Name ?? dm?.Name ?? "Gerät";
+                        var chList = isInput ? _m.Settings.Inputs : _m.Settings.Outputs;
+                        var members = Enumerable.Range(0, chList.Count).Where(idx => chList[idx].DeviceId == slot.TargetId).ToList();
+
+                        int first = _customDeckBank.Items.Count;
+                        _customDeckBank.AddStrip(new DeviceMasterStrip(
+                            _m,
+                            slot.TargetId,
+                            title,
+                            isInput,
+                            members.Count,
+                            () => slot.ExpandedInline,
+                            () => _m.ToggleDeckSlotExpanded(deck.Id, slot.ItemId)));
+
+                        if (slot.ExpandedInline && members.Count > 0)
+                        {
+                            foreach (int chIdx in members)
+                                _customDeckBank.AddStrip(new ChannelStrip(_m, isInput, chIdx));
+                            _customDeckBank.Brackets.Add((first, _customDeckBank.Items.Count - 1, title, isInput ? Theme.Teal : Theme.Accent));
+                        }
+                        break;
+                    }
+                case DeckItemKind.InputChannel:
+                    {
+                        int idx = IndexOfChannel(_m.Settings.Inputs, slot.TargetId);
+                        if (idx >= 0) _customDeckBank.AddStrip(new ChannelStrip(_m, true, idx) { CustomDeckLabel = slot.CustomLabel });
+                        break;
+                    }
+                case DeckItemKind.OutputChannel:
+                    {
+                        int idx = IndexOfChannel(_m.Settings.Outputs, slot.TargetId);
+                        if (idx >= 0) _customDeckBank.AddStrip(new ChannelStrip(_m, false, idx) { CustomDeckLabel = slot.CustomLabel });
+                        break;
+                    }
+                case DeckItemKind.MixBus:
+                    if (_m.Settings.Buses.Any(b => b.Id == slot.TargetId))
+                        _customDeckBank.AddStrip(new BusStrip(_m, slot.TargetId));
+                    break;
+                case DeckItemKind.Spacer:
+                    _customDeckBank.AddStrip(new DeckSpacerWidget(slot.CustomLabel));
+                    break;
+            }
+        }
+    }
+
+    static int IndexOfChannel(IReadOnlyList<ChannelDsp> list, Guid id)
+    {
+        for (int i = 0; i < list.Count; i++) if (list[i].Id == id) return i;
+        return -1;
     }
 
     void SyncAll()
     {
-        _in.SyncAll();
-        _out.SyncAll();
-        _master.Sync();
+        void SyncBank(StripBankPanel bank)
+        {
+            foreach (var w in bank.Items)
+            {
+                if (w is ChannelStrip cs) cs.Sync();
+                else if (w is DeviceMasterStrip dms) dms.Sync();
+                else if (w is BusStrip bs) bs.Sync();
+            }
+        }
+        SyncBank(_inBank);
+        SyncBank(_busBank);
+        SyncBank(_outBank);
+        SyncBank(_customDeckBank);
+        _masterStrip.Sync();
         Invalidate();
     }
 
-    public override void OnShow() { LayoutPanels(); SyncAll(); }
+    public override void OnShow() { SyncAll(); Layout(); }
 
-    /// <summary>Oeffnet das Kanal-Blatt (Screenshots, Selbsttest).</summary>
-    public ChannelSheet? OpenSheet(bool input, int index)
+    public override void Layout()
     {
-        var g = input ? _in : _out;
-        if (index < 0 || index >= g.Strips.Count || Root == null) return null;
-        g.Reveal(index);
-        return ChannelSheet.Show(Root, _m, input, index);
-    }
+        if (Bounds.W < 20 || Bounds.H < 20) return;
+        var area = new RectF(Bounds.X + Theme.Pad, Bounds.Y + 8, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - Theme.Pad - 8));
+        float barH = Theme.ControlH;
 
-    public override void Layout() => LayoutPanels();
+        // Oben rechts: Kompakt/Detailliert + Decks verwalten
+        float segW = 172f;
+        float manW = _manageDecksBtn.PreferredWidth;
+        _densitySeg.Bounds = new RectF(area.Right - segW, area.Y, segW, barH);
+        _manageDecksBtn.Bounds = new RectF(_densitySeg.Bounds.X - 8 - manW, area.Y, manW, barH);
 
-    void LayoutPanels()
-    {
-        var area = new RectF(Bounds.X + Theme.Pad, Bounds.Y + 2, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - Theme.Pad - 2));
-        _decks.Bounds = area;
-        _decks.Layout();
-        _in.Visible = _out.Visible = _masterPanel.Visible = !_decks.Custom;
-        area = new RectF(area.X, area.Y + DeckWorkspace.HeaderHeight, area.W, Math.Max(0, area.H - DeckWorkspace.HeaderHeight));
-        float gap = Theme.Gap;
-        int ni = _m.InputCount, no = _m.OutputCount;
-        float inner = GroupPanel.Inner, sg = Theme.StripGap;
-        float masterStrip = Theme.Touch ? 104f : 92f;
-        float masterW = masterStrip + 2 * inner;
-        float free = area.W - masterW - 2 * gap;
-        const float emptyW = 380f;
+        bool compact = _m.ActiveCustomDeck is { } cd ? cd.Density == DeckDensity.Compact : _compactMain;
+        _densitySeg.SetSelected(compact ? 1 : 0);
 
-        float s, win, wout;
-        if (ni == 0 && no == 0)
+        float bx = area.X;
+        float maxBtnRight = _manageDecksBtn.Bounds.X - 10;
+        foreach (var btn in _deckButtons)
         {
-            s = 80; win = wout = free / 2;
+            float w = Math.Min(180, btn.PreferredWidth);
+            if (bx + w > maxBtnRight) { btn.Visible = false; continue; }
+            btn.Visible = true;
+            btn.Bounds = new RectF(bx, area.Y, w, barH);
+            bx += w + 6;
+        }
+
+        var body = new RectF(area.X, area.Y + barH + 10, area.W, Math.Max(0, area.H - barH - 10));
+        float stripW = compact ? (Theme.Touch ? 82f : 68f) : (Theme.Touch ? 104f : 90f);
+        float masterStripW = Theme.Touch ? 100f : 88f;
+        float masterCardW = masterStripW + 2 * StripBankPanel.Inner;
+
+        bool isCustom = _m.ActiveCustomDeck != null;
+        _customDeckBank.Visible = isCustom;
+        _inBank.Visible = _outBank.Visible = !isCustom;
+        _busBank.Visible = !isCustom && (_m.BusCount > 0 || body.W >= 1280);
+
+        _masterCard.Bounds = new RectF(body.Right - masterCardW, body.Y, masterCardW, body.H);
+        _masterStrip.Bounds = new RectF(_masterCard.Bounds.X + StripBankPanel.Inner, body.Y + 48, masterStripW, Math.Max(40, body.H - 48 - StripBankPanel.Inner));
+        _masterStrip.Layout();
+
+        float freeW = Math.Max(0, _masterCard.Bounds.X - Theme.Gap - body.X);
+
+        if (isCustom)
+        {
+            _customDeckBank.SetStripWidth(stripW);
+            _customDeckBank.Bounds = new RectF(body.X, body.Y, freeW, body.H);
+            _customDeckBank.Layout();
+            return;
+        }
+
+        _inBank.SetStripWidth(stripW);
+        _busBank.SetStripWidth(stripW);
+        _outBank.SetStripWidth(stripW);
+
+        if (_busBank.Visible)
+        {
+            float minBusW = Math.Min(132f, freeW * 0.24f);
+            float maxBusW = Math.Max(minBusW, freeW * 0.26f);
+            float busDesired = Math.Clamp(2 * StripBankPanel.Inner + Math.Max(1, _busBank.Items.Count) * (stripW + Theme.StripGap), minBusW, maxBusW);
+            float rem = Math.Max(0, freeW - busDesired - 2 * Theme.Gap);
+            float inW = rem * 0.52f;
+            float outW = rem - inW;
+            _inBank.Bounds = new RectF(body.X, body.Y, inW, body.H);
+            _busBank.Bounds = new RectF(_inBank.Bounds.Right + Theme.Gap, body.Y, busDesired, body.H);
+            _outBank.Bounds = new RectF(_busBank.Bounds.Right + Theme.Gap, body.Y, outW, body.H);
+            _busBank.Layout();
         }
         else
         {
-            float fixedW = (ni == 0 ? emptyW : 0) + (no == 0 ? emptyW : 0);
-            float overhead = (ni > 0 ? 2 * inner + (ni - 1) * sg : 0) + (no > 0 ? 2 * inner + (no - 1) * sg : 0);
-            int count = ni + no;
-            s = Theme.Touch ? 104 : 92;
-            const float minPanel = 260f;
-            win = ni > 0 ? Math.Max(minPanel, 2 * inner + ni * s + (ni - 1) * sg) : emptyW;
-            wout = no > 0 ? Math.Max(minPanel, 2 * inner + no * s + (no - 1) * sg) : emptyW;
-            float total = win + wout;
-            if (total > free)
-            {
-                // zu viele Kanaele: die Gruppen teilen sich den Platz im Verhaeltnis, innen wird gescrollt
-                win = Math.Max(Math.Min(260, free / 2), free * win / total);
-                wout = free - win;
-            }
-            else if (total < free)
-            {
-                float left = free - total;
-                if (ni == 0) win += left; else if (no == 0) wout += left;
-            }
+            float rem = Math.Max(0, freeW - Theme.Gap);
+            float inW = rem * 0.52f;
+            float outW = rem - inW;
+            _inBank.Bounds = new RectF(body.X, body.Y, inW, body.H);
+            _outBank.Bounds = new RectF(_inBank.Bounds.Right + Theme.Gap, body.Y, outW, body.H);
         }
-        _in.SetStripWidth(s);
-        _out.SetStripWidth(s);
-        float used = win + wout + masterW + 2 * gap;
-        float startX = area.X;
-        _in.Bounds = new RectF(startX, area.Y, Math.Max(0, win), area.H);
-        _out.Bounds = new RectF(_in.Bounds.Right + gap, area.Y, Math.Max(0, wout), area.H);
-        _masterPanel.Bounds = new RectF(_out.Bounds.Right + gap, area.Y, masterW, area.H);
-        _master.Bounds = new RectF(_masterPanel.Bounds.X + inner, area.Y + 52, masterStrip, area.H - 52 - inner);
-        _in.Layout(); _out.Layout(); _master.Layout();
+        _inBank.Layout();
+        _outBank.Layout();
+    }
+
+    public override void Paint(Renderer g)
+    {
+        Draw.Card(g, _masterCard.Bounds);
+        Draw.CardTitle(g, new RectF(_masterCard.Bounds.X + Theme.CardPad, _masterCard.Bounds.Y + 2, 90, 48), "Master");
+        PaintChildren(g);
     }
 
     public override void Tick(float dt)
     {
         if (!Visible) return;
         bool changed = false;
-        var eng = _m.Engine;
-        if (_inPeaks.Length > 0)
+
+        void FeedBank(StripBankPanel bank)
         {
-            eng.ReadInputPeaks(_inPeaks);
-            for (int i = 0; i < _in.Strips.Count && i < _inPeaks.Length; i++) changed |= _in.Strips[i].FeedMeter(_inPeaks[i], dt);
-        }
-        float max = 0;
-        if (_outPeaks.Length > 0)
-        {
-            eng.ReadOutputPeaks(_outPeaks);
-            for (int i = 0; i < _out.Strips.Count && i < _outPeaks.Length; i++)
+            foreach (var w in bank.Items)
             {
-                changed |= _out.Strips[i].FeedMeter(_outPeaks[i], dt);
-                max = Math.Max(max, _outPeaks[i]);
+                switch (w)
+                {
+                    case ChannelStrip cs when !cs.IsMaster:
+                        float cp = cs.IsInput ? _m.GetInputPeak(cs.Index) : _m.GetOutputPeak(cs.Index);
+                        changed |= cs.FeedMeter(cp, dt);
+                        break;
+                    case DeviceMasterStrip dms:
+                        changed |= dms.FeedMeter(_m.GetDeviceMasterPeak(dms.DeviceId), dt);
+                        break;
+                    case BusStrip bs:
+                        int bIdx = -1;
+                        for (int i = 0; i < _m.Settings.Buses.Count; i++)
+                            if (_m.Settings.Buses[i].Id == bs.BusId) { bIdx = i; break; }
+                        if (bIdx >= 0) changed |= bs.FeedMeter(_m.GetBusPeak(bIdx), dt);
+                        break;
+                }
             }
         }
-        changed |= _master.FeedMeter(max, dt);
-        _decks.FeedMeters(_inPeaks, _outPeaks, dt);
+
+        if (_m.ActiveCustomDeck != null) FeedBank(_customDeckBank);
+        else { FeedBank(_inBank); FeedBank(_busBank); FeedBank(_outBank); }
+
+        float maxOut = 0f;
+        for (int o = 0; o < _m.OutputCount; o++) maxOut = Math.Max(maxOut, _m.GetOutputPeak(o));
+        changed |= _masterStrip.FeedMeter(maxOut, dt);
+
         if (changed) Invalidate();
     }
 }

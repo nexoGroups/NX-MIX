@@ -1,129 +1,285 @@
-using NxMix.Audio;
-using NxMix.Engine;
+using System.Diagnostics;
 using NxMix.App.Ui;
+using NxMix.Audio;
+using NxMix.Daemon;
+using NxMix.Engine;
+using NxMix.Ipc;
 
 namespace NxMix.App.Model;
 
 /// <summary>
-/// Zustand der Anwendung: unveraenderliches MixerSettings (per `with` geaendert), Geraete-Zuordnungen,
-/// Engine und Audio-Host. Alles wird nur auf dem UI-Thread angefasst. Jede Aenderung geht an
-/// IMixerEngine.TrySetSettings; Aenderungen der Kanalzahl/Samplerate erzeugen eine NEUE Engine
-/// (der laufende Host wird dafuer kurz gestoppt und danach wieder gestartet).
+/// Client-Modell der NX-MIX Live-Konsole.
+/// Verbindet sich über <see cref="INxMixBackend"/> mit der eigenständigen Hintergrund-Engine (NxMix.Daemon.exe)
+/// oder nutzt im Headless-Modus (--shot / --selftest) einen In-Process-Controller.
+/// Schließen des Fensters trennt ausschließlich die Client-Verbindung und stoppt NIEMALS Audio oder App-Links!
 /// </summary>
-internal sealed partial class AppModel
+internal sealed class AppModel
 {
     public static readonly int[] SampleRates = { 44100, 48000, 88200, 96000, 176400, 192000 };
-    public static readonly int[] BlockSizes = { 128, 240, 256, 480, 512, 960, 1024 };
-    public const int DefaultSampleRate = 96000;
-    public const int DefaultBlockFrames = 480;
+    public static readonly int[] BlockSizes = { 64, 128, 240, 256, 480, 512, 960, 1024 };
+    public const int DefaultSampleRate = 48000;
+    public const int DefaultBlockFrames = 256;
 
-    readonly Func<MixerSettings, IMixerEngine> _engineFactory;
-    readonly Func<IDeviceCatalog?> _catalogFactory;
-    readonly Func<IAudioHost> _hostFactory;
-    readonly bool _hostAvailable;
-    readonly string? _hostUnavailableReason;
-    IAudioHost? _host;
-    double _pollTimer;
+    readonly INxMixBackend _backend;
+    readonly float[] _inPeaks = new float[DaemonEngineController.PoolMaxInputs];
+    readonly float[] _outPeaks = new float[DaemonEngineController.PoolMaxOutputs];
+    readonly float[] _busPeaks = new float[DaemonEngineController.PoolMaxBuses];
+    readonly float[] _devPeaks = new float[TelemetrySharedBlock.MaxDeviceMasters];
+    readonly float[] _specPreDb = new float[SpectrumAnalyzer.Points];
+    readonly float[] _specPostDb = new float[SpectrumAnalyzer.Points];
+    TelemetrySnapshotFrame _telemetryMeta;
+    long _telemetryFrameSeq;
 
+    public INxMixBackend Backend => _backend;
+    public DaemonRuntimeSnapshot Runtime { get; private set; }
+    public SystemConfig Config { get; private set; }
     public MixerSettings Settings { get; private set; }
-    public IReadOnlyList<DeviceBinding> Bindings { get; private set; } = Array.Empty<DeviceBinding>();
-    public int BlockFrames { get; private set; } = DefaultBlockFrames;
-    public bool Exclusive { get; private set; }
-    public IMixerEngine Engine { get; private set; }
+    public UiDeckCollection Decks { get; private set; }
 
-    public IReadOnlyList<AudioDeviceInfo> Devices { get; private set; } = Array.Empty<AudioDeviceInfo>();
-    public string? DeviceError { get; private set; }
-    public bool DevicesLoading { get; private set; }
-    public IDeviceCatalog? Catalog { get; private set; }
-
-    public HostStats? Stats { get; private set; }
-    public string? HostError { get; private set; }
+    /// <summary>True im Headless-Selbsttest und Screenshot-Lauf: synchrone Ausführung ohne Hintergrund-Race.</summary>
+    public bool RunInline { get; set; }
     public bool HostBusy { get; private set; }
-    /// <summary>Wurde in dieser Sitzung schon "Lautstaerke und Gain-Sperren geprueft?" bestaetigt?</summary>
-    public bool SessionConfirmed { get; set; }
+    public string? HostError { get; private set; }
 
-    /// <summary>Zum Ausfuehren von Code auf dem UI-Thread (vom Fenster gesetzt).</summary>
+    /// <summary>Zum Ausführen von Rückrufen auf dem UI-Thread (von MainWindow gesetzt).</summary>
     public Action<Action> Post { get; set; } = a => a();
+    public Action<string, bool>? Toast { get; set; }
 
-    public event Action? ValuesChanged;     // Pegel/Namen/Tasten: nur Anzeige angleichen
-    public event Action? StructureChanged;  // Kanalzahl, Samplerate, Projekt geladen: Seiten neu aufbauen
+    public event Action? ValuesChanged;
+    public event Action? StructureChanged;
     public event Action? BindingsChanged;
-    public event Action? HostChanged;       // Status/Statistik/Geraeteliste
-    public event Action? Changed;           // irgendetwas Speicherbares hat sich geaendert
+    public event Action? HostChanged;
+    public event Action? DecksChanged;
+    public event Action? SnapshotsChanged;
+    public event Action? Changed;
 
-    public AppModel(MixerSettings initial, IReadOnlyList<DeviceBinding>? bindings,
-        Func<MixerSettings, IMixerEngine> engineFactory, Func<IDeviceCatalog?> catalogFactory,
-        Func<IAudioHost> hostFactory, bool hostAvailable, string? hostUnavailableReason)
+    public AppModel(INxMixBackend backend, UiDeckCollection? initialDecks = null)
     {
-        _engineFactory = engineFactory;
-        _catalogFactory = catalogFactory;
-        _hostFactory = hostFactory;
-        _hostAvailable = hostAvailable;
-        _hostUnavailableReason = hostUnavailableReason;
-        Settings = Sanitize(initial);
-        Bindings = bindings ?? Array.Empty<DeviceBinding>();
-        Engine = engineFactory(Settings);
+        _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        Array.Fill(_specPreDb, SpectrumAnalyzer.FloorDb);
+        Array.Fill(_specPostDb, SpectrumAnalyzer.FloorDb);
+
+        Runtime = _backend.Snapshot;
+        Config = Runtime.Config;
+        Settings = Sanitize(Runtime.Mixer);
+        Decks = initialDecks ?? UiDeckStore.Load();
+        HostError = Runtime.LastError;
+
+        _backend.SnapshotUpdated += snap => Post(() => ApplyIncomingSnapshot(snap));
+        _backend.ConnectionChanged += _ => Post(() => HostChanged?.Invoke());
     }
 
-    /// <summary>Startwerte aus der Projektdatei (ohne Aenderungsmeldung).</summary>
-    public void InitOptions(int blockFrames, bool exclusive)
+    // ---- Echtzeit-Telemetrie (Spitzenpegel & Spektrum) ----------------------------------------
+    public ReadOnlySpan<float> InputPeaks => _inPeaks;
+    public ReadOnlySpan<float> OutputPeaks => _outPeaks;
+    public ReadOnlySpan<float> BusPeaks => _busPeaks;
+    public ReadOnlySpan<float> DeviceMasterPeaks => _devPeaks;
+    public ReadOnlySpan<float> SpectrumPreDb => _specPreDb;
+    public ReadOnlySpan<float> SpectrumPostDb => _specPostDb;
+    public TelemetrySnapshotFrame Telemetry => _telemetryMeta;
+    public long TelemetryFrameSeq => _telemetryFrameSeq;
+
+    public float GetInputPeak(int idx) => (uint)idx < (uint)_inPeaks.Length ? _inPeaks[idx] : 0f;
+    public float GetOutputPeak(int idx) => (uint)idx < (uint)_outPeaks.Length ? _outPeaks[idx] : 0f;
+    public float GetBusPeak(int idx) => (uint)idx < (uint)_busPeaks.Length ? _busPeaks[idx] : 0f;
+    public float GetDeviceMasterPeak(Guid deviceId)
     {
-        BlockFrames = blockFrames > 0 ? blockFrames : DefaultBlockFrames;
-        Exclusive = exclusive;
+        var dms = Settings.DeviceMasters;
+        for (int i = 0; i < dms.Count && i < _devPeaks.Length; i++)
+            if (dms[i].Id == deviceId) return _devPeaks[i];
+        return 0f;
     }
 
-    /// <summary>Nur fuer Screenshots/Selbsttest: Geraeteliste und Host direkt setzen.</summary>
-    public void SetDevicesNow(IReadOnlyList<AudioDeviceInfo> devices) { Devices = devices; DevicesLoading = false; }
-    public void AttachHostForShot(IAudioHost host) { _host = host; Stats = host.GetStats(); }
-
-    public static MixerSettings EmptySettings(int sampleRate = DefaultSampleRate) => MixerSettings.Create(sampleRate, 0, 0);
-
-    // ---- Abfragen ---------------------------------------------------------------------------
+    // ---- Abgeleitete Status-Eigenschaften -----------------------------------------------------
+    public bool IsConnected => _backend.IsConnected;
+    public string ConnectionSummary => _backend.ConnectionSummary;
     public int InputCount => Settings.Inputs.Count;
     public int OutputCount => Settings.Outputs.Count;
-    public bool EngineIsDemo => Engine is DemoEngine;
-    public string EngineName => EngineFactory.Describe(Engine);
-    public bool HostAvailable => _hostAvailable;
-    public string? HostUnavailableReason => _hostUnavailableReason;
-    /// <summary>True waehrend ein Stopp laeuft (Host-Zustand wird dann noch als laufend gemeldet).</summary>
-    public bool HostStopping { get; private set; }
-    public HostState HostState
-    {
-        get
-        {
-            var s = _host?.State ?? HostState.Stopped;
-            return HostBusy && !HostStopping && s == HostState.Stopped ? HostState.Starting : s;
-        }
-    }
+    public int BusCount => Settings.Buses.Count;
+    public bool PanicMuted => Runtime.PanicMuted;
+    public long LimiterHits => Math.Max(_telemetryMeta.LimiterHits, 0);
+    public HostStats Stats => Runtime.HostStats;
+    public HostState HostState => HostBusy && Runtime.HostStats.State == HostState.Stopped ? HostState.Starting : Runtime.HostStats.State;
     public bool HostRunning => HostState is HostState.Running or HostState.Starting;
+
+    public IReadOnlyList<AudioDeviceInfo> DiscoveredDevices => Runtime.DiscoveredDevices;
+    public IReadOnlyList<AudioDeviceInfo> PhysicalDevices => Runtime.DiscoveredDevices.Where(d => !d.IsVirtualEndpoint).ToList();
+    public IReadOnlyList<AudioDeviceInfo> VirtualEndpointDevices => Runtime.DiscoveredDevices.Where(d => d.IsVirtualEndpoint).ToList();
+    public IReadOnlyList<AppSessionInfo> ActiveAppSessions => Runtime.ActiveAppSessions;
+    public IReadOnlyList<AppLinkStatus> AppLinkStatuses => Runtime.AppLinkStatuses;
+    public VaioDriverAvailability VaioAvailability => Runtime.VaioAvailability;
+    public IReadOnlyList<MixSnapshotSummary> Snapshots => Runtime.Snapshots;
+    public Guid? ActiveSnapshotId => Runtime.ActiveSnapshotId;
+    public IReadOnlyList<EngineLogEntry> RecentLogs => Runtime.RecentLogs;
+    public IReadOnlyList<ParallelPathWarning> ParallelWarnings => BusRouting.FindParallelDirectAndBusPaths(Settings);
 
     public ChannelDsp Channel(bool input, int i) => input ? Settings.Inputs[i] : Settings.Outputs[i];
     public static bool IsProtected(ChannelDsp c) => c.MaxGainDb < Theme.ProtectBelowDb;
 
-    /// <summary>Anzeigename: eigener Name oder "Eingang 3" / "Ausgang 5".</summary>
     public string DisplayName(bool input, int i)
     {
-        var n = Channel(input, i).Name;
-        return string.IsNullOrWhiteSpace(n) ? DefaultName(input, i) : n;
+        if (i < 0 || i >= (input ? InputCount : OutputCount)) return DefaultName(input, i);
+        var c = Channel(input, i);
+        if (!string.IsNullOrWhiteSpace(c.Name)) return c.Name;
+        if (input && LinkAt(i) is { } link)
+            return link.Count == 2 ? $"{link.Title} {(i == link.FirstChannel ? "L" : "R")}" : link.Title;
+        return DefaultName(input, i);
     }
+
     public static string DefaultName(bool input, int i) => (input ? "Eingang " : "Ausgang ") + (i + 1);
 
-    // ---- Bereinigung ------------------------------------------------------------------------
+    public string ChannelOwnerTitle(ChannelDsp ch)
+    {
+        if (ch.DeviceId is { } did)
+        {
+            if (Config.Devices.FirstOrDefault(d => d.Id == did) is { } dn) return dn.DisplayTitle;
+            if (Config.Vaios.FirstOrDefault(v => v.Id == did) is { } vn) return vn.Name;
+            if (Settings.DeviceMasters.FirstOrDefault(m => m.Id == did) is { } dm && !string.IsNullOrWhiteSpace(dm.Name)) return dm.Name;
+        }
+        return "";
+    }
+
+    public AudioDeviceInfo? FindDevice(string endpointId) =>
+        Runtime.DiscoveredDevices.FirstOrDefault(d => string.Equals(d.Id, endpointId, StringComparison.OrdinalIgnoreCase));
+
+    // ---- Synchronisation vom Backend ----------------------------------------------------------
+    readonly object _mixerCommitGate = new();
+    bool _mixerInFlight;
+    MixerSettings? _queuedMixer;
+
+    static bool DevicesStructureEqual(IReadOnlyList<AudioDeviceNode> a, IReadOnlyList<AudioDeviceNode> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+            if (a[i].Id != b[i].Id || a[i].ChannelCount != b[i].ChannelCount || a[i].EngineFirstChannel != b[i].EngineFirstChannel || a[i].Enabled != b[i].Enabled)
+                return false;
+        return true;
+    }
+
+    static bool BusesStructureEqual(IReadOnlyList<MixBus> a, IReadOnlyList<MixBus> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+            if (a[i].Id != b[i].Id || a[i].Channels != b[i].Channels)
+                return false;
+        return true;
+    }
+
+    void ApplyIncomingSnapshot(DaemonRuntimeSnapshot snap)
+    {
+        var prevMix = Settings;
+        var prevCfg = Config;
+        bool snapListChanged = Runtime.Snapshots.Count != snap.Snapshots.Count
+            || Runtime.ActiveSnapshotId != snap.ActiveSnapshotId
+            || !Runtime.Snapshots.SequenceEqual(snap.Snapshots);
+
+        bool holdLocalMixer;
+        lock (_mixerCommitGate)
+            holdLocalMixer = !RunInline && (_mixerInFlight || _queuedMixer != null);
+
+        Runtime = snap;
+        Config = snap.Config;
+        if (!holdLocalMixer)
+            Settings = Sanitize(snap.Mixer);
+        HostError = snap.LastError;
+        HostBusy = false;
+
+        bool structure = prevMix.Inputs.Count != Settings.Inputs.Count
+            || prevMix.Outputs.Count != Settings.Outputs.Count
+            || !BusesStructureEqual(prevMix.Buses, Settings.Buses)
+            || prevMix.DeviceMasters.Count != Settings.DeviceMasters.Count
+            || prevMix.SampleRate != Settings.SampleRate
+            || !DevicesStructureEqual(prevCfg.Devices, Config.Devices)
+            || prevCfg.Vaios.Count != Config.Vaios.Count
+            || prevCfg.AppLinks.Count != Config.AppLinks.Count;
+
+        if (structure) StructureChanged?.Invoke();
+        ValuesChanged?.Invoke();
+        BindingsChanged?.Invoke();
+        HostChanged?.Invoke();
+        if (snapListChanged) SnapshotsChanged?.Invoke();
+        Changed?.Invoke();
+    }
+
+    void RunBackend(Func<Task<string?>> call)
+    {
+        if (RunInline)
+        {
+            string? err = call().GetAwaiter().GetResult();
+            ApplyIncomingSnapshot(_backend.Snapshot);
+            if (!string.IsNullOrWhiteSpace(err)) { HostError = err; Toast?.Invoke(err, true); }
+        }
+        else
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    string? err = await call().ConfigureAwait(false);
+                    if (!string.IsNullOrWhiteSpace(err))
+                        Post(() => { HostError = err; Toast?.Invoke(err, true); HostChanged?.Invoke(); });
+                }
+                catch (Exception ex)
+                {
+                    Post(() => { HostError = ex.Message; Toast?.Invoke(ex.Message, true); HostChanged?.Invoke(); });
+                }
+            });
+        }
+    }
+
+    void RunBackendVoid(Func<Task> call)
+    {
+        if (RunInline)
+        {
+            call().GetAwaiter().GetResult();
+            ApplyIncomingSnapshot(_backend.Snapshot);
+        }
+        else
+        {
+            _ = Task.Run(async () =>
+            {
+                try { await call().ConfigureAwait(false); }
+                catch (Exception ex) { Post(() => { HostError = ex.Message; Toast?.Invoke(ex.Message, true); HostChanged?.Invoke(); }); }
+            });
+        }
+    }
+
+    // ---- Bereinigung --------------------------------------------------------------------------
     public static ChannelDsp SanitizeChannel(ChannelDsp c)
     {
         double max = double.IsNaN(c.MaxGainDb) ? Theme.FaderMaxDb : Math.Clamp(c.MaxGainDb, -60.0, Theme.FaderMaxDb);
         double gain = double.IsNaN(c.GainDb) ? 0.0 : c.GainDb;
         if (gain > max) gain = max;
         if (gain < -200 && !double.IsNegativeInfinity(gain)) gain = double.NegativeInfinity;
+        double trim = double.IsNaN(c.TrimDb) || double.IsInfinity(c.TrimDb) ? 0.0 : Math.Clamp(c.TrimDb, -24.0, 24.0);
+        double pan = double.IsNaN(c.Pan) || double.IsInfinity(c.Pan) ? 0.0 : Math.Clamp(c.Pan, -1.0, 1.0);
         double ceil = double.IsNaN(c.CeilingDbfs) ? -1.0 : Math.Clamp(c.CeilingDbfs, -60.0, 0.0);
         double delay = double.IsNaN(c.DelayMs) || double.IsInfinity(c.DelayMs) ? 0.0 : Math.Clamp(c.DelayMs, 0.0, 1000.0);
-        return c with { Name = c.Name ?? "", MaxGainDb = max, GainDb = gain, CeilingDbfs = ceil, DelayMs = delay, Filters = c.Filters ?? Array.Empty<FilterSpec>() };
+        return c with
+        {
+            Name = c.Name ?? "",
+            MaxGainDb = max,
+            GainDb = gain,
+            TrimDb = trim,
+            Pan = pan,
+            CeilingDbfs = ceil,
+            DelayMs = delay,
+            Filters = c.Filters ?? Array.Empty<FilterSpec>(),
+        };
     }
 
     public static MixerSettings Sanitize(MixerSettings s)
     {
         var ins = s.Inputs.Select(SanitizeChannel).ToArray();
         var outs = s.Outputs.Select(SanitizeChannel).ToArray();
+        var dms = (s.DeviceMasters ?? Array.Empty<DeviceMasterDsp>())
+            .Select(d => d with
+            {
+                Name = d.Name ?? "",
+                GainDb = double.IsNaN(d.GainDb) ? 0.0 : Math.Clamp(d.GainDb, -120.0, Theme.FaderMaxDb),
+                DimDb = double.IsNaN(d.DimDb) ? -20.0 : Math.Clamp(d.DimDb, -60.0, 0.0),
+            })
+            .ToArray();
         var m = new double[ins.Length][];
         for (int i = 0; i < ins.Length; i++)
         {
@@ -142,55 +298,192 @@ internal sealed partial class AppModel
         }
         double master = double.IsNaN(s.MasterGainDb) ? 0 : Math.Clamp(s.MasterGainDb, -120.0, Theme.MasterMaxDb);
         int sr = s.SampleRate > 0 ? s.SampleRate : DefaultSampleRate;
-        return s with { SampleRate = sr, Inputs = ins, Outputs = outs, MatrixDb = m, MasterGainDb = master };
+        return s with { SampleRate = sr, DeviceMasters = dms, Inputs = ins, Outputs = outs, MatrixDb = m, MasterGainDb = master };
     }
 
-    // ---- Wertaenderungen (ohne neue Engine) ------------------------------------------------
-    void Commit(MixerSettings s)
+    void CommitMixer(MixerSettings next, bool structural = false)
     {
-        Settings = Sanitize(s);
-        Engine.TrySetSettings(Settings);
+        Settings = Sanitize(next);
+        if (structural) StructureChanged?.Invoke();
         ValuesChanged?.Invoke();
         Changed?.Invoke();
+        var toSend = Settings;
+
+        if (RunInline)
+        {
+            RunBackend(() => _backend.ApplyMixerAsync(toSend));
+            return;
+        }
+
+        lock (_mixerCommitGate)
+        {
+            _queuedMixer = toSend;
+            if (_mixerInFlight) return;
+            _mixerInFlight = true;
+        }
+        _ = Task.Run(DrainMixerCommitsAsync);
     }
 
+    async Task DrainMixerCommitsAsync()
+    {
+        while (true)
+        {
+            MixerSettings? next;
+            lock (_mixerCommitGate)
+            {
+                next = _queuedMixer;
+                _queuedMixer = null;
+                if (next == null)
+                {
+                    _mixerInFlight = false;
+                    break;
+                }
+            }
+
+            try
+            {
+                string? err = await _backend.ApplyMixerAsync(next).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(err))
+                    Post(() => { HostError = err; Toast?.Invoke(err, true); HostChanged?.Invoke(); });
+            }
+            catch (Exception ex)
+            {
+                Post(() => { HostError = ex.Message; Toast?.Invoke(ex.Message, true); HostChanged?.Invoke(); });
+            }
+        }
+    }
+
+    // ---- Kanäle & Stereo-Kopplung (Relative Pegelabstände bleiben gewahrt!) --------------------
     public void UpdateChannel(bool input, int i, Func<ChannelDsp, ChannelDsp> f)
     {
         var list = (input ? Settings.Inputs : Settings.Outputs).ToArray();
         if (i < 0 || i >= list.Length) return;
-        list[i] = f(list[i]);
-        Commit(input ? Settings with { Inputs = list } : Settings with { Outputs = list });
+        var before = list[i];
+        var after = SanitizeChannel(f(before));
+        list[i] = after;
+
+        // Stereo-/Gruppen-Kopplung: relativer dB-Abstand bleibt erhalten, Mute/Solo folgen
+        if (after.LinkGroupId is { } groupId && before.LinkGroupId == groupId)
+        {
+            bool gainChanged = !before.GainDb.Equals(after.GainDb);
+            bool muteChanged = before.Mute != after.Mute;
+            bool soloChanged = before.Solo != after.Solo;
+            double oldFloor = Db.IsOff(before.GainDb) ? -72.0 : before.GainDb;
+            double newFloor = Db.IsOff(after.GainDb) ? -72.0 : after.GainDb;
+            double deltaDb = newFloor - oldFloor;
+
+            if (gainChanged || muteChanged || soloChanged)
+            {
+                for (int k = 0; k < list.Length; k++)
+                {
+                    if (k == i || list[k].LinkGroupId != groupId) continue;
+                    var peer = list[k];
+                    if (gainChanged)
+                    {
+                        double peerDb = Db.IsOff(after.GainDb)
+                            ? double.NegativeInfinity
+                            : Math.Clamp((Db.IsOff(peer.GainDb) ? -72.0 : peer.GainDb) + deltaDb, -72.0, peer.MaxGainDb);
+                        if (peerDb <= -71.5 && Db.IsOff(after.GainDb)) peerDb = double.NegativeInfinity;
+                        peer = peer with { GainDb = peerDb };
+                    }
+                    if (muteChanged) peer = peer with { Mute = after.Mute };
+                    if (soloChanged) peer = peer with { Solo = after.Solo };
+                    list[k] = SanitizeChannel(peer);
+                }
+            }
+        }
+
+        CommitMixer(input ? Settings with { Inputs = list } : Settings with { Outputs = list });
     }
 
-    public void SetMaster(double db) => Commit(Settings with { MasterGainDb = db });
-
-    public void SetMatrix(int i, int o, double db)
+    public void UpdateChannelById(bool input, Guid channelId, Func<ChannelDsp, ChannelDsp> f)
     {
-        if (i < 0 || i >= InputCount || o < 0 || o >= OutputCount) return;
-        var m = (double[][])Settings.MatrixDb.Clone();
-        m[i] = (double[])m[i].Clone();
-        m[i][o] = db;
-        Commit(Settings with { MatrixDb = m });
+        var list = input ? Settings.Inputs : Settings.Outputs;
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (list[i].Id == channelId) { UpdateChannel(input, i, f); return; }
+        }
     }
 
-    // ---- Kanaele: anlegen / loeschen / verschieben (Kanalzahl aendert sich -> neue Engine) -----
-    public void AddChannels(bool input, int count, string[]? names = null)
+    public void TogglePairLink(bool input, int firstIndex)
+    {
+        var list = (input ? Settings.Inputs : Settings.Outputs).ToArray();
+        if (firstIndex < 0 || firstIndex + 1 >= list.Length) return;
+        bool currentlyLinked = list[firstIndex].LinkGroupId.HasValue && list[firstIndex].LinkGroupId == list[firstIndex + 1].LinkGroupId;
+        Guid? nextGroup = currentlyLinked ? null : Guid.NewGuid();
+        list[firstIndex] = list[firstIndex] with { LinkGroupId = nextGroup };
+        list[firstIndex + 1] = list[firstIndex + 1] with { LinkGroupId = nextGroup };
+        CommitMixer(input ? Settings with { Inputs = list } : Settings with { Outputs = list });
+    }
+
+    // ---- Geräte-Master (unabhängige Summen-Gain-Stufe — ändert KEINEN Einzelkanal-GainDb!) ----
+    public DeviceMasterDsp? GetDeviceMaster(Guid deviceId) =>
+        Settings.DeviceMasters.FirstOrDefault(d => d.Id == deviceId);
+
+    public void UpdateDeviceMaster(Guid deviceId, Func<DeviceMasterDsp, DeviceMasterDsp> f, string fallbackName = "", bool isInput = false)
+    {
+        var dms = Settings.DeviceMasters.ToList();
+        int idx = dms.FindIndex(d => d.Id == deviceId);
+        if (idx >= 0) dms[idx] = f(dms[idx]);
+        else dms.Add(f(new DeviceMasterDsp { Id = deviceId, Name = fallbackName, IsInput = isInput }));
+        CommitMixer(Settings with { DeviceMasters = dms });
+    }
+
+    public void SetMaster(double db) => CommitMixer(Settings with { MasterGainDb = db });
+
+    public void SetPanicMute(bool muted) => RunBackendVoid(() => _backend.SetPanicMuteAsync(muted));
+
+    // ---- Kanäle manuell hinzufügen / löschen / verschieben ------------------------------------
+    public void AddChannels(bool input, int count, string[]? names = null, Guid? deviceId = null)
     {
         if (count <= 0) return;
         var ins = Settings.Inputs.ToList();
         var outs = Settings.Outputs.ToList();
         var target = input ? ins : outs;
-        for (int k = 0; k < count; k++) target.Add(new ChannelDsp { Name = names != null && k < names.Length ? names[k] : "" });
-        ApplyStructural(Settings with { Inputs = ins, Outputs = outs, MatrixDb = ResizeMatrix(Settings.MatrixDb, ins.Count, outs.Count) }, Bindings);
+        for (int k = 0; k < count; k++)
+        {
+            target.Add(new ChannelDsp
+            {
+                DeviceId = deviceId,
+                DeviceChannelIndex = k,
+                Name = names != null && k < names.Length ? names[k] : "",
+            });
+        }
+        CommitMixer(Settings with
+        {
+            Inputs = ins,
+            Outputs = outs,
+            MatrixDb = ResizeMatrix(Settings.MatrixDb, ins.Count, outs.Count),
+        }, structural: true);
     }
 
-    /// <summary>Name fuer ein neues Stereo-Paar ("Stereo 1 L"/"Stereo 1 R" usw.).</summary>
     public string[] NextPairNames(bool input)
     {
         var list = input ? Settings.Inputs : Settings.Outputs;
         int n = 1;
         while (list.Any(c => c.Name == $"Stereo {n} L" || c.Name == $"Stereo {n} R")) n++;
         return new[] { $"Stereo {n} L", $"Stereo {n} R" };
+    }
+
+    public bool CanMoveChannel(bool input, int idx, int dir)
+    {
+        int count = input ? InputCount : OutputCount;
+        int to = idx + dir;
+        if (idx < 0 || idx >= count || to < 0 || to >= count) return false;
+        if (input && (LinkAt(idx) != null || LinkAt(to) != null)) return false;
+        return true;
+    }
+
+    public void MoveChannel(bool input, int idx, int dir)
+    {
+        if (!CanMoveChannel(input, idx, dir)) return;
+        int to = idx + dir;
+        var list = (input ? Settings.Inputs : Settings.Outputs).ToArray();
+        (list[idx], list[to]) = (list[to], list[idx]);
+        var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToArray();
+        if (input) (m[idx], m[to]) = (m[to], m[idx]);
+        else foreach (var r in m) (r[idx], r[to]) = (r[to], r[idx]);
+        CommitMixer(input ? Settings with { Inputs = list, MatrixDb = m } : Settings with { Outputs = list, MatrixDb = m }, structural: true);
     }
 
     public void RemoveChannel(bool input, int idx)
@@ -202,37 +495,16 @@ internal sealed partial class AppModel
         var removedId = target[idx].Id;
         target.RemoveAt(idx);
         var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToList();
-        if (input) m.RemoveAt(idx);
-        else for (int i = 0; i < m.Count; i++) m[i] = m[i].Where((_, j) => j != idx).ToArray();
-        if (input) _links = LinksAfterRemove(idx);
-        var flow = input ? DeviceFlow.Capture : DeviceFlow.Render;
-        var nb = new List<DeviceBinding>();
-        foreach (var b in Bindings)
-        {
-            if (b.Flow != flow) { nb.Add(b); continue; }
-            int first = b.EngineFirstChannel, end = first + b.Count; // [first, end)
-            if (idx < first) { first--; end--; }
-            else if (idx < end) end--;
-            if (end - first <= 0) continue;
-            nb.Add(b with { EngineFirstChannel = first, Count = end - first });
-        }
-        ApplyStructural(Settings with { Inputs = ins, Outputs = outs, MatrixDb = m.ToArray(),
-            BusRoutes = Settings.BusRoutes.Where(r => r.Source.Id != removedId && r.Target.Id != removedId).ToArray() }, nb);
-    }
+        if (input && idx < m.Count) m.RemoveAt(idx);
+        else if (!input) for (int i = 0; i < m.Count; i++) m[i] = m[i].Where((_, j) => j != idx).ToArray();
 
-    public void MoveChannel(bool input, int idx, int dir)
-    {
-        int to = idx + dir;
-        var list = (input ? Settings.Inputs : Settings.Outputs).ToArray();
-        if (idx < 0 || idx >= list.Length || to < 0 || to >= list.Length) return;
-        if (input && !CanMoveChannel(true, idx, dir)) return;
-        if (input) SwapLinks(idx, to);
-        (list[idx], list[to]) = (list[to], list[idx]);
-        var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToArray();
-        if (input) (m[idx], m[to]) = (m[to], m[idx]);
-        else foreach (var r in m) (r[idx], r[to]) = (r[to], r[idx]);
-        Commit(input ? Settings with { Inputs = list, MatrixDb = m } : Settings with { Outputs = list, MatrixDb = m });
-        StructureChanged?.Invoke(); // Streifen-Reihenfolge neu zeichnen
+        CommitMixer(Settings with
+        {
+            Inputs = ins,
+            Outputs = outs,
+            MatrixDb = m.ToArray(),
+            BusRoutes = Settings.BusRoutes.Where(r => r.Source.Id != removedId && r.Target.Id != removedId).ToArray(),
+        }, structural: true);
     }
 
     static double[][] ResizeMatrix(double[][] old, int ni, int no)
@@ -241,304 +513,667 @@ internal sealed partial class AppModel
         for (int i = 0; i < ni; i++)
         {
             m[i] = new double[no];
-            for (int j = 0; j < no; j++) m[i][j] = i < old.Length && j < old[i].Length ? old[i][j] : double.NegativeInfinity;
+            for (int j = 0; j < no; j++)
+                m[i][j] = i < old.Length && j < old[i].Length ? old[i][j] : double.NegativeInfinity;
         }
         return m;
     }
 
-    public void SetSampleRate(int sr)
+    // ---- Matrix & Mix-Busse (OHNE destruktives Löschen direkter Matrix-Routen!) ---------------
+    public void SetMatrix(int i, int o, double db)
     {
-        if (sr == Settings.SampleRate || HostRunning) return;
-        ApplyStructural(Settings with { SampleRate = sr }, Bindings);
+        if (i < 0 || i >= InputCount || o < 0 || o >= OutputCount) return;
+        var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToArray();
+        m[i][o] = db;
+        CommitMixer(Settings with { MatrixDb = m });
     }
 
-    /// <summary>Neue Engine fuer neue Kanalzahl/Samplerate. Ein laufender Host wird kurz gestoppt und neu gestartet.</summary>
-    void ApplyStructural(MixerSettings s, IReadOnlyList<DeviceBinding> bindings)
+    public void PatchDiagonal1To1(int startIn = 0, int startOut = 0, int? count = null, double gainDb = 0.0)
     {
-        bool wasRunning = HostRunning;
-        if (wasRunning) StopHostNow();
-        Settings = Sanitize(s);
-        Bindings = bindings;
-        var old = Engine;
-        Engine = _engineFactory(Settings);
-        (old as IDisposable)?.Dispose();
-        StructureChanged?.Invoke();
-        BindingsChanged?.Invoke();
-        Changed?.Invoke();
-        if (wasRunning && CanStart(out _)) StartHost(true);
-    }
-
-    // ---- Projekt -----------------------------------------------------------------------------
-    public void NewProject()
-    {
-        InitLayout(null);
-        if (HostRunning) StopHostNow();
-        BlockFrames = DefaultBlockFrames;
-        Exclusive = false;
-        _links = new List<AppLink>();
-        AppLinksEnabled = true;
-        ApplyStructural(EmptySettings(), Array.Empty<DeviceBinding>());
-        HostError = null;
-    }
-
-    public void LoadProject(MixerSettings settings, IReadOnlyList<DeviceBinding> bindings, int blockFrames, bool exclusive, AppLinkSetup? appLinks = null, MixerLayout? layout = null)
-    {
-        InitLayout(layout);
-        if (HostRunning) StopHostNow();
-        BlockFrames = blockFrames > 0 ? blockFrames : DefaultBlockFrames;
-        Exclusive = exclusive;
-        _links = AppLinkRules.Sanitize(appLinks?.Links, settings.Inputs.Count);
-        AppLinksEnabled = appLinks?.Enabled ?? true;
-        if (appLinks?.ParkingDeviceId != null) { ParkingDeviceId = appLinks.ParkingDeviceId; ParkingDeviceName = appLinks.ParkingDeviceName; }
-        ApplyStructural(settings, bindings);
-        HostError = null;
-    }
-
-    // ---- Zuordnungen -------------------------------------------------------------------------
-    public void SetBlockFrames(int frames)
-    {
-        if (HostRunning || frames <= 0) return;
-        BlockFrames = frames;
-        BindingsChanged?.Invoke();
-        Changed?.Invoke();
-    }
-
-    public void SetExclusive(bool on)
-    {
-        if (HostRunning) return;
-        Exclusive = on;
-        BindingsChanged?.Invoke();
-        Changed?.Invoke();
-    }
-
-    void SetBindings(IReadOnlyList<DeviceBinding> b)
-    {
-        Bindings = b;
-        BindingsChanged?.Invoke();
-        Changed?.Invoke();
-    }
-
-    /// <summary>Legt eine Zuordnung an. Fehlende Engine-Kanaele werden automatisch (leer benannt) angelegt.</summary>
-    public string? AddBinding(DeviceBinding b)
-    {
-        if (HostRunning) return "Zum Ändern zuerst Audio stoppen.";
-        var existing = Bindings.FirstOrDefault(other => other.DeviceId == b.DeviceId ||
-            (AsioCatalog.IsAsio(other.DeviceId) && AsioCatalog.IsAsio(b.DeviceId) && AsioCatalog.DriverName(other.DeviceId) == AsioCatalog.DriverName(b.DeviceId)));
-        if (existing != null) b = b with { SampleRate = existing.SampleRate, BufferFrames = existing.BufferFrames, Exclusive = existing.Exclusive };
-        var refusal = BindingLinkConflict(b);
-        if (refusal != null) return refusal;
-        bool input = b.Flow == DeviceFlow.Capture;
-        int have = input ? InputCount : OutputCount;
-        int need = b.EngineFirstChannel + b.Count;
-        var list = Bindings.Append(b).ToList();
-        if (need > have)
+        int n = count ?? Math.Min(Math.Max(0, InputCount - startIn), Math.Max(0, OutputCount - startOut));
+        if (n <= 0) return;
+        var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToArray();
+        for (int k = 0; k < n; k++)
         {
-            var ins = Settings.Inputs.ToList();
-            var outs = Settings.Outputs.ToList();
-            var target = input ? ins : outs;
-            while (target.Count < need) target.Add(new ChannelDsp());
-            ApplyStructural(Settings with { Inputs = ins, Outputs = outs, MatrixDb = ResizeMatrix(Settings.MatrixDb, ins.Count, outs.Count) }, list);
+            int i = startIn + k, o = startOut + k;
+            if (i >= 0 && i < InputCount && o >= 0 && o < OutputCount)
+                m[i][o] = gainDb;
         }
-        else SetBindings(list);
-        return null;
+        CommitMixer(Settings with { MatrixDb = m });
     }
 
-    /// <summary>Aendert eine Zuordnung. Gibt einen Hinweis zurueck, wenn die Aenderung abgelehnt wurde (z. B. Konflikt mit einem App-Link).</summary>
-    public string? UpdateBinding(int i, Func<DeviceBinding, DeviceBinding> f)
+    public void PatchStereoPairs(double gainDb = 0.0)
     {
-        if (HostRunning || i < 0 || i >= Bindings.Count) return null;
-        var list = Bindings.ToList();
-        var nb = f(list[i]);
-        // nur NEUE Konflikte ablehnen (ein schon bestehender darf behoben werden)
-        var refusal = BindingLinkConflict(nb);
-        if (refusal != null && BindingLinkConflict(list[i]) == null) return refusal;
-        list[i] = nb;
-        SetBindings(list);
-        return null;
-    }
-
-    public void RemoveBinding(int i)
-    {
-        if (HostRunning || i < 0 || i >= Bindings.Count) return;
-        var list = Bindings.ToList();
-        list.RemoveAt(i);
-        SetBindings(list);
-    }
-
-    /// <summary>Erste freie Engine-Kanalnummer fuer eine neue Zuordnung der Richtung.</summary>
-    public int NextFreeEngineChannel(DeviceFlow flow)
-    {
-        int n = Bindings.Where(b => b.Flow == flow).Select(b => b.EngineFirstChannel + b.Count).DefaultIfEmpty(0).Max();
-        if (flow == DeviceFlow.Capture) n = Math.Max(n, _links.Select(l => l.End).DefaultIfEmpty(0).Max()); // App-Links belegen Eingaenge
-        return n;
-    }
-
-    public AudioDeviceInfo? FindDevice(string id) => Devices.FirstOrDefault(d => d.Id == id);
-
-    /// <summary>Prueft eine Zuordnung. null = in Ordnung, sonst kurzer Hinweis.</summary>
-    public string? ValidateBinding(DeviceBinding b) => ValidateBinding(b, HasActiveLinks);
-
-    string? ValidateBinding(DeviceBinding b, bool linksActive)
-    {
-        int engineCount = b.Flow == DeviceFlow.Capture ? InputCount : OutputCount;
-        if (b.Count < 1) return "Anzahl muss mindestens 1 sein";
-        if (b.EngineFirstChannel < 0 || b.EngineFirstChannel + b.Count > engineCount)
-            return b.Flow == DeviceFlow.Capture ? "Engine-Eingänge reichen nicht" : "Engine-Ausgänge reichen nicht";
-        var d = FindDevice(b.DeviceId);
-        if (d == null) return Devices.Count == 0 ? "Geräteliste leer" : "Gerät nicht gefunden";
-        if (d.Flow != (b.Loopback ? DeviceFlow.Render : b.Flow)) return "Geräterichtung passt nicht";
-        if (b.DeviceFirstChannel < 0 || b.DeviceFirstChannel + b.Count > Math.Max(d.Channels, 1))
-            return $"Gerät hat nur {d.Channels} Kanäle";
-        if (linksActive && BindingLinkConflict(b) is { } lc) return lc;
-        return null;
-    }
-
-    // ---- Geraete -----------------------------------------------------------------------------
-    public void RefreshDevices()
-    {
-        if (DevicesLoading) return;
-        DevicesLoading = true;
-        DeviceError = null;
-        HostChanged?.Invoke();
-        Task.Run(() =>
+        if (InputCount == 0 || OutputCount < 2) return;
+        var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToArray();
+        for (int i = 0; i < InputCount; i++)
         {
-            IReadOnlyList<AudioDeviceInfo> list = Array.Empty<AudioDeviceInfo>();
-            string? err = null;
-            IDeviceCatalog? cat = null;
-            try
+            int targetOut = i % 2;
+            if (targetOut < OutputCount)
+                m[i][targetOut] = gainDb;
+        }
+        CommitMixer(Settings with { MatrixDb = m });
+    }
+
+    public void ClearAllDirectMatrix()
+    {
+        var m = new double[InputCount][];
+        for (int i = 0; i < InputCount; i++)
+        {
+            m[i] = new double[OutputCount];
+            Array.Fill(m[i], double.NegativeInfinity);
+        }
+        CommitMixer(Settings with { MatrixDb = m });
+    }
+
+    public Guid AddBus(int channels = 2, string? name = null)
+    {
+        int ch = Math.Clamp(channels, 1, 8);
+        int nr = Settings.Buses.Count + 1;
+        while (Settings.Buses.Any(b => b.Name.Equals($"Bus {nr}", StringComparison.OrdinalIgnoreCase))) nr++;
+        var bus = new MixBus
+        {
+            Id = Guid.NewGuid(),
+            Name = string.IsNullOrWhiteSpace(name) ? $"Bus {nr}" : name.Trim(),
+            Channels = ch,
+            GainDb = 0.0,
+        };
+        CommitMixer(Settings with { Buses = Settings.Buses.Append(bus).ToArray() }, structural: true);
+        return bus.Id;
+    }
+
+    public void UpdateBus(Guid busId, Func<MixBus, MixBus> f)
+    {
+        var list = Settings.Buses.ToArray();
+        int idx = Array.FindIndex(list, b => b.Id == busId);
+        if (idx < 0) return;
+        list[idx] = f(list[idx]);
+        CommitMixer(Settings with { Buses = list });
+    }
+
+    public void RemoveBus(Guid busId)
+    {
+        var buses = Settings.Buses.Where(b => b.Id != busId).ToArray();
+        var routes = Settings.BusRoutes.Where(r => r.Source.Id != busId && r.Target.Id != busId).ToArray();
+        CommitMixer(Settings with { Buses = buses, BusRoutes = routes }, structural: true);
+    }
+
+    public BusRoute? FindBusRoute(RoutePort source, RoutePort target) =>
+        Settings.BusRoutes.FirstOrDefault(r => r.Source == source && r.Target == target);
+
+    /// <summary>Fügt eine Bus-Route hinzu oder aktualisiert ihren Pegel — OHNE bestehende direkte Matrix-Kreuzpunkte zu löschen!</summary>
+    public string? SetOrAddBusRoute(RoutePort source, RoutePort target, double gainDb = 0.0)
+    {
+        var list = Settings.BusRoutes.Where(r => !(r.Source == source && r.Target == target)).ToList();
+        if (!Db.IsOff(gainDb))
+            list.Add(new BusRoute(source, target, Math.Clamp(gainDb, Theme.MatrixMinDb, Theme.MatrixMaxDb)));
+
+        var candidate = Settings with { BusRoutes = list };
+        try
+        {
+            if (candidate.Buses.Sum(b => b.Channels) > DaemonEngineController.PoolMaxBuses)
+                return $"Maximale Bus-Kanal-Kapazität ({DaemonEngineController.PoolMaxBuses}) erreicht.";
+            _ = BusRouting.Compile(candidate);
+        }
+        catch (ArgumentException ex)
+        {
+            return ex.Message;
+        }
+        CommitMixer(candidate);
+        return null;
+    }
+
+    public string? AddBusRoute(BusRoute route) => SetOrAddBusRoute(route.Source, route.Target, route.GainDb);
+
+    public void RemoveBusRoute(BusRoute route)
+    {
+        var routes = Settings.BusRoutes.Where(r => !(r.Source == route.Source && r.Target == route.Target)).ToArray();
+        CommitMixer(Settings with { BusRoutes = routes });
+    }
+
+    // ---- UI-Decks (%APPDATA%\NX-MIX\ui-decks.json — 100 % referenzbasiert, keine Audio-Kopie!) -
+    void SaveDecks(UiDeckCollection next)
+    {
+        Decks = next;
+        UiDeckStore.Save(next);
+        DecksChanged?.Invoke();
+    }
+
+    public UiDeckDefinition? ActiveCustomDeck =>
+        Decks.ActiveDeckId is { } id ? Decks.Decks.FirstOrDefault(d => d.Id == id) : null;
+
+    public void SelectDeck(Guid? deckId) =>
+        SaveDecks(Decks with { ActiveDeckId = deckId });
+
+    public bool IsMainDeviceExpanded(Guid deviceId) =>
+        Decks.ExpandedMainDeviceIds.Contains(deviceId);
+
+    public void ToggleMainDeviceExpanded(Guid deviceId)
+    {
+        var set = Decks.ExpandedMainDeviceIds.ToList();
+        if (!set.Remove(deviceId)) set.Add(deviceId);
+        SaveDecks(Decks with { ExpandedMainDeviceIds = set });
+    }
+
+    public UiDeckDefinition CreateDeck(string? name = null)
+    {
+        int nr = Decks.Decks.Count + 1;
+        var deck = new UiDeckDefinition
+        {
+            Id = Guid.NewGuid(),
+            Name = string.IsNullOrWhiteSpace(name) ? $"Deck {nr}" : name.Trim(),
+            ColorHex = (nr % 4) switch { 1 => "#3B82F6", 2 => "#10B981", 3 => "#F59E0B", _ => "#A855F7" },
+            VisibleInTopBar = true,
+            Density = DeckDensity.Detailed,
+            Items = Array.Empty<DeckSlotItem>(),
+        };
+        SaveDecks(Decks with { Decks = Decks.Decks.Append(deck).ToArray(), ActiveDeckId = deck.Id });
+        return deck;
+    }
+
+    public UiDeckDefinition? DuplicateDeck(Guid deckId)
+    {
+        var src = Decks.Decks.FirstOrDefault(d => d.Id == deckId);
+        if (src == null) return null;
+        var copy = src with
+        {
+            Id = Guid.NewGuid(),
+            Name = src.Name + " (Kopie)",
+            Items = src.Items.Select(it => it with { ItemId = Guid.NewGuid() }).ToArray(),
+        };
+        SaveDecks(Decks with { Decks = Decks.Decks.Append(copy).ToArray(), ActiveDeckId = copy.Id });
+        return copy;
+    }
+
+    public void UpdateDeck(Guid deckId, Func<UiDeckDefinition, UiDeckDefinition> f)
+    {
+        var list = Decks.Decks.ToArray();
+        int idx = Array.FindIndex(list, d => d.Id == deckId);
+        if (idx < 0) return;
+        list[idx] = f(list[idx]);
+        SaveDecks(Decks with { Decks = list });
+    }
+
+    public void DeleteDeck(Guid deckId)
+    {
+        var list = Decks.Decks.Where(d => d.Id != deckId).ToArray();
+        Guid? active = Decks.ActiveDeckId == deckId ? null : Decks.ActiveDeckId;
+        SaveDecks(Decks with { Decks = list, ActiveDeckId = active });
+    }
+
+    public void AddDeckSlot(Guid deckId, DeckItemKind kind, Guid targetId, string? customLabel = null)
+    {
+        UpdateDeck(deckId, d => d with
+        {
+            Items = d.Items.Append(new DeckSlotItem
             {
-                cat = Catalog ?? _catalogFactory();
-                if (cat == null) err = "Geräte-Katalog nicht verfügbar (NxMix.Audio.DeviceCatalog fehlt).";
-                else list = cat.List();
-            }
-            catch (Exception ex) { err = "Geräteliste: " + ex.Message; }
-            Post(() =>
-            {
-                Catalog = cat;
-                Devices = list;
-                DeviceError = err;
-                DevicesLoading = false;
-                HostChanged?.Invoke();
-                BindingsChanged?.Invoke();
-            });
+                ItemId = Guid.NewGuid(),
+                Kind = kind,
+                TargetId = targetId,
+                CustomLabel = customLabel,
+            }).ToArray(),
         });
     }
 
-    // ---- Audio-Host (startet NIE von selbst) ------------------------------------------------
-    public bool CanStart(out string reason) => CanStartCore(true, out reason);
-
-    /// <summary>Wie CanStart; mit withLinks=false wird geprueft, ob der Start OHNE App-Links moeglich waere.</summary>
-    public bool CanStartCore(bool withLinks, out string reason)
+    public void RemoveDeckSlot(Guid deckId, Guid itemId)
     {
-        bool linksActive = withLinks && HasActiveLinks;
-        reason = "";
-        if (!_hostAvailable) { reason = _hostUnavailableReason ?? "Audio-Host nicht verfügbar."; return false; }
-        if (EngineIsDemo) { reason = "Echte Engine (NxMix.Engine.MixerEngine) nicht verfügbar."; return false; }
-        if (HostBusy) { reason = "Bitte warten …"; return false; }
-        if (Bindings.Count == 0) { reason = "Noch keine Geräte-Zuordnung."; return false; }
-        if (!Bindings.Any(b => b.Flow == DeviceFlow.Render)) { reason = "Mindestens ein Ausgabegerät zuordnen."; return false; }
-        foreach (var b in Bindings)
+        UpdateDeck(deckId, d => d with { Items = d.Items.Where(i => i.ItemId != itemId).ToArray() });
+    }
+
+    public void MoveDeckSlot(Guid deckId, Guid itemId, int delta)
+    {
+        UpdateDeck(deckId, d =>
         {
-            var v = ValidateBinding(b, linksActive);
-            if (v != null) { reason = "Zuordnung ungültig: " + v; return false; }
-        }
-        if (linksActive)
+            var items = d.Items.ToList();
+            int idx = items.FindIndex(i => i.ItemId == itemId);
+            int to = idx + delta;
+            if (idx < 0 || to < 0 || to >= items.Count) return d;
+            (items[idx], items[to]) = (items[to], items[idx]);
+            return d with { Items = items };
+        });
+    }
+
+    public void ToggleDeckSlotExpanded(Guid deckId, Guid itemId)
+    {
+        UpdateDeck(deckId, d => d with
         {
-            var p = AppLinkProblem();
-            if (p != null) { reason = p; return false; }
+            Items = d.Items.Select(i => i.ItemId == itemId ? i with { ExpandedInline = !i.ExpandedInline } : i).ToArray(),
+        });
+    }
+
+    // ---- SystemConfig (Physische Geräte, VAIOs, App-Links, Takt, API) -------------------------
+    public static ConfigImpactLevel ClassifyChange(SystemConfig current, SystemConfig next)
+    {
+        if (current.SampleRate != next.SampleRate ||
+            current.BlockFrames != next.BlockFrames ||
+            current.PreferredMasterDeviceId != next.PreferredMasterDeviceId ||
+            current.DefaultWasapiExclusive != next.DefaultWasapiExclusive ||
+            current.AllowOfflineAuxDevices != next.AllowOfflineAuxDevices ||
+            current.AppLinksEnabled != next.AppLinksEnabled ||
+            current.ParkingDeviceId != next.ParkingDeviceId ||
+            !SequenceEqual(current.Devices, next.Devices) ||
+            !SequenceEqual(current.Vaios, next.Vaios) ||
+            !SequenceEqual(current.AppLinks, next.AppLinks))
+        {
+            return ConfigImpactLevel.StreamReopen;
         }
+        return ConfigImpactLevel.DaemonSetting;
+    }
+
+    static bool SequenceEqual<T>(IReadOnlyList<T> a, IReadOnlyList<T> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+            if (!EqualityComparer<T>.Default.Equals(a[i], b[i])) return false;
         return true;
     }
 
-    public void StartHost(bool silentRestart = false)
+    public void ApplySystemConfig(SystemConfig next, bool reopenAudioIfNeeded = true)
     {
-        string why = "";
-        if (HostBusy || !CanStart(out why)) { if (!HostBusy) { HostError = why; HostChanged?.Invoke(); } return; }
-        HostError = null;
+        Config = next;
+        BindingsChanged?.Invoke();
+        StructureChanged?.Invoke();
+        Changed?.Invoke();
+        RunBackend(() => _backend.ApplySystemConfigAsync(next, reopenAudioIfNeeded));
+    }
+
+    public int NextFreeEngineChannel(DeviceFlow flow)
+    {
+        int devMax = Config.Devices.Where(d => d.Flow == flow).Select(d => d.EngineFirstChannel + d.ChannelCount).DefaultIfEmpty(0).Max();
+        int vaioMax = Config.Vaios.Where(v => v.Flow == flow).Select(v => v.EngineFirstChannel + v.Channels).DefaultIfEmpty(0).Max();
+        int linkMax = flow == DeviceFlow.Capture ? Config.AppLinks.Select(a => a.EndChannel).DefaultIfEmpty(0).Max() : 0;
+        int curCount = flow == DeviceFlow.Capture ? InputCount : OutputCount;
+        return Math.Max(Math.Max(devMax, vaioMax), Math.Max(linkMax, curCount));
+    }
+
+    public AudioDeviceNode AddHardwareDevice(AudioDeviceInfo info, bool loopback = false, int? channels = null)
+    {
+        var flow = loopback ? DeviceFlow.Capture : info.Flow;
+        int count = Math.Clamp(channels ?? Math.Max(1, info.Channels), 1, 32);
+        int first = NextFreeEngineChannel(flow);
+        var node = new AudioDeviceNode
+        {
+            Id = Guid.NewGuid(),
+            EndpointId = info.Id,
+            FriendlyName = info.Name,
+            CustomTitle = info.Name,
+            Flow = flow,
+            Backend = info.Backend,
+            Loopback = loopback,
+            DeviceFirstChannel = 0,
+            EngineFirstChannel = first,
+            ChannelCount = count,
+            Enabled = true,
+            IsVirtualCable = info.IsVirtualEndpoint,
+        };
+        ApplySystemConfig(Config with { Devices = Config.Devices.Append(node).ToArray() });
+        return node;
+    }
+
+    public void UpdateHardwareDevice(Guid nodeId, Func<AudioDeviceNode, AudioDeviceNode> f)
+    {
+        var list = Config.Devices.ToArray();
+        int idx = Array.FindIndex(list, d => d.Id == nodeId);
+        if (idx < 0) return;
+        list[idx] = f(list[idx]);
+        ApplySystemConfig(Config with { Devices = list });
+    }
+
+    public void RemoveHardwareDevice(Guid nodeId) =>
+        ApplySystemConfig(Config with { Devices = Config.Devices.Where(d => d.Id != nodeId).ToArray() });
+
+    public VaioSlotConfig AddVirtualCableSlot(AudioDeviceInfo endpoint, string? customName = null)
+    {
+        int count = Math.Clamp(Math.Max(2, endpoint.Channels), 1, 16);
+        int first = NextFreeEngineChannel(endpoint.Flow);
+        var slot = new VaioSlotConfig
+        {
+            Id = Guid.NewGuid(),
+            Name = string.IsNullOrWhiteSpace(customName) ? endpoint.Name : customName.Trim(),
+            Kind = VaioSlotKind.ExternalDriverEndpoint,
+            Flow = endpoint.Flow,
+            Channels = count,
+            EngineFirstChannel = first,
+            EndpointOrExe = endpoint.Id,
+            Enabled = true,
+        };
+        ApplySystemConfig(Config with { Vaios = Config.Vaios.Append(slot).ToArray() });
+        return slot;
+    }
+
+    public void UpdateVaioSlot(Guid slotId, Func<VaioSlotConfig, VaioSlotConfig> f)
+    {
+        var list = Config.Vaios.ToArray();
+        int idx = Array.FindIndex(list, v => v.Id == slotId);
+        if (idx < 0) return;
+        list[idx] = f(list[idx]);
+        ApplySystemConfig(Config with { Vaios = list });
+    }
+
+    public void RemoveVaioSlot(Guid slotId) =>
+        ApplySystemConfig(Config with { Vaios = Config.Vaios.Where(v => v.Id != slotId).ToArray() });
+
+    public void ShowAsioControlPanel(string endpointId) =>
+        RunBackend(() => _backend.ShowAsioControlPanelAsync(endpointId));
+
+    public void RefreshDevices() =>
+        RunBackendVoid(() => _backend.RefreshDevicesAsync());
+
+    public void StartAudio()
+    {
         HostBusy = true;
-        var cfg = BuildHostConfig();
-        var engine = Engine;
+        HostError = null;
         HostChanged?.Invoke();
-        Task.Run(() =>
+        RunBackendVoid(() => _backend.StartAudioAsync());
+    }
+
+    public void StopAudio()
+    {
+        HostBusy = true;
+        HostChanged?.Invoke();
+        RunBackendVoid(() => _backend.StopAudioAsync());
+    }
+
+    public void RestoreOrphanedAppRoutes(Action<int>? onDone = null)
+    {
+        if (RunInline)
+        {
+            int n = _backend.RestoreOrphanedAppRoutesAsync().GetAwaiter().GetResult();
+            onDone?.Invoke(n);
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            int n = await _backend.RestoreOrphanedAppRoutesAsync().ConfigureAwait(false);
+            Post(() => onDone?.Invoke(n));
+        });
+    }
+
+    // ---- App-Links (für Virtual I/O & AppLinkPicker) ------------------------------------------
+    public IReadOnlyList<AppLink> AppLinks =>
+        Config.AppLinks.Where(a => a.Enabled).Select(a => new AppLink(a.ExeName, a.FirstChannel, a.Count, a.DisplayName)).ToList();
+
+    public bool AppLinksEnabled => Config.AppLinksEnabled;
+    public string? ParkingDeviceId => Config.ParkingDeviceId;
+    public string? ParkingDeviceName => Config.ParkingDeviceName;
+
+    public AppLink? LinkAt(int input) => AppLinks.FirstOrDefault(l => l.Covers(input));
+    public AppLink? LinkStartingAt(int first) => AppLinks.FirstOrDefault(l => l.FirstChannel == first);
+
+    public string? AppLinksUnsupportedReason() =>
+        VaioAvailability.AppLoopbackSupported ? null : (VaioAvailability.AppLoopbackMessage ?? "ProcessLoopback wird von Windows nicht unterstützt.");
+
+    public void SetAppLinksEnabled(bool enabled) =>
+        ApplySystemConfig(Config with { AppLinksEnabled = enabled });
+
+    public void SetParking(string? endpointId, string? friendlyName = null)
+    {
+        var name = friendlyName ?? (endpointId != null ? FindDevice(endpointId)?.Name : null);
+        ApplySystemConfig(Config with { ParkingDeviceId = endpointId, ParkingDeviceName = name });
+    }
+
+    public (int First, int Count) SuggestSpan(int clickedInput)
+    {
+        if (LinkAt(clickedInput) is { } existing) return (existing.FirstChannel, existing.Count);
+        if (IsNamedPair(clickedInput))
+        {
+            int first = clickedInput > 0 && Settings.Inputs[clickedInput].Name.EndsWith(" R", StringComparison.Ordinal) ? clickedInput - 1 : clickedInput;
+            return (first, 2);
+        }
+        int count = clickedInput + 1 < InputCount && LinkAt(clickedInput + 1) == null ? 2 : 1;
+        return (clickedInput, Math.Max(1, count));
+    }
+
+    public bool IsNamedPair(int input)
+    {
+        if (input < 0 || input >= InputCount) return false;
+        string n = Settings.Inputs[input].Name;
+        if (n.EndsWith(" L", StringComparison.Ordinal) && input + 1 < InputCount && Settings.Inputs[input + 1].Name == n[..^2] + " R") return true;
+        if (n.EndsWith(" R", StringComparison.Ordinal) && input - 1 >= 0 && Settings.Inputs[input - 1].Name == n[..^2] + " L") return true;
+        return false;
+    }
+
+    public string? LinkConflict(int first, int count, string? exeName, int? ignoreFirst = null)
+    {
+        if (first < 0 || count < 1) return "Ungültiger Eingangsbereich.";
+        foreach (var d in Config.Devices.Where(d => d.Enabled && d.Flow == DeviceFlow.Capture))
+        {
+            if (first < d.EngineFirstChannel + d.ChannelCount && d.EngineFirstChannel < first + count)
+                return $"Eingang {first + 1} ist bereits dem Hardware-Gerät „{d.DisplayTitle}“ zugeordnet.";
+        }
+        foreach (var v in Config.Vaios.Where(v => v.Enabled && v.Flow == DeviceFlow.Capture))
+        {
+            if (first < v.EngineFirstChannel + v.Channels && v.EngineFirstChannel < first + count)
+                return $"Eingang {first + 1} ist bereits dem Virtual-I/O-Slot „{v.Name}“ zugeordnet.";
+        }
+        foreach (var l in Config.AppLinks)
+        {
+            if (ignoreFirst.HasValue && l.FirstChannel == ignoreFirst.Value) continue;
+            if (first < l.EndChannel && l.FirstChannel < first + count)
+                return $"Eingang {first + 1} wird bereits von „{l.Title}“ belegt.";
+            if (exeName != null && string.Equals(l.ExeName, exeName, StringComparison.OrdinalIgnoreCase))
+                return $"„{l.Title}“ ist bereits an Eingang {l.FirstChannel + 1} gebunden.";
+        }
+        return null;
+    }
+
+    public string? SetLink(int firstChannel, int count, string rawExe, string? displayName = null) =>
+        SetLink(firstChannel, rawExe, count, displayName);
+
+    public string? SetLink(int firstChannel, string rawExe, int count = 2, string? displayName = null)
+    {
+        var exe = AppLinkRules.NormalizeExe(rawExe, out var err);
+        if (exe == null) return err;
+        int chCount = Math.Clamp(count, 1, 2);
+        var conflict = LinkConflict(firstChannel, chCount, exe, firstChannel);
+        if (conflict != null) return conflict;
+
+        var list = Config.AppLinks.Where(l => l.FirstChannel != firstChannel && !string.Equals(l.ExeName, exe, StringComparison.OrdinalIgnoreCase)).ToList();
+        list.Add(new AppLinkEntry
+        {
+            Id = Guid.NewGuid(),
+            ExeName = exe,
+            DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim(),
+            FirstChannel = firstChannel,
+            Count = chCount,
+            Enabled = true,
+        });
+        ApplySystemConfig(Config with { AppLinks = list.OrderBy(a => a.FirstChannel).ToArray() });
+        return null;
+    }
+
+    public string? BindNewAppQuick(string rawExe, int count = 2, string? displayName = null)
+    {
+        int first = NextFreeEngineChannel(DeviceFlow.Capture);
+        return SetLink(first, rawExe, count, displayName);
+    }
+
+    public bool RemoveLink(int firstChannel)
+    {
+        var next = Config.AppLinks.Where(a => a.FirstChannel != firstChannel).ToArray();
+        if (next.Length == Config.AppLinks.Count) return false;
+        ApplySystemConfig(Config with { AppLinks = next });
+        return true;
+    }
+
+    public void LoadAppPrograms(Action<List<AppProgram>, string?> done)
+    {
+        if (RunInline)
+        {
+            _backend.RefreshDevicesAsync().GetAwaiter().GetResult();
+            ApplyIncomingSnapshot(_backend.Snapshot);
+            done(AppLinkRules.Group(ActiveAppSessions), null);
+            return;
+        }
+        _ = Task.Run(async () =>
         {
             string? err = null;
+            try { await _backend.RefreshDevicesAsync().ConfigureAwait(false); }
+            catch (Exception ex) { err = ex.Message; }
+            Post(() => done(AppLinkRules.Group(_backend.Snapshot.ActiveAppSessions), err));
+        });
+    }
+
+    public LinkView ViewOf(AppLink link)
+    {
+        if (!Config.AppLinksEnabled) return new LinkView(LinkUi.Off, null, 0);
+        if (AppLinksUnsupportedReason() is { } un) return new LinkView(LinkUi.Failed, un, 0);
+        if (string.IsNullOrWhiteSpace(Config.ParkingDeviceId)) return new LinkView(LinkUi.NeedsSetup, "Kein stilles Parkplatz-Ausgabegerät gewählt", 0);
+        if (!HostRunning) return new LinkView(LinkUi.Idle, null, 0);
+        var st = AppLinkStatuses.FirstOrDefault(s => string.Equals(s.ExeName, link.ExeName, StringComparison.OrdinalIgnoreCase));
+        if (st == null) return new LinkView(LinkUi.Waiting, null, 0);
+        return st.State switch
+        {
+            AppLinkState.Linked => new LinkView(LinkUi.Linked, st.Message, st.ProcessCount),
+            AppLinkState.Failed => new LinkView(LinkUi.Failed, st.Message, st.ProcessCount),
+            _ => new LinkView(LinkUi.Waiting, st.Message, st.ProcessCount),
+        };
+    }
+
+    // ---- Spektral-Tap (für Outputs / DSP & Kanal-Spektrum) ------------------------------------
+    int _subSpecMode;
+    int _subSpecChannel = -1;
+
+    public void SubscribeSpectrum(int mode, int channelIndex)
+    {
+        if (_subSpecMode == mode && _subSpecChannel == channelIndex) return;
+        _subSpecMode = mode;
+        _subSpecChannel = channelIndex;
+        RunBackendVoid(() => _backend.SubscribeSpectrumAsync(mode, channelIndex));
+    }
+
+    // ---- Mischpult-Snapshots (Kategorie 3 — berühren NIEMALS SystemConfig!) -------------------
+    public void SaveSnapshot(Guid? existingId, string name, string notes, string colorHex, double fadeMs, SnapshotScopeFlags scope, Action<MixSnapshot>? onSaved = null)
+    {
+        if (RunInline)
+        {
+            var snap = _backend.SaveSnapshotAsync(existingId, name, notes, colorHex, fadeMs, scope).GetAwaiter().GetResult();
+            ApplyIncomingSnapshot(_backend.Snapshot);
+            SnapshotsChanged?.Invoke();
+            onSaved?.Invoke(snap);
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
             try
             {
-                if (_host == null)
-                {
-                    _host = _hostFactory();
-                    _host.Faulted += msg => Post(() => { HostError = msg; HostChanged?.Invoke(); });
-                }
-                _host.Start(cfg, engine);
+                var snap = await _backend.SaveSnapshotAsync(existingId, name, notes, colorHex, fadeMs, scope).ConfigureAwait(false);
+                Post(() => { SnapshotsChanged?.Invoke(); onSaved?.Invoke(snap); });
             }
-            catch (Exception ex) { err = ex.Message; }
-            Post(() =>
-            {
-                HostBusy = false;
-                if (err != null) HostError = err;
-                Stats = _host?.GetStats();
-                HostChanged?.Invoke();
-            });
+            catch (Exception ex) { Post(() => Toast?.Invoke("Snapshot speichern fehlgeschlagen: " + ex.Message, true)); }
         });
     }
 
-    public void StopHost()
+    public void RenameSnapshot(Guid snapshotId, string newName, Action<MixSnapshot?>? onRenamed = null)
     {
-        if (_host == null || HostBusy) return;
-        HostBusy = true;
-        HostStopping = true;
-        HostChanged?.Invoke();
-        var host = _host;
-        Task.Run(() =>
+        if (RunInline)
         {
-            string? err = null;
-            try { host.Stop(); } catch (Exception ex) { err = ex.Message; }
-            Post(() =>
+            var renamed = _backend.RenameSnapshotAsync(snapshotId, newName).GetAwaiter().GetResult();
+            ApplyIncomingSnapshot(_backend.Snapshot);
+            SnapshotsChanged?.Invoke();
+            onRenamed?.Invoke(renamed);
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
             {
-                HostBusy = false;
-                HostStopping = false;
-                if (err != null) HostError = err;
-                Stats = host.GetStats();
-                HostChanged?.Invoke();
-            });
+                var renamed = await _backend.RenameSnapshotAsync(snapshotId, newName).ConfigureAwait(false);
+                Post(() => { SnapshotsChanged?.Invoke(); onRenamed?.Invoke(renamed); });
+            }
+            catch (Exception ex) { Post(() => Toast?.Invoke("Snapshot umbenennen fehlgeschlagen: " + ex.Message, true)); }
         });
     }
 
-    /// <summary>Synchrones Stoppen (vor Neuaufbau der Engine, beim Beenden).</summary>
-    public void StopHostNow()
+    public void DuplicateSnapshot(Guid snapshotId) =>
+        RunBackendVoid(async () =>
+        {
+            await _backend.DuplicateSnapshotAsync(snapshotId).ConfigureAwait(false);
+            Post(() => SnapshotsChanged?.Invoke());
+        });
+
+    public void DeleteSnapshot(Guid snapshotId) =>
+        RunBackendVoid(async () =>
+        {
+            await _backend.DeleteSnapshotAsync(snapshotId).ConfigureAwait(false);
+            Post(() => SnapshotsChanged?.Invoke());
+        });
+
+    public void PreviewSnapshot(Guid snapshotId, SnapshotScopeFlags scope, Action<SnapshotDiffPreview?> onPreview)
     {
-        try { _host?.Stop(); } catch (Exception ex) { HostError = ex.Message; }
-        HostBusy = false;
-        Stats = null;
-        HostChanged?.Invoke();
+        if (RunInline)
+        {
+            onPreview(_backend.PreviewSnapshotAsync(snapshotId, scope).GetAwaiter().GetResult());
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var diff = await _backend.PreviewSnapshotAsync(snapshotId, scope).ConfigureAwait(false);
+                Post(() => onPreview(diff));
+            }
+            catch { Post(() => onPreview(null)); }
+        });
     }
 
-    public void Shutdown()
-    {
-        try { _host?.Stop(); } catch { }
-        try { _host?.Dispose(); } catch { }
-        _host = null;
-    }
+    public void RecallSnapshot(Guid snapshotId, SnapshotScopeFlags scope, double fadeMs) =>
+        RunBackend(() => _backend.RecallSnapshotAsync(snapshotId, scope, fadeMs));
 
-    /// <summary>Wird vom UI-Takt gerufen: Statistik des Hosts etwa 4x pro Sekunde auffrischen.</summary>
+    // ---- Takt & Lifecycle ---------------------------------------------------------------------
     public bool Tick(float dt)
     {
-        bool linkChanged = false;
-        _linkPoll += dt;
-        if (_linkPoll >= 0.25) { _linkPoll = 0; linkChanged = PollLinkStatus(); }
-        if (_host == null) return linkChanged;
-        _pollTimer += dt;
-        if (_pollTimer < 0.25) return linkChanged;
-        _pollTimer = 0;
+        if (RunInline && _backend is DaemonEngineController inProc)
+            inProc.PumpTelemetryNow();
+
+        if (_backend.TryReadTelemetry(_inPeaks, _outPeaks, _busPeaks, _devPeaks, _specPreDb, _specPostDb, out var meta))
+        {
+            _telemetryMeta = meta;
+            _telemetryFrameSeq++;
+            return HostRunning || _subSpecMode != 0;
+        }
+        return false;
+    }
+
+    /// <summary>Normales Schließen des UI-Fensters: trennt NUR die Pipe-Verbindung. Audio und App-Links im Daemon laufen ununterbrochen weiter!</summary>
+    public void DisconnectClientOnly()
+    {
+        try { _backend.Dispose(); } catch { }
+    }
+
+    /// <summary>NUR bei ausdrücklichem Benutzerwunsch oder vor einem Velopack-Update:
+    /// fordert geordnetes Herunterfahren an und wartet synchron auf das Prozessende von NxMix.Daemon.exe,
+    /// damit alle Audio-Handles, App-Umleitungen und Datei-Locks vor einem Update vollständig freigegeben sind.</summary>
+    public bool ShutdownDaemonExplicitly(int waitForProcessExitMs = 5000)
+    {
+        int daemonPid = Runtime.DaemonPid;
+        Process? daemonProc = null;
+        if (daemonPid > 0 && daemonPid != Environment.ProcessId)
+        {
+            try { daemonProc = Process.GetProcessById(daemonPid); } catch { daemonProc = null; }
+        }
+
         try
         {
-            var st = _host.GetStats();
-            bool changed = Stats == null || st.State != Stats.State || st.Underruns != Stats.Underruns || st.Overruns != Stats.Overruns
-                || Math.Abs(st.CpuLoad - Stats.CpuLoad) > 0.004 || Math.Abs(st.OutputLatencyMs - Stats.OutputLatencyMs) > 0.05
-                || st.LastError != Stats.LastError;
-            Stats = st;
-            return changed || linkChanged;
+            _backend.RequestDaemonShutdownAsync().Wait(1500);
         }
-        catch { return linkChanged; }
+        catch { }
+
+        try { _backend.Dispose(); } catch { }
+
+        if (daemonProc != null)
+        {
+            try
+            {
+                bool exited = daemonProc.WaitForExit(Math.Max(500, waitForProcessExitMs));
+                daemonProc.Dispose();
+                return exited;
+            }
+            catch
+            {
+                daemonProc.Dispose();
+            }
+        }
+        return true;
     }
 }

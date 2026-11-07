@@ -1,23 +1,21 @@
+using System.Globalization;
 using NxMix.App.Model;
-using NxMix.App.Native;
 using NxMix.App.Ui;
-using NxMix.Audio;
 using NxMix.Engine;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Kanalname im Kopf des Blatts: Klick = umbenennen (Stift erscheint beim Darueberfahren).</summary>
 internal sealed class NameField : Widget
 {
     public string Text = "";
     public bool Placeholder;
     public event Action? Clicked;
-    public NameField() { Cursor = CursorKind.IBeam; Tooltip = "Klick: umbenennen"; }
+    public NameField() { Cursor = CursorKind.IBeam; Tooltip = "Klick: Kanal umbenennen"; }
     public override bool AcceptsMouse => Visible;
     public override void OnMouseEnter() => Invalidate();
     public override void OnMouseLeave() => Invalidate();
-    public override void OnMouseUp(in MouseEvent e) { if (e.Button == 0 && Bounds.Contains(e.X, e.Y)) Clicked?.Invoke(); }
+    public override void OnMouseUp(in MouseEvent e) { if (e.Button == 0 && HitOnRelease(e)) Clicked?.Invoke(); }
     public override void Paint(Renderer g)
     {
         var b = Bounds;
@@ -28,87 +26,59 @@ internal sealed class NameField : Widget
     }
 }
 
-/// <summary>
-/// Kanalinfo im Seitenblatt; die Bearbeitungsreiter nutzen den ganzen Arbeitsbereich.
-/// </summary>
+/// <summary>Kanal-Inspektor im rechten Seitenblatt.
+/// Eingänge bieten Trim, Low-Cut (HPF), Pan, Phase, Laufzeit (0..1000 ms), Stereo-Link, Recall-Safe &amp; App-Link.
+/// Ausgänge verweisen für EQ/Crossover/REW klar auf den dedizierten Tab „Outputs / DSP“.</summary>
 internal sealed class ChannelSheet : SheetOverlay
 {
     readonly AppModel _m;
     public bool IsInput { get; }
     public int Index { get; private set; }
-    public bool DetailView { get; private set; }
-    public bool EqView => DetailView && _detailTab == 0;
-    int _detailTab;
-    protected override bool FullPage => DetailView;
 
     readonly IconButton _prev = new(Icon.ChevronLeft, "Vorheriger Kanal (←)") { IconSize = 16 };
     readonly IconButton _next = new(Icon.ChevronRight, "Nächster Kanal (→)") { IconSize = 16 };
     readonly IconButton _close = new(Icon.Close, "Schließen (Esc)") { IconSize = 16 };
-    readonly Button _back = new("Kanalinfo", ButtonStyle.Gray, Icon.ChevronLeft);
     public readonly NameField Name = new();
-    readonly Segmented _view;
-    readonly Button _openEq = new("EQ & Spektrum", ButtonStyle.Tinted);
-    readonly Button _openDelay = new("Laufzeit", ButtonStyle.Gray);
-    readonly Button _openProtection = new("Schutz", ButtonStyle.Gray);
-    readonly Button _openLink = new("App-Link", ButtonStyle.Gray);
-    readonly Toggle _showEq = new("EQ-Kurve", () => EqSpectrumGraph.EqColor) { ActiveText = () => Theme.IsDark ? Theme.Black : Theme.White };
-    readonly Toggle _showBefore = new("Vor EQ", () => EqSpectrumGraph.BeforeColor) { ActiveText = () => Theme.Black };
-    readonly Toggle _showAfter = new("Nach EQ", () => EqSpectrumGraph.AfterColor) { ActiveText = () => Theme.Black };
-    readonly EqSpectrumGraph _graph = new();
 
     public readonly Slider Gain = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Default = 0, Step = 0.1, WheelStep = 1 };
     public readonly ValueBox GainBox = new();
-    public readonly Switch MuteSw = new(), SoloSw = new(), PhaseSw = new();
-    public readonly Slider Delay = new() { Min = 0, Max = Theme.DelayMaxMs, Default = 0, Step = 0.01, WheelStep = 0.1 };
-    public readonly ValueBox DelayBox = new() { EditHint = "Doppelklick: Laufzeit in ms eintippen" };
-    public readonly Segmented Lock = new("Aus", "0", "−6", "−10", "−20") { Tooltip = "Gain-Sperre: höchster erlaubter Pegel in dB" };
-    readonly Button _lockCustom = new("Eigener Wert …", ButtonStyle.Plain) { Font = Theme.CalloutMedium };
-    public readonly Segmented Ceiling = new("−1", "−3", "−6", "−12") { Tooltip = "Limiter-Grenze des Ausgangs in dBFS" };
-    readonly Button _ceilCustom = new("Eigener Wert …", ButtonStyle.Plain) { Font = Theme.CalloutMedium };
-    internal readonly Button RewImport = new("REW-Filter importieren …", ButtonStyle.Tinted, Icon.Import);
-    internal readonly Button RewBypass = new("EQ umgehen", ButtonStyle.Gray);
-    readonly Button _rewRemove = new("EQ entfernen", ButtonStyle.DestructiveTinted);
+    public readonly Slider Trim = new() { Min = -24, Max = 24, Default = 0, Step = 0.1, WheelStep = 0.5 };
+    public readonly ValueBox TrimBox = new();
+    public readonly Slider Pan = new() { Min = -1.0, Max = 1.0, Default = 0, Step = 0.02, WheelStep = 0.05 };
+    public readonly ValueBox PanBox = new();
+    public readonly Segmented LowCut = new("Aus", "60 Hz", "80 Hz", "100 Hz", "120 Hz");
+
+    public readonly Switch MuteSw = new(), SoloSw = new(), PhaseSw = new(), PairLinkSw = new(), RecallSafeSw = new();
+    public readonly Slider Delay = new() { Min = 0, Max = 50.0, Default = 0, Step = 0.05, WheelStep = 0.2 };
+    public readonly ValueBox DelayBox = new() { EditHint = "Doppelklick: Laufzeit 0..1000 ms eintippen" };
+    public readonly Segmented Lock = new("Aus", "0", "−6", "−12", "−20") { Tooltip = "Gain-Sperre: höchster erlaubter Pegel in dB" };
+    public readonly Segmented Ceiling = new("−1", "−3", "−6", "−12") { Tooltip = "Brickwall-Limiter-Grenze des Ausgangs in dBFS" };
+
+    readonly Button _openOutDsp = new("In Outputs / DSP öffnen (Crossover, PEQ & REW)", ButtonStyle.Filled, Icon.Dsp);
     public readonly Button LinkBind = new("Programm binden …", ButtonStyle.Tinted, Icon.Link);
     public readonly Button LinkRemove = new("Lösen", ButtonStyle.DestructiveTinted);
     readonly Button _left = new("Nach links", ButtonStyle.Gray, Icon.ChevronLeft);
     readonly Button _right = new("Nach rechts", ButtonStyle.Gray, Icon.ChevronRight);
     public readonly Button Delete = new("Kanal löschen", ButtonStyle.DestructiveTinted, Icon.Trash);
 
-    static readonly double[] LockValues = { Theme.FaderMaxDb, 0, -6, -10, -20 };
+    static readonly double[] LockValues = { Theme.FaderMaxDb, 0, -6, -12, -20 };
     static readonly double[] CeilValues = { -1, -3, -6, -12 };
+    static readonly int[] LowCutHz = { 0, 60, 80, 100, 120 };
 
-    // Layout-Ergebnis fuer das Zeichnen
-    readonly List<RectF> _groups = new();
-    readonly List<(string Text, RectF Rect, TextStyle Style, Func<Color4> Color, bool Wrap)> _labels = new();
-    readonly List<(float X, float Y, float W)> _seps = new();
-    RectF _linkStatus;
+    readonly List<RectF> _cards = new();
+    readonly List<(string Text, RectF Rect, TextStyle Style, Color4 Color)> _labels = new();
 
-    ChannelSheet(AppModel m, bool input, int index, bool eq)
+    ChannelSheet(AppModel m, bool input, int index)
     {
         _m = m; IsInput = input; Index = index;
-        _view = input ? new Segmented("EQ & Spektrum", "Laufzeit", "Schutz", "App-Link")
-                      : new Segmented("EQ & Spektrum", "Laufzeit", "Schutz");
-        Add(_prev); Add(_next); Add(_close); Add(_back); Add(Name);
-        Add(_openEq); Add(_openDelay); Add(_openProtection);
-        if (input) Add(_openLink);
-        Add(Gain); Add(GainBox); Add(MuteSw); Add(SoloSw); Add(PhaseSw);
-        Add(Delay); Add(DelayBox); Add(Lock); Add(_lockCustom);
-        if (!input) { Add(Ceiling); Add(_ceilCustom); Add(RewImport); Add(RewBypass); Add(_rewRemove); }
-        if (input) { Add(LinkBind); Add(LinkRemove); }
-        Add(_left); Add(_right); Add(Delete);
-        Add(_view); Add(_showEq); Add(_showBefore); Add(_showAfter); Add(_graph);
+        AddHeader(_prev); AddHeader(_next); AddHeader(_close); AddHeader(Name);
 
-        _view.Changed += SetTab;
-        _back.Clicked += () => SetView(false);
-        _openEq.Clicked += () => SetTab(0);
-        _openDelay.Clicked += () => SetTab(1);
-        _openProtection.Clicked += () => SetTab(2);
-        _openLink.Clicked += () => SetTab(3);
-        _showEq.SetChecked(true); _showBefore.SetChecked(true); _showAfter.SetChecked(true);
-        _showEq.Toggled += on => _graph.ShowEq = on;
-        _showBefore.Toggled += on => _graph.ShowBefore = on;
-        _showAfter.Toggled += on => _graph.ShowAfter = on;
-        SetView(eq);
+        Add(Gain); Add(GainBox);
+        if (input) { Add(Trim); Add(TrimBox); Add(Pan); Add(PanBox); Add(LowCut); Add(LinkBind); Add(LinkRemove); }
+        else { Add(_openOutDsp); Add(Ceiling); }
+        Add(MuteSw); Add(SoloSw); Add(PhaseSw); Add(PairLinkSw); Add(RecallSafeSw);
+        Add(Delay); Add(DelayBox); Add(Lock);
+        Add(_left); Add(_right); Add(Delete);
 
         _prev.Clicked += _ => Go(-1);
         _next.Clicked += _ => Go(+1);
@@ -117,499 +87,323 @@ internal sealed class ChannelSheet : SheetOverlay
 
         Gain.ToNorm = db => Db.IsOff(db) ? 0 : FaderScale.ToT(db);
         Gain.FromNorm = t => { double db = FaderScale.ToDb(t); return Db.IsOff(db) ? db : Math.Round(db * 10) / 10; };
-        Gain.Changed += v => Upd(c => c with { GainDb = Math.Abs(v) < 0.45 && !Db.IsOff(v) ? 0 : v });
-        GainBox.Typed += s => { if (Db.TryParse(s, out var db)) Upd(c => c with { GainDb = Math.Min(db, c.MaxGainDb) }); else Flash("Ungültiger Wert: " + s); };
+        Gain.Changed += v => Upd(c => c with { GainDb = Math.Abs(v) < 0.35 && !Db.IsOff(v) ? 0 : v });
+        GainBox.Typed += s => { if (Db.TryParse(s, out var db)) Upd(c => c with { GainDb = Math.Min(db, c.MaxGainDb) }); };
+
+        Trim.Changed += v => Upd(c => c with { TrimDb = Math.Round(v * 10) / 10 });
+        TrimBox.Typed += s => { if (Db.TryParse(s, out var db)) Upd(c => c with { TrimDb = Math.Clamp(db, -24, 24) }); };
+
+        Pan.Changed += v => Upd(c => c with { Pan = Math.Abs(v) < 0.03 ? 0 : Math.Round(v * 100) / 100 });
+        PanBox.Typed += s =>
+        {
+            string clean = s.Trim().ToUpperInvariant();
+            if (clean is "C" or "0" or "MITTE") Upd(c => c with { Pan = 0 });
+            else if (clean.StartsWith('L') && double.TryParse(clean[1..], NumberStyles.Float, CultureInfo.InvariantCulture, out var lv))
+                Upd(c => c with { Pan = -Math.Clamp(lv / 100.0, 0, 1) });
+            else if (clean.StartsWith('R') && double.TryParse(clean[1..], NumberStyles.Float, CultureInfo.InvariantCulture, out var rv))
+                Upd(c => c with { Pan = Math.Clamp(rv / 100.0, 0, 1) });
+            else if (double.TryParse(clean.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var pv))
+                Upd(c => c with { Pan = Math.Clamp(pv, -1, 1) });
+        };
+
+        LowCut.Changed += idx =>
+        {
+            int hz = LowCutHz[idx];
+            Upd(c =>
+            {
+                var rest = c.Filters.Where(f => f.Type != FilterType.HighPass).ToList();
+                if (hz > 0) rest.Insert(0, new FilterSpec(FilterType.HighPass, hz, 0.7071, 0, Order: 2));
+                return c with { Filters = rest.ToArray() };
+            });
+        };
+
         MuteSw.Changed += on => Upd(c => c with { Mute = on });
         SoloSw.Changed += on => Upd(c => c with { Solo = on });
         PhaseSw.Changed += on => Upd(c => c with { InvertPhase = on });
-        Delay.Changed += v => Upd(c => c with { DelayMs = v });
-        DelayBox.Typed += s => { if (TryMs(s, out var ms)) Upd(c => c with { DelayMs = Math.Clamp(ms, 0, Theme.DelayMaxMs) }); else Flash("Ungültiger Wert: " + s); };
-        Lock.Changed += i => SetMax(LockValues[i]);
-        _lockCustom.Clicked += () => EditNumber(_lockCustom.Bounds, Cur.MaxGainDb < Theme.FaderMaxDb - 0.05 ? Cur.MaxGainDb : 0, db => SetMax(Math.Clamp(db, -60, Theme.FaderMaxDb)));
-        Ceiling.Changed += i => Upd(c => c with { CeilingDbfs = CeilValues[i] });
-        _ceilCustom.Clicked += () => EditNumber(_ceilCustom.Bounds, Cur.CeilingDbfs, db => Upd(c => c with { CeilingDbfs = Math.Min(0, db) }));
-        RewImport.Clicked += ImportRew;
-        RewBypass.Clicked += () =>
+        PairLinkSw.Changed += _ =>
         {
-            if (CanEditRew && Cur.Correction is { } eq) Upd(c => c with { Correction = eq with { Bypassed = !eq.Bypassed } });
+            int pairStart = Index + 1 < Count ? Index : Math.Max(0, Index - 1);
+            _m.TogglePairLink(IsInput, pairStart);
         };
-        _rewRemove.Clicked += () => Root?.Confirm("REW-EQ entfernen?", "Der importierte EQ wird von diesem Ausgang entfernt.",
-            "Entfernen", () => SetCorrection(null), danger: true);
+        RecallSafeSw.Changed += on => Upd(c => c with { RecallSafe = on ? RecallSafeFlags.All : RecallSafeFlags.None });
+
+        Delay.Changed += v => Upd(c => c with { DelayMs = Math.Round(v * 100) / 100 });
+        DelayBox.Typed += s =>
+        {
+            string t = s.Trim().Replace("ms", "", StringComparison.OrdinalIgnoreCase).Trim().Replace(',', '.');
+            if (double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out var ms) && double.IsFinite(ms))
+                Upd(c => c with { DelayMs = Math.Clamp(ms, 0, 1000.0) });
+        };
+
+        Lock.Changed += i =>
+        {
+            double max = LockValues[i];
+            Upd(c => c with { MaxGainDb = max, GainDb = Math.Min(c.GainDb, max) });
+        };
+        Ceiling.Changed += i => Upd(c => c with { CeilingDbfs = CeilValues[i] });
+
+        _openOutDsp.Clicked += () =>
+        {
+            var r = Root;
+            int idx = Index;
+            Close();
+            r?.OpenOutputDsp(idx);
+        };
+
         LinkBind.Clicked += () => OpenPicker();
         LinkRemove.Clicked += () =>
         {
             var l = _m.LinkAt(Index); if (l == null) return;
             if (_m.RemoveLink(l.FirstChannel)) Root?.Notify.Flash($"Verknüpfung mit {l.Title} gelöst.");
         };
-        _left.Clicked += () => Move(-1);
-        _right.Clicked += () => Move(+1);
-        Delete.Clicked += AskDelete;
+
+        _left.Clicked += () => { if (_m.CanMoveChannel(IsInput, Index, -1)) { _m.MoveChannel(IsInput, Index, -1); Index--; Layout(); Invalidate(); } };
+        _right.Clicked += () => { if (_m.CanMoveChannel(IsInput, Index, +1)) { _m.MoveChannel(IsInput, Index, +1); Index++; Layout(); Invalidate(); } };
+        Delete.Clicked += () => Root?.Confirm("Kanal löschen?", $"„{_m.DisplayName(IsInput, Index)}“ wird entfernt.", "Löschen",
+            () => { int idx = Index; Close(); _m.RemoveChannel(IsInput, idx); }, danger: true);
+
+        _m.ValuesChanged += SyncAndInvalidate;
         _m.StructureChanged += OnStructure;
     }
 
+    int Count => IsInput ? _m.InputCount : _m.OutputCount;
+    ChannelDsp Cur => _m.Channel(IsInput, Index);
+
     public static ChannelSheet Show(UiRoot root, AppModel m, bool input, int index, bool eq = false)
     {
-        // nur ein Kanal-Blatt gleichzeitig
+        if (!input && eq)
+        {
+            root.OpenOutputDsp(index);
+            return null!;
+        }
         foreach (var o in root.Overlays.ToArray()) if (o is ChannelSheet) root.CloseOverlay(o);
-        var s = new ChannelSheet(m, input, index, eq);
+        var s = new ChannelSheet(m, input, index);
         root.ShowOverlay(s);
-        s.RefreshSpectrum(0);
         return s;
     }
 
     public override void OnClosed()
     {
+        _m.ValuesChanged -= SyncAndInvalidate;
         _m.StructureChanged -= OnStructure;
-        _graph.Stop();
     }
-
-    void SetView(bool detail)
-    {
-        DetailView = detail;
-        _view.Visible = _back.Visible = detail;
-        _openEq.Visible = _openDelay.Visible = _openProtection.Visible = !detail;
-        _openLink.Visible = IsInput && !detail;
-        bool basic = !detail;
-        Gain.Visible = GainBox.Visible = MuteSw.Visible = SoloSw.Visible = PhaseSw.Visible = basic;
-        _left.Visible = _right.Visible = Delete.Visible = basic;
-        bool eq = detail && _detailTab == 0;
-        _graph.Visible = _showEq.Visible = _showBefore.Visible = _showAfter.Visible = eq;
-        RewImport.Visible = !IsInput && eq;
-        RewBypass.Visible = _rewRemove.Visible = !IsInput && eq && Index < Count && Cur.Correction != null;
-        bool delay = detail && _detailTab == 1;
-        Delay.Visible = DelayBox.Visible = delay;
-        bool protect = detail && _detailTab == 2;
-        Lock.Visible = _lockCustom.Visible = protect;
-        Ceiling.Visible = _ceilCustom.Visible = !IsInput && protect;
-        bool link = detail && _detailTab == 3 && IsInput;
-        LinkBind.Visible = link;
-        LinkRemove.Visible = link && _m.LinkAt(Index) != null;
-        if (!eq) _graph.Stop();
-        ResetScroll();
-        if (Root != null) { RefreshSpectrum(0); Layout(); Invalidate(); }
-    }
-
-    void SetTab(int tab)
-    {
-        _detailTab = Math.Clamp(tab, 0, IsInput ? 3 : 2);
-        _view.SetSelected(_detailTab);
-        SetView(true);
-    }
-
-    internal void OpenTab(int tab) => SetTab(tab);
-    internal void ShowInfo() => SetView(false);
-
-    bool RefreshSpectrum(float dt) => EqView && Index < Count && _graph.Update(Cur, _m.Settings.SampleRate, IsInput, Index,
-        _m.HostState == HostState.Running ? _m.Engine as MixerEngine : null, dt);
-
-    public override bool Tick(float dt) => RefreshSpectrum(dt) | base.Tick(dt);
 
     void OnStructure()
     {
-        if (Index >= Count) { Close(); return; }
-        Layout(); Invalidate();
-    }
-
-    int Count => IsInput ? _m.InputCount : _m.OutputCount;
-    ChannelDsp Cur => _m.Channel(IsInput, Index);
-    void Upd(Func<ChannelDsp, ChannelDsp> f)
-    {
-        if (Index < Count) { _m.UpdateChannel(IsInput, Index, f); SyncValues(); }
+        if (Count == 0) { Close(); return; }
+        Index = Math.Clamp(Index, 0, Count - 1);
+        Layout();
         Invalidate();
     }
-    void Flash(string s) => Root?.Notify.Flash(s, true);
 
-    static bool TryMs(string s, out double ms)
-    {
-        s = s.Trim().Replace(',', '.');
-        if (s.EndsWith("ms", StringComparison.OrdinalIgnoreCase)) s = s[..^2].Trim();
-        return double.TryParse(s, System.Globalization.NumberStyles.Float, Db.Inv, out ms) && !double.IsNaN(ms) && !double.IsInfinity(ms);
-    }
+    void SyncAndInvalidate() { if (Count > 0) { Layout(); Invalidate(); } }
+    void Upd(Func<ChannelDsp, ChannelDsp> f) => _m.UpdateChannel(IsInput, Index, f);
 
-    void Go(int d)
+    void Go(int dir)
     {
-        int n = Index + d;
-        if (n < 0 || n >= Count) return;
-        if (Root?.Editor.Active == true) Root.Editor.Commit();
-        Index = n;
-        Layout(); Invalidate();
-    }
-
-    void Move(int d)
-    {
-        if (!_m.CanMoveChannel(IsInput, Index, d)) return;
-        _m.MoveChannel(IsInput, Index, d);
-        Index += d;
-        Layout(); Invalidate();
-    }
-
-    void AskDelete()
-    {
-        var root = Root; if (root == null) return;
-        string nm = _m.DisplayName(IsInput, Index);
-        int idx = Index;
-        root.Confirm("Kanal löschen?", $"„{nm}“ wird mit seinen Matrix-Verbindungen entfernt. Nachfolgende Kanäle rücken auf.",
-            "Löschen", () =>
-            {
-                Close();
-                if (idx < Count) _m.RemoveChannel(IsInput, idx);
-                root.Notify.Flash($"„{nm}“ gelöscht");
-            }, danger: true);
+        int next = Index + dir;
+        if (next < 0 || next >= Count) return;
+        Index = next;
+        ResetScroll();
+        Layout();
+        Invalidate();
     }
 
     public void BeginRename()
     {
-        var root = Root; if (root == null) return;
-        var r = Name.Bounds.Inflate(6, 4);
-        root.BeginEdit(r, Cur.Name, Theme.Title, s => Upd(c => c with { Name = s.Trim() }), 24);
+        if (Root == null || Count == 0) return;
+        Root.BeginEdit(Name.Bounds, Cur.Name, Theme.Title, s => Upd(c => c with { Name = s.Trim() }), 32);
     }
 
     public void OpenPicker(bool manual = false)
     {
-        var root = Root; if (root == null) return;
-        if (_m.HostRunning) { root.Notify.Flash("App-Links lassen sich nur bei gestopptem Audio ändern – zuerst Audio stoppen.", true); return; }
-        AppLinkPicker.Show(root, _m, Index, LinkBind.Bounds, manual);
+        if (Root == null || !IsInput) return;
+        AppLinkPicker.Show(Root, _m, Index, LinkBind.Bounds, manual);
     }
 
-    bool CanEditRew => !IsInput && Index < Count && !_m.HostRunning && !_m.HostBusy;
-
-    void SetCorrection(OutputCorrection? correction)
+    static string FormatPan(double pan)
     {
-        if (!CanEditRew) return;
-        Upd(c => c with { Correction = correction });
-        Layout();
+        if (Math.Abs(pan) < 0.015) return "Mitte";
+        return pan < 0 ? $"L {Math.Abs(pan) * 100:0}" : $"R {pan * 100:0}";
     }
 
-    void ImportRew()
+    protected override float LayoutBody(float x, float y, float w)
     {
-        var root = Root;
-        if (root == null || !CanEditRew) return;
-        string? path = root.Shell.ShowOpenDialog("REW-Filter importieren", "REW-Filter (*.txt)\0*.txt\0\0");
-        if (string.IsNullOrEmpty(path)) return;
+        _cards.Clear();
+        _labels.Clear();
+        if (Count == 0) return 0;
 
-        OutputCorrection eq;
-        try { eq = RewFilterImport.Read(path, _m.Settings.SampleRate); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException)
-        {
-            ModalDialog.Show(root, "REW-Import fehlgeschlagen", ex.Message, new[] { "OK" }, 0, -1, _ => { });
-            return;
-        }
-
-        string name = _m.DisplayName(false, Index);
-        string replace = Cur.Correction == null ? "" : " Der bisherige REW-EQ dieses Ausgangs wird ersetzt.";
-        root.Confirm("REW-EQ übernehmen?", $"„{eq.SourceName}“ enthält {eq.Filters.Count} aktive Filter für „{name}“.{replace}",
-            "Übernehmen", () => SetCorrection(eq));
-    }
-
-    void SetMax(double newMax)
-    {
-        var root = Root; if (root == null) return;
         var c = Cur;
-        void Apply() => Upd(ch => ch with { MaxGainDb = newMax });
-        bool wasLocked = c.MaxGainDb < Theme.FaderMaxDb - 0.05;
-        if (wasLocked && newMax > c.MaxGainDb + 0.05)
-        {
-            string nm = _m.DisplayName(IsInput, Index);
-            root.Confirm("Gain-Sperre lockern?",
-                $"„{nm}“ darf danach bis {(newMax >= Theme.FaderMaxDb - 0.05 ? "+12 dB (keine Sperre)" : Db.Format(newMax) + " dB")} laut werden (bisher max. {Db.Format(c.MaxGainDb)} dB). Das kann Lautsprecher und Gehör gefährden.",
-                "Sperre lockern", Apply, danger: true);
-        }
-        else Apply();
-        Invalidate();
-    }
-
-    void EditNumber(RectF at, double current, Action<double> apply)
-    {
-        var root = Root; if (root == null) return;
-        root.BeginEdit(at.Inflate(2), Db.Format(current).Replace(Db.Minus, '-'), Theme.Value, s =>
-        {
-            if (Db.TryParse(s, out double v)) apply(v); else root.Notify.Flash("Ungültiger Wert: " + s, true);
-        }, 10, null, HAlign.Center);
-    }
-
-    // ---- Werte aus dem Modell ------------------------------------------------------------------
-    void SyncValues()
-    {
-        if (Index >= Count) return;
-        var c = Cur;
-        var link = IsInput ? _m.LinkAt(Index) : null;
-        Name.Text = !string.IsNullOrWhiteSpace(c.Name) ? c.Name : link != null ? link.Title : AppModel.DefaultName(IsInput, Index);
+        Name.Text = _m.DisplayName(IsInput, Index);
         Name.Placeholder = string.IsNullOrWhiteSpace(c.Name);
-        _prev.Enabled = Index > 0; _next.Enabled = Index < Count - 1;
-        bool locked = c.MaxGainDb < Theme.FaderMaxDb - 0.05;
-        Gain.Limit = locked ? c.MaxGainDb : double.NaN;
+        _prev.Enabled = Index > 0;
+        _next.Enabled = Index + 1 < Count;
+
+        float start = y;
+        float pad = 14f;
+        float rowH = Theme.Touch ? 38f : 32f;
+
+        // Karte 1: Pegel, Trim & Panorama
+        float c1Top = y;
+        y += pad;
+        _labels.Add(("Arbeits-Fader (dB)", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+        y += 20;
+        Gain.Limit = c.MaxGainDb < Theme.FaderMaxDb - 0.05 ? c.MaxGainDb : double.NaN;
         Gain.SetValue(c.GainDb);
-        GainBox.Text = Db.Format(c.GainDb) + " dB";
-        GainBox.TextColor = !Db.IsOff(c.GainDb) && c.GainDb > 0.05 ? Theme.Yellow : null;
-        MuteSw.SetOn(c.Mute); SoloSw.SetOn(c.Solo); PhaseSw.SetOn(c.InvertPhase);
-        Delay.SetValue(c.DelayMs);
-        DelayBox.Text = $"{c.DelayMs:0.00} ms";
-        int li = locked ? Array.FindIndex(LockValues, v => Math.Abs(v - c.MaxGainDb) < 0.05) : 0;
-        Lock.SetSelected(li);
-        Ceiling.SetSelected(Array.FindIndex(CeilValues, v => Math.Abs(v - c.CeilingDbfs) < 0.05));
-        RewImport.Enabled = RewBypass.Enabled = _rewRemove.Enabled = CanEditRew;
-        RewBypass.Visible = _rewRemove.Visible = EqView && c.Correction != null;
-        RewBypass.Text = c.Correction?.Bypassed == true ? "EQ aktivieren" : "EQ umgehen";
-        bool run = _m.HostRunning;
-        LinkBind.Text = link != null ? "Ändern …" : "Programm binden …";
-        LinkBind.Enabled = !run;
-        LinkRemove.Visible = DetailView && IsInput && _detailTab == 3 && link != null;
-        LinkRemove.Enabled = !run;
-        _left.Enabled = Index > 0 && _m.CanMoveChannel(IsInput, Index, -1);
-        _right.Enabled = Index < Count - 1 && _m.CanMoveChannel(IsInput, Index, +1);
-    }
+        Gain.Bounds = new RectF(x + pad, y, w - 2 * pad - 76, rowH);
+        GainBox.Text = Db.Format(c.GainDb);
+        GainBox.Bounds = new RectF(x + w - pad - 68, y + (rowH - 26) / 2, 68, 26);
+        y += rowH + 8;
 
-    // ---- Layout --------------------------------------------------------------------------------
-    public override void Layout()
-    {
-        SyncValues();
-        base.Layout();
-        var p = Panel;
-        float bs = 32;
-        _close.Bounds = new RectF(p.Right - 16 - bs, p.Y + 20, bs, bs);
-        _next.Bounds = new RectF(_close.Bounds.X - 6 - bs, p.Y + 20, bs, bs);
-        _prev.Bounds = new RectF(_next.Bounds.X - 2 - bs, p.Y + 20, bs, bs);
-        _back.Bounds = new RectF(p.X + 20, p.Y + 26, 110, 32);
-        float nameX = DetailView ? _back.Bounds.Right + 16 : p.X + 20;
-        Name.Bounds = new RectF(nameX, p.Y + 34, Math.Max(40, _prev.Bounds.X - 12 - nameX), 28);
-    }
-
-    void Label(string t, RectF r, TextStyle st, Func<Color4> c, bool wrap = false) => _labels.Add((t, r, st, c, wrap));
-
-    float Section(float x, float y, float w, string title)
-    {
-        Label(title, new RectF(x + 4, y, w, 20), Theme.Overline, () => Theme.TextTertiary);
-        return y + 24;
-    }
-
-    float Footer(float x, float y, float w, string text)
-    {
-        float h = Renderer.TextHeight(text, Theme.Caption, w - 8);
-        Label(text, new RectF(x + 4, y + 6, w - 8, h + 2), Theme.Caption, () => Theme.TextTertiary, true);
-        return y + 6 + h + 4;
-    }
-
-    protected override float LayoutBody(float x, float y0, float w)
-    {
-        _groups.Clear(); _labels.Clear(); _seps.Clear();
-        float y = y0 + 12;
-        float rowH = Theme.Touch ? 52 : 44;
-        float ip = 14; // Innenabstand der Gruppen
-        float boxW = 92, boxH = Theme.Touch ? 32 : 26;
-        float g0;
-        var c = Index < Count ? Cur : new ChannelDsp();
-
-        if (DetailView)
+        if (IsInput)
         {
-            _view.Bounds = new RectF(x, y, w, Theme.ControlHSmall + 8);
-            y = _view.Bounds.Bottom + 18;
+            _labels.Add(("Digitaler Vorverstärkungs-Trim (−24 .. +24 dB)", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+            y += 20;
+            Trim.SetValue(c.TrimDb);
+            Trim.Bounds = new RectF(x + pad, y, w - 2 * pad - 76, rowH);
+            TrimBox.Text = Db.Format(c.TrimDb);
+            TrimBox.Bounds = new RectF(x + w - pad - 68, y + (rowH - 26) / 2, 68, 26);
+            y += rowH + 8;
+
+            _labels.Add(("Panorama / Stereo-Balance", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+            y += 20;
+            Pan.SetValue(c.Pan);
+            Pan.Bounds = new RectF(x + pad, y, w - 2 * pad - 76, rowH);
+            PanBox.Text = FormatPan(c.Pan);
+            PanBox.Bounds = new RectF(x + w - pad - 68, y + (rowH - 26) / 2, 68, 26);
+            y += rowH + 10;
+
+            _labels.Add(("Trittschall-Filter (Low-Cut 12 dB/Okt.)", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+            y += 22;
+            var hp = c.Filters.FirstOrDefault(f => f.Type == FilterType.HighPass && f.Enabled);
+            int lcIdx = hp == null ? 0 : Array.FindIndex(LowCutHz, hz => hz > 0 && Math.Abs(hp.FrequencyHz - hz) < 5);
+            LowCut.SetSelected(lcIdx < 0 ? 2 : lcIdx);
+            LowCut.Bounds = new RectF(x + pad, y, w - 2 * pad, Theme.ControlHSmall);
+            y += Theme.ControlHSmall + pad;
         }
-        if (EqView)
+        else
         {
-            float bw = Math.Min(160, (w - 12) / 3);
-            float bh = Theme.ControlHSmall + 4;
-            _showEq.Bounds = new RectF(x, y, bw, bh);
-            _showBefore.Bounds = new RectF(_showEq.Bounds.Right + 6, y, bw, bh);
-            _showAfter.Bounds = new RectF(_showBefore.Bounds.Right + 6, y, bw, bh);
-            _graph.Bounds = new RectF(x, y + bh + 12, w, Math.Max(260, Math.Min(500, Body.H - 230)));
-            y = Footer(x, _graph.Bounds.Bottom, w, "Live-Abgriff direkt vor und nach der Filterkette.") + 12;
-            if (!IsInput) y = LayoutRew(c, x, y, Math.Min(w, 720), ip);
-            return y - y0;
+            _openOutDsp.Bounds = new RectF(x + pad, y + 4, w - 2 * pad, Theme.ControlH);
+            y += Theme.ControlH + pad + 4;
         }
+        _cards.Add(new RectF(x, c1Top, w, y - c1Top));
+        y += 10;
 
-        // ---- Pegel ----
-        if (!DetailView)
+        // Karte 2: Schalter (Mute, Solo, Phase, Stereo-Kopplung, Recall-Safe)
+        float c2Top = y;
+        y += pad;
+        void SwitchRow(string label, Switch sw, bool val, bool enabled = true)
         {
-        y = Section(x, y, w, "PEGEL");
-        g0 = y;
-        Label("Gain", new RectF(x + ip, y + 10, 120, boxH), Theme.BodyMedium, () => Theme.Text);
-        GainBox.Bounds = new RectF(x + w - ip - boxW, y + 10, boxW, boxH);
-        Gain.Bounds = new RectF(x + ip - 4, y + 10 + boxH + 4, w - 2 * ip + 8, 32);
-        y = Gain.Bounds.Bottom + 6;
-        foreach (var (sw, text) in new[] { (MuteSw, "Stumm"), (SoloSw, "Solo"), (PhaseSw, "Phase invertieren (180°)") })
-        {
-            _seps.Add((x + ip, y, w - ip));
-            Label(text, new RectF(x + ip, y, w - 2 * ip - 60, rowH), Theme.Body, () => Theme.Text);
-            sw.Bounds = new RectF(x + w - ip - 60, y, 60, rowH);
-            y += rowH;
+            sw.Enabled = enabled;
+            sw.SetOn(val);
+            _labels.Add((label, new RectF(x + pad, y, w - 2 * pad - 60, rowH), Theme.Body, Theme.Text));
+            sw.Bounds = new RectF(x + w - pad - Theme.SwitchW, y, Theme.SwitchW, rowH);
+            y += rowH + 4;
         }
-        _groups.Add(new RectF(x, g0, w, y - g0));
-        y += 22;
+        SwitchRow("Stumm (Mute)", MuteSw, c.Mute);
+        SwitchRow("Solo", SoloSw, c.Solo);
+        SwitchRow("Phase drehen (180°)", PhaseSw, c.InvertPhase);
+        SwitchRow("Stereo-Paar koppeln (relativ)", PairLinkSw, c.LinkGroupId.HasValue, Count >= 2);
+        SwitchRow("Recall-Safe (vor Snapshots schützen)", RecallSafeSw, c.RecallSafe != RecallSafeFlags.None);
+        y += pad - 4;
+        _cards.Add(new RectF(x, c2Top, w, y - c2Top));
+        y += 10;
 
-        y = Section(x, y, w, "BEARBEITEN");
-        float navW = Math.Min(w, 480);
-        float navH = Theme.ControlHSmall + 8;
-        _openEq.Bounds = new RectF(x, y, navW, navH); y += navH + 7;
-        _openDelay.Bounds = new RectF(x, y, navW, navH); y += navH + 7;
-        _openProtection.Bounds = new RectF(x, y, navW, navH); y += navH + 7;
-        if (IsInput) { _openLink.Bounds = new RectF(x, y, navW, navH); y += navH + 7; }
-        y += 12;
-        return LayoutChannelActions(x, y, w, ip) - y0;
-        }
+        // Karte 3: Laufzeit (Delay 0..1000 ms) & Schutz
+        float c3Top = y;
+        y += pad;
+        double meters = c.DelayMs * 0.343;
+        _labels.Add(($"Laufzeit / Delay  ·  {meters:0.00} m Distanz", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+        y += 20;
+        Delay.SetValue(Math.Min(50.0, c.DelayMs));
+        Delay.Bounds = new RectF(x + pad, y, w - 2 * pad - 82, rowH);
+        DelayBox.Text = $"{c.DelayMs:0.##} ms";
+        DelayBox.Bounds = new RectF(x + w - pad - 74, y + (rowH - 26) / 2, 74, 26);
+        y += rowH + 10;
 
-        // ---- Laufzeit ----
-        if (_detailTab == 1)
-        {
-        y = Section(x, y, w, "LAUFZEIT");
-        g0 = y;
-        Label("Verzögerung", new RectF(x + ip, y + 10, 160, boxH), Theme.BodyMedium, () => Theme.Text);
-        DelayBox.Bounds = new RectF(x + w - ip - boxW, y + 10, boxW, boxH);
-        Delay.Bounds = new RectF(x + ip - 4, y + 10 + boxH + 4, w - 2 * ip + 8, 32);
-        y = Delay.Bounds.Bottom + 8;
-        _groups.Add(new RectF(x, g0, w, y - g0));
-        y = Footer(x, y, w, "Verzögert diesen Kanal um bis zu 20 ms, z. B. um Lautsprecher zeitlich auszurichten. Doppelklick auf den Regler = 0.");
-        return y + 16 - y0;
-        }
+        _labels.Add(("Gain-Sperre (MaxGainDb)", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+        y += 20;
+        int lockIdx = Array.FindIndex(LockValues, v => Math.Abs(v - c.MaxGainDb) < 0.25);
+        Lock.SetSelected(lockIdx >= 0 ? lockIdx : 0);
+        Lock.Bounds = new RectF(x + pad, y, w - 2 * pad, Theme.ControlHSmall);
+        y += Theme.ControlHSmall + 10;
 
-        // ---- Schutz ----
-        if (_detailTab == 2)
-        {
-        y = Section(x, y, w, "SCHUTZ");
-        g0 = y;
-        float lw = Renderer.MeasureWidth("Eigener Wert …", Theme.CalloutMedium) + 20;
-        Label("Gain-Sperre", new RectF(x + ip, y + 10, w - 2 * ip - lw, boxH), Theme.BodyMedium, () => Theme.Text);
-        _lockCustom.Bounds = new RectF(x + w - ip - lw + 8, y + 10, lw, boxH);
-        Lock.Bounds = new RectF(x + ip, y + 10 + boxH + 6, w - 2 * ip, Theme.ControlH);
-        y = Lock.Bounds.Bottom + 14;
         if (!IsInput)
         {
-            _seps.Add((x + ip, y, w - ip));
-            Label("Limiter-Grenze (dBFS)", new RectF(x + ip, y + 10, w - 2 * ip - lw, boxH), Theme.BodyMedium, () => Theme.Text);
-            _ceilCustom.Bounds = new RectF(x + w - ip - lw + 8, y + 10, lw, boxH);
-            Ceiling.Bounds = new RectF(x + ip, y + 10 + boxH + 6, w - 2 * ip, Theme.ControlH);
-            y = Ceiling.Bounds.Bottom + 14;
+            _labels.Add(("Brickwall-Limiter Grenze (dBFS)", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+            y += 20;
+            int ceilIdx = Array.FindIndex(CeilValues, v => Math.Abs(v - c.CeilingDbfs) < 0.25);
+            Ceiling.SetSelected(ceilIdx >= 0 ? ceilIdx : 0);
+            Ceiling.Bounds = new RectF(x + pad, y, w - 2 * pad, Theme.ControlHSmall);
+            y += Theme.ControlHSmall + 6;
         }
-        _groups.Add(new RectF(x, g0, w, y - g0));
-        bool locked = c.MaxGainDb < Theme.FaderMaxDb - 0.05;
-        string lockText = locked
-            ? $"Gesperrt bei {Db.Format(c.MaxGainDb)} dB: Fader, Eingabe und Mausrad gehen nicht darüber." + (AppModel.IsProtected(c) ? " Matrix-Punkte auf diesen Ausgang bleiben bei höchstens 0 dB." : "")
-            : "Keine Sperre. Für empfindliche Hochtöner einen Höchstwert wählen – der Fader lässt sich dann nicht darüber ziehen.";
-        if (!IsInput) lockText += $" Limiter-Grenze: {Db.Format(c.CeilingDbfs)} dBFS (Marke am Meter).";
-        y = Footer(x, y, w, lockText);
-        return y + 16 - y0;
-        }
+        y += pad - 4;
+        _cards.Add(new RectF(x, c3Top, w, y - c3Top));
+        y += 10;
 
-        // ---- App-Link ----
-        if (IsInput && _detailTab == 3)
+        // Karte 4 (nur Eingang): App-Link
+        if (IsInput)
         {
-            y = Section(x, y, w, "APP-LINK");
-            g0 = y;
-            _linkStatus = new RectF(x + ip, y + 10, w - 2 * ip, 40);
-            y += 58;
-            float bh = Theme.ControlHSmall + 4;
-            bool linked = _m.LinkAt(Index) != null;
-            if (linked)
+            float c4Top = y;
+            y += pad;
+            var link = _m.LinkAt(Index);
+            string info = link != null ? LinkLook.Describe(link, _m.ViewOf(link)) : "Kein Programm direkt an diesen Eingang gebunden.";
+            _labels.Add(("App-Audio-Quelle (ProcessLoopback)", new RectF(x + pad, y, w - 2 * pad, 18), Theme.CaptionStrong, Theme.TextSecondary));
+            y += 20;
+            _labels.Add((info, new RectF(x + pad, y, w - 2 * pad, 22), Theme.Callout, Theme.Text));
+            y += 28;
+            if (link != null)
             {
-                float rw = Math.Max(80, LinkRemove.PreferredWidth);
-                LinkRemove.Bounds = new RectF(x + w - ip - rw, y, rw, bh);
-                LinkBind.Bounds = new RectF(x + ip, y, LinkRemove.Bounds.X - 8 - x - ip, bh);
+                LinkBind.Text = "Programm wechseln …";
+                LinkBind.Bounds = new RectF(x + pad, y, (w - 2 * pad - 8) * 0.65f, Theme.ControlH);
+                LinkRemove.Visible = true;
+                LinkRemove.Bounds = new RectF(LinkBind.Bounds.Right + 8, y, (w - 2 * pad - 8) * 0.35f, Theme.ControlH);
             }
-            else LinkBind.Bounds = new RectF(x + ip, y, w - 2 * ip, bh);
-            y += bh + 14;
-            _groups.Add(new RectF(x, g0, w, y - g0));
-            string note = _m.HostRunning
-                ? "Zum Ändern zuerst Audio stoppen."
-                : "Bindet ein Programm (z. B. Spotify) an diesen Eingang: Sein Ton läuft dann nur noch über NX-MIX.";
-            y = Footer(x, y, w, note);
-            return y + 16 - y0;
+            else
+            {
+                LinkBind.Text = "Programm binden …";
+                LinkBind.Bounds = new RectF(x + pad, y, w - 2 * pad, Theme.ControlH);
+                LinkRemove.Visible = false;
+            }
+            y += Theme.ControlH + pad;
+            _cards.Add(new RectF(x, c4Top, w, y - c4Top));
+            y += 10;
         }
 
-        return y - y0;
+        // Reihenfolge & Löschen
+        float half = (w - 8) / 2;
+        _left.Enabled = _m.CanMoveChannel(IsInput, Index, -1);
+        _right.Enabled = _m.CanMoveChannel(IsInput, Index, +1);
+        _left.Bounds = new RectF(x, y, half, Theme.ControlH);
+        _right.Bounds = new RectF(x + half + 8, y, half, Theme.ControlH);
+        y += Theme.ControlH + 8;
+        Delete.Bounds = new RectF(x, y, w, Theme.ControlH);
+        y += Theme.ControlH;
+
+        return y - start;
     }
 
-    float LayoutChannelActions(float x, float y, float w, float ip)
+    public override void Layout()
     {
-        // ---- Kanalverwaltung im Seitenblatt ----
-        y = Section(x, y, w, "KANAL");
-        float g0 = y;
-        float hb = Theme.ControlHSmall + 4;
-        float half = (w - 2 * ip - 8) / 2;
-        _left.Bounds = new RectF(x + ip, y + 14, half, hb);
-        _right.Bounds = new RectF(x + ip + half + 8, y + 14, half, hb);
-        y = _left.Bounds.Bottom + 10;
-        Delete.Bounds = new RectF(x + ip, y, w - 2 * ip, hb);
-        y = Delete.Bounds.Bottom + 14;
-        _groups.Add(new RectF(x, g0, w, y - g0));
-        return y;
+        base.Layout();
+        float y = Panel.Y + (HeaderH - 32) / 2;
+        _prev.Bounds = new RectF(Panel.X + 14, y, 30, 32);
+        _next.Bounds = new RectF(Panel.X + 46, y, 30, 32);
+        _close.Bounds = new RectF(Panel.Right - 44, y, 30, 32);
+        Name.Bounds = new RectF(Panel.X + 84, y, Math.Max(60, _close.Bounds.X - (Panel.X + 92)), 32);
     }
 
-    float LayoutRew(ChannelDsp c, float x, float y, float w, float ip)
+    protected override void PaintHeader(Renderer g, RectF header)
     {
-        y = Section(x, y, w, "REW-EQ");
-        float start = y;
-        float bh = Theme.ControlHSmall + 4;
-        RewImport.Bounds = new RectF(x + ip, y + 12, w - 2 * ip, bh);
-        y = RewImport.Bounds.Bottom;
-        if (c.Correction is { } eq)
-        {
-            float bw = (w - 2 * ip - 8) / 2;
-            RewBypass.Bounds = new RectF(x + ip, y + 8, bw, bh);
-            _rewRemove.Bounds = new RectF(RewBypass.Bounds.Right + 8, y + 8, bw, bh);
-            y = RewBypass.Bounds.Bottom;
-            string state = eq.Bypassed ? "Bypass" : "Aktiv";
-            Label($"{eq.SourceName} · {eq.Filters.Count} Filter · {state}", new RectF(x + ip, y + 6, w - 2 * ip, 20),
-                Theme.Caption, () => Theme.TextSecondary);
-            y += 24;
-        }
-        y += 12;
-        _groups.Add(new RectF(x, start, w, y - start));
-        return Footer(x, y, w, CanEditRew ? "REW Generic: bis zu 20 parametrische Filter (PK)." : "Zum Ändern zuerst Audio stoppen.") + 16;
-    }
-
-    // ---- Zeichnen ------------------------------------------------------------------------------
-    protected override void PaintHeader(Renderer g, RectF h)
-    {
-        string kind = IsInput ? "EINGANG" : "AUSGANG";
-        float x = DetailView ? _back.Bounds.Right + 16 : h.X + 20;
-        g.Text($"{kind} {Index + 1:00}  ·  {Index + 1} VON {Count}", new RectF(x, h.Y + 12, h.Right - x - 160, 16), Theme.Overline, Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
-    }
-
-    public override void Paint(Renderer g)
-    {
-        if (Index < Count) Layout(); // Werte und Aufteilung koennen sich durch das Modell geaendert haben
-        base.Paint(g);
+        if (Count == 0) return;
+        string owner = _m.ChannelOwnerTitle(Cur);
+        string tag = (IsInput ? $"EINGANG {Index + 1:00}" : $"AUSGANG {Index + 1:00}") + (owner.Length > 0 ? $"  ·  {owner}" : "");
+        g.Text(tag, new RectF(Name.Bounds.X, header.Y + 6, Name.Bounds.W, 14), Theme.MicroStrong, Theme.AccentText);
     }
 
     protected override void PaintBody(Renderer g)
     {
-        foreach (var r in _groups) g.FillRound(r, Theme.RadiusInner, Theme.Surface2);
-        foreach (var (x, y, w) in _seps) g.Fill(new RectF(x, y, w, 1), Theme.Separator);
-        foreach (var l in _labels) g.Text(l.Text, l.Rect, l.Style, l.Color(), HAlign.Left, l.Wrap ? VAlign.Top : VAlign.Middle, !l.Wrap, l.Wrap);
-        if (IsInput && DetailView && _detailTab == 3 && !_linkStatus.IsEmpty) PaintLinkStatus(g);
-    }
-
-    void PaintLinkStatus(Renderer g)
-    {
-        var r = _linkStatus;
-        var l = Index < Count ? _m.LinkAt(Index) : null;
-        if (l == null)
-        {
-            g.FillRound(new RectF(r.X, r.Y + 2, 36, 36), Theme.RadiusInner, Theme.Control);
-            Icons.Draw(g, Icon.Link, r.X + 18, r.Y + 20, 18, Theme.TextTertiary);
-            g.Text("Kein Programm gebunden", new RectF(r.X + 48, r.Y + 2, r.W - 48, 18), Theme.BodyMedium, Theme.Text);
-            g.Text(_m.AppLinksEnabled ? "Eingang erhält sein Signal über die Geräte-Zuordnung." : "App-Links sind in den Einstellungen ausgeschaltet.",
-                new RectF(r.X + 48, r.Y + 20, r.W - 48, 18), Theme.Callout, Theme.TextSecondary);
-            return;
-        }
-        var v = _m.ViewOf(l);
-        var col = LinkLook.Color(v.State);
-        g.FillRound(new RectF(r.X, r.Y + 2, 36, 36), Theme.RadiusInner, Theme.Soft(col));
-        string letter = l.Title.Length > 0 ? l.Title[..1].ToUpperInvariant() : "?";
-        g.Text(letter, new RectF(r.X, r.Y + 2, 36, 36), Theme.Headline, col, HAlign.Center, VAlign.Middle, false);
-        string head = $"{l.Title}  ·  {(l.Count == 2 ? (Index == l.FirstChannel ? "Stereo L" : "Stereo R") : "mono")}";
-        g.Text(head, new RectF(r.X + 48, r.Y + 2, r.W - 48, 18), Theme.BodyMedium, Theme.Text);
-        Icons.StatusDot(g, r.X + 52, r.Y + 30, col, 3, false);
-        string st = LinkLook.Text(v.State) + (string.IsNullOrWhiteSpace(v.Message) ? "" : ": " + v.Message);
-        g.Text(st, new RectF(r.X + 60, r.Y + 21, r.W - 60, 18), Theme.Callout, Theme.TextSecondary);
-    }
-
-    public override void OnKeyDown(int vk, bool ctrl, bool shift)
-    {
-        switch (vk)
-        {
-            case Win32.VK_LEFT: Go(-1); return;
-            case Win32.VK_RIGHT: Go(+1); return;
-        }
-        base.OnKeyDown(vk, ctrl, shift);
+        foreach (var card in _cards) Draw.Card(g, card, Theme.RadiusInner, Theme.Surface);
+        foreach (var l in _labels) g.Text(l.Text, l.Rect, l.Style, l.Color, HAlign.Left, VAlign.Middle, true);
     }
 }

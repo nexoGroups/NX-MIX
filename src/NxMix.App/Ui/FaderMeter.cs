@@ -19,7 +19,7 @@ internal sealed class Fader : Widget
 
     float _dragY0;
     double _dragT0;
-    bool _lastFine;
+    bool _lastFine, _dragging;
 
     public Fader() { Cursor = CursorKind.Hand; }
     public override bool AcceptsMouse => Visible;
@@ -59,6 +59,7 @@ internal sealed class Fader : Widget
     {
         if (e.Button != 0 || !Enabled) return;
         if (e.Clicks >= 2) { Apply(Math.Min(0.0, MaxDb)); return; }
+        _dragging = true;
         float capY = YOfDb(Value);
         bool onCap = Math.Abs(e.Y - capY) <= CapH / 2f + 1;
         double t = onCap ? FaderScale.ToT(Value) : TOfY(e.Y);
@@ -78,14 +79,14 @@ internal sealed class Fader : Widget
 
     public override void OnMouseMove(in MouseEvent e)
     {
-        if (!IsPressed || !Enabled) return;
+        if (!_dragging || !IsPressed || !Enabled) return;
         if (e.Fine != _lastFine) { _dragY0 = e.Y; _dragT0 = FaderScale.ToT(Value); _lastFine = e.Fine; }
         double k = e.Fine ? 0.1 : 1.0;
         double t = _dragT0 + (-(e.Y - _dragY0) / (YBot - YTop)) * TopScaleT * k;
         SetFromT(Math.Clamp(t, 0, TopScaleT), e.Fine);
     }
 
-    public override void OnMouseUp(in MouseEvent e) => Invalidate();
+    public override void OnMouseUp(in MouseEvent e) { _dragging = false; Invalidate(); }
 
     public override bool OnMouseWheel(in MouseEvent e)
     {
@@ -147,9 +148,10 @@ internal sealed class Fader : Widget
 
         // Kappe
         var cap = RectF.Centered(tx, capY, CapW, CapH);
-        bool hot = (IsHovered || IsPressed) && Enabled;
-        g.Shadow(cap, 7, 5, 1.1f, 2);
-        g.FillRound(cap, 7, hot ? Theme.CapFillHot : Theme.CapFill);
+        float hover = HoverAmount((IsHovered || _dragging) && Enabled);
+        float press = PressAmount(_dragging && Enabled);
+        g.Shadow(cap, 7, 5, 1.1f + press * 0.3f, 2);
+        g.FillRound(cap, 7, Theme.Mix(Theme.CapFill, Theme.CapFillHot, hover));
         g.StrokeRound(cap, 7, Theme.CapBorder);
         // Griffrillen
         var grip = Theme.IsDark ? Theme.Rgb(0x000000, 0.28f) : Theme.Rgb(0x000000, 0.08f);

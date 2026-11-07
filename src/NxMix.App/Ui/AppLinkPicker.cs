@@ -32,7 +32,6 @@ internal sealed class AppLinkPicker : Overlay
     string? _loadError, _manualError, _actionError;
     int _sel = -1;
     Hit _hot, _press;
-    float _t;
 
     RectF _box, _rClose, _rRefresh, _rTarget, _rSegMono, _rSegStereo, _rNote, _rBanner, _rFieldLabel, _rField, _rList, _rManual, _rUnlink, _rHelp, _rErr, _rBack, _rOk;
 
@@ -369,6 +368,7 @@ internal sealed class AppLinkPicker : Overlay
     public override void OnMouseDown(in MouseEvent e)
     {
         if (!_box.Contains(e.X, e.Y)) { Close(); return; }
+        if (e.Button != 0) return;
         if (!_manual && _sc.Down(e.X, e.Y)) { Invalidate(); return; }
         var h = HitAt(e.X, e.Y);
         _press = h;
@@ -380,7 +380,7 @@ internal sealed class AppLinkPicker : Overlay
         if (_sc.Dragging) { _sc.Up(); Invalidate(); return; }
         var h = HitAt(e.X, e.Y);
         var p = _press; _press = default;
-        if (h == p && h.Kind != K.None && h.Kind != K.Field)
+        if (e.Button == 0 && h == p && h.Kind != K.None && h.Kind != K.Field)
         {
             if (h.Kind == K.Stereo || HitEnabled(h) || h.Kind == K.Row) Activate(h);
         }
@@ -392,12 +392,7 @@ internal sealed class AppLinkPicker : Overlay
         return true;
     }
 
-    public override bool Tick(float dt)
-    {
-        bool d = _edit.Active && _edit.Tick(dt);
-        if (_t < 1) { _t = Math.Min(1, _t + dt / 0.14f); d = true; }
-        return d;
-    }
+    public override bool Tick(float dt) => _edit.Active && _edit.Tick(dt);
 
     void EnsureVisible(int i)
     {
@@ -464,10 +459,9 @@ internal sealed class AppLinkPicker : Overlay
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        float a = 1 - MathF.Pow(1 - _t, 3);
-        g.Fill(b, Theme.Scrim.With(Theme.Scrim.A * 0.5f * a));
+        g.Fill(b, Theme.Scrim.With(Theme.Scrim.A * 0.5f));
         if (_box.IsEmpty) return;
-        g.Shadow(_box, 16, 22, 1.5f * a, 8);
+        g.Shadow(_box, 16, 22, 1.5f, 8);
         g.FillRound(_box, Theme.RadiusCard, Theme.Elevated);
         g.StrokeRound(_box, Theme.RadiusCard, Theme.IsDark ? Theme.BorderStrong : Theme.Border);
         float x = _box.X + Pad, cw = _box.W - 2 * Pad;

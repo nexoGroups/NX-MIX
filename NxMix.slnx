@@ -2,7 +2,9 @@
   <Folder Name="/src/">
     <Project Path="src/NxMix.App/NxMix.App.csproj" />
     <Project Path="src/NxMix.Audio/NxMix.Audio.csproj" />
+    <Project Path="src/NxMix.Daemon/NxMix.Daemon.csproj" />
     <Project Path="src/NxMix.Engine/NxMix.Engine.csproj" />
+    <Project Path="src/NxMix.Ipc/NxMix.Ipc.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NxMix.Tests/NxMix.Tests.csproj" />

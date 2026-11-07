@@ -1,90 +1,171 @@
 using NxMix.App.Model;
 using NxMix.App.Ui;
+using NxMix.Engine;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Raster Eingaenge x Ausgaenge: Klick = Verbindung an/aus, Ziehen/Mausrad = dB, Doppelklick = 0 dB, Rechtsklick = trennen.</summary>
-internal sealed class MatrixView : Widget
+/// <summary>2D-Kreuzpunkt-Raster nach VB-Audio-Matrix-Vorbild:
+/// Zeilen = Eingänge / VAIO In / Mix-Busse, Spalten = Mix-Busse / Ausgänge / VAIO Out.
+/// Nicht-destruktives Parallel-Routing: Bus-Zuweisungen löschen niemals direkte Matrix-Kreuzpunkte; Parallelpfade werden markiert.</summary>
+internal sealed class MatrixGridWidget : Widget
 {
     readonly AppModel _m;
-    public const float RowHeaderW = 176f;
-    public const float ColHeaderH = 82f;
-    const float SbSize = 6f;
-    const float MaxCellW = 128f, MaxCellH = 68f;
-    public static float MinCellW => Theme.Touch ? 76f : 64f;
-    public static float MinCellH => Theme.Touch ? 52f : 42f;
+    public int ScopeFilter { get; set; } // 0=Komplett, 1=Nur Direkt In->Out, 2=Nur Bus-Routing
+    public int ZoomMode { get; set; } = 1; // 0=Kompakt, 1=Standard, 2=Groß
 
-    float _cellW = 80, _cellH = 48;
+    readonly record struct AxisPort(RoutePort Port, int Index, string GroupTag, string Label, Color4 Color);
+    List<AxisPort> _rows = new();
+    List<AxisPort> _cols = new();
+    HashSet<(Guid InId, Guid OutId)> _parallelPairs = new();
+
+    const float RowHeadW = 192f;
+    const float ColHeadH = 74f;
+    const float SbSize = 6f;
+
+    float _cellW = 78f, _cellH = 44f;
     float _sx, _sy;
-    int _hi = -1, _ho = -1;
-    int _di = -1, _do = -1;
+    int _hr = -1, _hc = -1;
+    int _dr = -1, _dc = -1;
     float _downY;
     double _downDb;
-    bool _moved, _ignoreUp;
+    bool _moved;
     int _dragBar;
     float _barOff;
 
-    public MatrixView(AppModel m) { _m = m; }
+    public MatrixGridWidget(AppModel m) => _m = m;
     public override bool AcceptsMouse => true;
 
-    /// <summary>Kartenrand: Inhalt beginnt 12 DIPs innen.</summary>
     RectF Inner => Bounds.Deflate(12);
-    RectF CellArea => new(Inner.X + RowHeaderW, Inner.Y + ColHeaderH, Math.Max(0, Inner.W - RowHeaderW), Math.Max(0, Inner.H - ColHeaderH));
-    float ContentW => _m.OutputCount * _cellW;
-    float ContentH => _m.InputCount * _cellH;
+    RectF CellArea => new(Inner.X + RowHeadW, Inner.Y + ColHeadH, Math.Max(0, Inner.W - RowHeadW), Math.Max(0, Inner.H - ColHeadH));
+    float ContentW => _cols.Count * _cellW;
+    float ContentH => _rows.Count * _cellH;
+    bool NeedV => ContentH > CellArea.H + 0.5f;
+    bool NeedH => ContentW > CellArea.W + 0.5f;
+
+    public void RebuildAxes()
+    {
+        var rows = new List<AxisPort>();
+        var cols = new List<AxisPort>();
+
+        for (int i = 0; i < _m.InputCount; i++)
+        {
+            var ch = _m.Settings.Inputs[i];
+            string grp = _m.ChannelOwnerTitle(ch);
+            if (string.IsNullOrEmpty(grp)) grp = _m.LinkAt(i) != null ? "APP" : "IN";
+            rows.Add(new AxisPort(new RoutePort(RouteKind.Input, ch.Id), i, grp, $"{i + 1:00} · {_m.DisplayName(true, i)}", Theme.Teal));
+        }
+
+        if (ScopeFilter != 1)
+        {
+            foreach (var bus in _m.Settings.Buses)
+            {
+                for (int ch = 0; ch < bus.Channels; ch++)
+                {
+                    string suffix = bus.Channels == 2 ? (ch == 0 ? "L" : "R") : $"Ch {ch + 1}";
+                    var port = new AxisPort(new RoutePort(RouteKind.Bus, bus.Id, ch), ch, "BUS", $"{bus.Name} {suffix}", Theme.Purple);
+                    rows.Add(port);
+                    cols.Add(port);
+                }
+            }
+        }
+
+        for (int o = 0; o < _m.OutputCount; o++)
+        {
+            var ch = _m.Settings.Outputs[o];
+            string grp = _m.ChannelOwnerTitle(ch);
+            if (string.IsNullOrEmpty(grp)) grp = "OUT";
+            cols.Add(new AxisPort(new RoutePort(RouteKind.Output, ch.Id), o, grp, $"{o + 1:00} · {_m.DisplayName(false, o)}", Theme.AccentText));
+        }
+
+        if (ScopeFilter == 2)
+        {
+            // Nur Zeilen/Spalten zeigen, bei denen mindestens ein Partner ein Bus ist
+            if (_m.BusCount == 0) { rows.Clear(); cols.Clear(); }
+        }
+
+        _rows = rows;
+        _cols = cols;
+
+        _parallelPairs.Clear();
+        foreach (var w in _m.ParallelWarnings)
+            _parallelPairs.Add((w.InputId, w.OutputId));
+
+        Layout();
+    }
 
     public override void Layout()
     {
-        int ni = _m.InputCount, no = _m.OutputCount;
+        (float minW, float minH) = ZoomMode switch
+        {
+            0 => (58f, 34f),
+            2 => (98f, 56f),
+            _ => (74f, 44f),
+        };
+        if (Theme.Touch) { minW += 12f; minH += 8f; }
         var a = CellArea;
-        _cellW = no > 0 ? Math.Clamp(a.W / no, MinCellW, MaxCellW) : 80;
-        _cellH = ni > 0 ? Math.Clamp(a.H / ni, MinCellH, MaxCellH) : 48;
-        ClampScroll();
-    }
-
-    /// <summary>Groesse, die das Raster braucht (hoechstens der verfuegbare Platz).</summary>
-    public (float W, float H) PreferredSize(float availW, float availH)
-    {
-        int ni = _m.InputCount, no = _m.OutputCount;
-        float cw = no > 0 ? Math.Clamp((availW - 24 - RowHeaderW) / no, MinCellW, MaxCellW) : 80;
-        float ch = ni > 0 ? Math.Clamp((availH - 24 - ColHeaderH) / ni, MinCellH, MaxCellH) : 48;
-        return (Math.Min(availW, 24 + RowHeaderW + no * cw + 4), Math.Min(availH, 24 + ColHeaderH + ni * ch + 4));
-    }
-
-    void ClampScroll()
-    {
-        var a = CellArea;
+        _cellW = _cols.Count > 0 ? Math.Clamp(a.W / _cols.Count, minW, 132f) : minW;
+        _cellH = _rows.Count > 0 ? Math.Clamp(a.H / _rows.Count, minH, 64f) : minH;
         _sx = Math.Clamp(_sx, 0, Math.Max(0, ContentW - a.W));
         _sy = Math.Clamp(_sy, 0, Math.Max(0, ContentH - a.H));
     }
 
-    bool NeedV => ContentH > CellArea.H + 0.5f;
-    bool NeedH => ContentW > CellArea.W + 0.5f;
+    bool IsBlockedCell(AxisPort r, AxisPort c) =>
+        (ScopeFilter == 2 && r.Port.Kind == RouteKind.Input && c.Port.Kind == RouteKind.Output)
+        || (r.Port.Kind == RouteKind.Bus && c.Port.Kind == RouteKind.Bus && r.Port.Id == c.Port.Id);
 
-    public RectF CellRect(int i, int o)
+    double GetCellDb(AxisPort r, AxisPort c)
     {
-        var a = CellArea;
-        return new RectF(a.X + o * _cellW - _sx, a.Y + i * _cellH - _sy, _cellW, _cellH);
+        if (IsBlockedCell(r, c)) return double.NegativeInfinity;
+        if (r.Port.Kind == RouteKind.Input && c.Port.Kind == RouteKind.Output)
+        {
+            var m = _m.Settings.MatrixDb;
+            return r.Index < m.Length && c.Index < m[r.Index].Length ? m[r.Index][c.Index] : double.NegativeInfinity;
+        }
+        var br = _m.FindBusRoute(r.Port, c.Port);
+        return br?.GainDb ?? double.NegativeInfinity;
     }
 
-    bool CellAt(float x, float y, out int i, out int o)
+    double MaxDbFor(AxisPort c) =>
+        c.Port.Kind == RouteKind.Output && AppModel.IsProtected(_m.Settings.Outputs[c.Index])
+            ? Theme.ProtectedMatrixMaxDb
+            : Theme.MatrixMaxDb;
+
+    void SetCellDb(AxisPort r, AxisPort c, double db)
     {
-        i = o = -1;
+        if (IsBlockedCell(r, c)) return;
+        if (r.Port.Kind == RouteKind.Input && c.Port.Kind == RouteKind.Output)
+        {
+            _m.SetMatrix(r.Index, c.Index, db);
+            return;
+        }
+        string? err = _m.SetOrAddBusRoute(r.Port, c.Port, db);
+        if (err != null) Root?.Notify.Flash(err, true);
+    }
+
+    RectF CellRect(int r, int c)
+    {
+        var a = CellArea;
+        return new RectF(a.X + c * _cellW - _sx, a.Y + r * _cellH - _sy, _cellW, _cellH);
+    }
+
+    bool CellAt(float x, float y, out int r, out int c)
+    {
+        r = c = -1;
         var a = CellArea;
         if (!a.Contains(x, y)) return false;
-        o = (int)((x - a.X + _sx) / _cellW);
-        i = (int)((y - a.Y + _sy) / _cellH);
-        return i >= 0 && i < _m.InputCount && o >= 0 && o < _m.OutputCount;
+        if (NeedV && VBar().Track.Inflate(5).Contains(x, y)) return false;
+        if (NeedH && HBar().Track.Inflate(5).Contains(x, y)) return false;
+        c = (int)((x - a.X + _sx) / _cellW);
+        r = (int)((y - a.Y + _sy) / _cellH);
+        return r >= 0 && r < _rows.Count && c >= 0 && c < _cols.Count;
     }
-
-    double MaxFor(int o) => AppModel.IsProtected(_m.Settings.Outputs[o]) ? Theme.ProtectedMatrixMaxDb : Theme.MatrixMaxDb;
 
     (RectF Track, RectF Thumb) VBar()
     {
         var a = CellArea;
-        var track = new RectF(a.Right - SbSize - 2, a.Y + 2, SbSize, a.H - 4 - (NeedH ? SbSize + 2 : 0));
-        float th = Math.Max(30, track.H * a.H / ContentH);
+        var track = new RectF(a.Right - SbSize - 2, a.Y + 2, SbSize, Math.Max(10, a.H - 4 - (NeedH ? SbSize + 2 : 0)));
+        float th = Math.Max(28, track.H * a.H / Math.Max(1, ContentH));
         float maxS = Math.Max(1, ContentH - a.H);
         return (track, new RectF(track.X, track.Y + (track.H - th) * (_sy / maxS), SbSize, th));
     }
@@ -92,292 +173,342 @@ internal sealed class MatrixView : Widget
     (RectF Track, RectF Thumb) HBar()
     {
         var a = CellArea;
-        var track = new RectF(a.X + 2, a.Bottom - SbSize - 2, a.W - 4 - (NeedV ? SbSize + 2 : 0), SbSize);
-        float tw = Math.Max(30, track.W * a.W / ContentW);
+        var track = new RectF(a.X + 2, a.Bottom - SbSize - 2, Math.Max(10, a.W - 4 - (NeedV ? SbSize + 2 : 0)), SbSize);
+        float tw = Math.Max(28, track.W * a.W / Math.Max(1, ContentW));
         float maxS = Math.Max(1, ContentW - a.W);
         return (track, new RectF(track.X + (track.W - tw) * (_sx / maxS), track.Y, tw, SbSize));
     }
 
-    // ---- Maus ----------------------------------------------------------------------------------
     public override void OnMouseMove(in MouseEvent e)
     {
-        if (_dragBar != 0 && IsPressed) { DragBar(e); return; }
-        if (!IsPressed)
+        if (_dragBar != 0 && IsPressed)
         {
-            CellAt(e.X, e.Y, out int i, out int o);
-            if (i != _hi || o != _ho) { _hi = i; _ho = o; Invalidate(); }
+            var a = CellArea;
+            if (_dragBar == 1)
+            {
+                var (t, th) = VBar();
+                if (t.H > th.H) _sy = Math.Clamp((e.Y - _barOff - t.Y) / (t.H - th.H), 0, 1) * Math.Max(0, ContentH - a.H);
+            }
+            else
+            {
+                var (t, th) = HBar();
+                if (t.W > th.W) _sx = Math.Clamp((e.X - _barOff - t.X) / (t.W - th.W), 0, 1) * Math.Max(0, ContentW - a.W);
+            }
+            Invalidate();
             return;
         }
-        if (_di < 0) return;
+        if (!IsPressed)
+        {
+            CellAt(e.X, e.Y, out int r, out int c);
+            if (r != _hr || c != _hc) { _hr = r; _hc = c; Invalidate(); }
+            return;
+        }
+        if (_dr < 0 || _dc < 0) return;
         float dy = _downY - e.Y;
         if (!_moved && Math.Abs(dy) < 4) return;
         if (!_moved)
         {
             _moved = true;
-            if (Db.IsOff(_downDb)) _downDb = 0;   // Ziehen auf eine getrennte Zelle verbindet sie bei 0 dB
+            if (Db.IsOff(_downDb)) _downDb = 0;
         }
         double perPx = e.Fine ? 0.03 : 0.3;
-        double v = Math.Clamp(Math.Round((_downDb + dy * perPx) * 10) / 10, Theme.MatrixMinDb, MaxFor(_do));
+        double v = Math.Clamp(Math.Round((_downDb + dy * perPx) * 10) / 10, Theme.MatrixMinDb, MaxDbFor(_cols[_dc]));
         if (Math.Abs(v) < 0.2 && !e.Fine) v = 0;
-        _m.SetMatrix(_di, _do, v);
+        SetCellDb(_rows[_dr], _cols[_dc], v);
         Invalidate();
     }
-
-    void DragBar(in MouseEvent e)
-    {
-        var a = CellArea;
-        if (_dragBar == 1)
-        {
-            var (t, th) = VBar();
-            float span = t.H - th.H;
-            if (span > 0) _sy = Math.Clamp((e.Y - _barOff - t.Y) / span, 0, 1) * Math.Max(0, ContentH - a.H);
-        }
-        else
-        {
-            var (t, th) = HBar();
-            float span = t.W - th.W;
-            if (span > 0) _sx = Math.Clamp((e.X - _barOff - t.X) / span, 0, 1) * Math.Max(0, ContentW - a.W);
-        }
-        Invalidate();
-    }
-
-    public override void OnMouseLeave() { if (_hi >= 0 || _ho >= 0) { _hi = _ho = -1; Invalidate(); } }
 
     public override void OnMouseDown(in MouseEvent e)
     {
-        _di = _do = -1; _moved = false; _ignoreUp = false; _dragBar = 0;
-        if (NeedV) { var (t, th) = VBar(); if (t.Inflate(5).Contains(e.X, e.Y)) { _dragBar = 1; _barOff = th.Contains(e.X, e.Y) ? e.Y - th.Y : th.H / 2; DragBar(e); return; } }
-        if (NeedH) { var (t, th) = HBar(); if (t.Inflate(5).Contains(e.X, e.Y)) { _dragBar = 2; _barOff = th.Contains(e.X, e.Y) ? e.X - th.X : th.W / 2; DragBar(e); return; } }
-        if (!CellAt(e.X, e.Y, out int i, out int o)) return;
-        if (e.Button == 1) { _m.SetMatrix(i, o, double.NegativeInfinity); _ignoreUp = true; return; }
+        _dr = _dc = -1; _moved = false; _dragBar = 0;
+        if (e.Button == 0)
+        {
+            if (NeedV && VBar().Track.Inflate(5).Contains(e.X, e.Y))
+            {
+                var (_, th) = VBar(); _dragBar = 1; _barOff = th.Contains(e.X, e.Y) ? e.Y - th.Y : th.H / 2; return;
+            }
+            if (NeedH && HBar().Track.Inflate(5).Contains(e.X, e.Y))
+            {
+                var (_, th) = HBar(); _dragBar = 2; _barOff = th.Contains(e.X, e.Y) ? e.X - th.X : th.W / 2; return;
+            }
+        }
+        if (!CellAt(e.X, e.Y, out int r, out int c)) return;
+        if (IsBlockedCell(_rows[r], _cols[c])) return;
+
+        if (e.Button == 1)
+        {
+            SetCellDb(_rows[r], _cols[c], double.NegativeInfinity);
+            Invalidate();
+            return;
+        }
         if (e.Button != 0) return;
-        _di = i; _do = o; _downY = e.Y; _downDb = _m.Settings.MatrixDb[i][o];
-        if (e.Clicks >= 2) { _m.SetMatrix(i, o, 0); _ignoreUp = true; }
-        Invalidate();
+
+        if (e.Clicks >= 2)
+        {
+            SetCellDb(_rows[r], _cols[c], Math.Min(0.0, MaxDbFor(_cols[c])));
+            Invalidate();
+            return;
+        }
+
+        _dr = r; _dc = c;
+        _downY = e.Y;
+        _downDb = GetCellDb(_rows[r], _cols[c]);
     }
 
     public override void OnMouseUp(in MouseEvent e)
     {
         if (_dragBar != 0) { _dragBar = 0; Invalidate(); return; }
-        if (_di >= 0 && !_moved && !_ignoreUp && e.Button == 0 && CellAt(e.X, e.Y, out int i, out int o) && i == _di && o == _do)
+        if (e.Button == 0 && !_moved && _dr >= 0 && _dc >= 0 && CellAt(e.X, e.Y, out int r, out int c) && r == _dr && c == _dc)
         {
-            double cur = _m.Settings.MatrixDb[i][o];
-            _m.SetMatrix(i, o, Db.IsOff(cur) ? 0.0 : double.NegativeInfinity);
+            double cur = GetCellDb(_rows[r], _cols[c]);
+            double next = Db.IsOff(cur) ? Math.Min(0.0, MaxDbFor(_cols[c])) : double.NegativeInfinity;
+            SetCellDb(_rows[r], _cols[c], next);
         }
-        _di = _do = -1;
+        _dr = _dc = -1; _moved = false;
         Invalidate();
     }
 
     public override bool OnMouseWheel(in MouseEvent e)
     {
-        if (CellAt(e.X, e.Y, out int i, out int o))
+        if (CellAt(e.X, e.Y, out int r, out int c) && !IsBlockedCell(_rows[r], _cols[c]))
         {
-            double cur = _m.Settings.MatrixDb[i][o];
+            double cur = GetCellDb(_rows[r], _cols[c]);
             if (!Db.IsOff(cur))
             {
                 double step = e.Fine ? 0.1 : 1.0;
-                double v = Math.Clamp(Math.Round((cur + Math.Sign(e.Wheel) * step * Math.Max(1, Math.Abs(e.Wheel))) * 10) / 10, Theme.MatrixMinDb, MaxFor(o));
-                _m.SetMatrix(i, o, v);
+                double next = Math.Clamp(Math.Round((cur + Math.Sign(e.Wheel) * step) * 10) / 10, Theme.MatrixMinDb, MaxDbFor(_cols[c]));
+                SetCellDb(_rows[r], _cols[c], next);
+                Invalidate();
                 return true;
             }
         }
-        var a = CellArea;
-        if (e.Alt) _sx = Math.Clamp(_sx - e.Wheel * 60, 0, Math.Max(0, ContentW - a.W));
-        else _sy = Math.Clamp(_sy - e.Wheel * 60, 0, Math.Max(0, ContentH - a.H));
-        Invalidate();
-        return true;
+        if (e.Shift && NeedH)
+        {
+            _sx = Math.Clamp(_sx - e.Wheel * 60, 0, Math.Max(0, ContentW - CellArea.W));
+            Invalidate();
+            return true;
+        }
+        if (NeedV)
+        {
+            _sy = Math.Clamp(_sy - e.Wheel * 60, 0, Math.Max(0, ContentH - CellArea.H));
+            Invalidate();
+            return true;
+        }
+        return false;
     }
 
-    public override CursorKind CursorAt(float x, float y) => CellAt(x, y, out _, out _) ? CursorKind.Hand : CursorKind.Arrow;
+    public override CursorKind CursorAt(float x, float y) =>
+        CellAt(x, y, out int r, out int c) && !IsBlockedCell(_rows[r], _cols[c]) ? CursorKind.Hand : CursorKind.Arrow;
 
     public override string? TooltipAt(float x, float y)
     {
-        if (!CellAt(x, y, out int i, out int o)) return null;
-        double v = _m.Settings.MatrixDb[i][o];
-        string head = $"{_m.DisplayName(true, i)} → {_m.DisplayName(false, o)}";
-        string state = Db.IsOff(v) ? "getrennt" : Db.Format(v) + " dB";
-        string extra = AppModel.IsProtected(_m.Settings.Outputs[o]) ? "  (Gain-Sperre: max. 0 dB)" : "";
-        return $"{head}: {state}{extra}";
+        if (!CellAt(x, y, out int r, out int c)) return null;
+        var rp = _rows[r]; var cp = _cols[c];
+        if (IsBlockedCell(rp, cp)) return "Nicht verfügbar (Eigenrückkopplung / Filtermodus)";
+        double db = GetCellDb(rp, cp);
+        bool par = rp.Port.Kind == RouteKind.Input && cp.Port.Kind == RouteKind.Output && _parallelPairs.Contains((rp.Port.Id, cp.Port.Id));
+        string status = Db.IsOff(db) ? "Getrennt (Klick = 0.0 dB)" : $"{Db.Format(db)} dB (Klick = trennen · Ziehen/Mausrad = Pegel)";
+        if (par) status += "\n⚡ Parallelpfad aktiv: Dieser Eingang speist denselben Ausgang zusätzlich über einen Mix-Bus!";
+        return $"{rp.Label}  →  {cp.Label}\n{status}";
     }
 
-    // ---- Zeichnen ------------------------------------------------------------------------------
     public override void Paint(Renderer g)
     {
-        var b = Bounds;
-        Draw.Card(g, b);
-        var inner = Inner;
-        var a = CellArea;
-        int ni = _m.InputCount, no = _m.OutputCount;
-
-        // Fadenkreuz: Zeile/Spalte unter der Maus leicht hervorheben
-        g.PushClip(a);
-        if (_hi >= 0) g.FillRound(new RectF(a.X, a.Y + _hi * _cellH - _sy + 1, Math.Min(a.W, ContentW - _sx), _cellH - 2), 8, Theme.Accent.With(0.05f));
-        if (_ho >= 0) g.FillRound(new RectF(a.X + _ho * _cellW - _sx + 1, a.Y, _cellW - 2, Math.Min(a.H, ContentH - _sy)), 8, Theme.Accent.With(0.05f));
-        for (int i = 0; i < ni; i++)
+        Draw.Card(g, Bounds);
+        if (_rows.Count == 0 || _cols.Count == 0)
         {
-            for (int o = 0; o < no; o++)
+            string msg = ScopeFilter == 2 && _m.BusCount == 0
+                ? "Lege oben mit „+ Mix-Bus“ einen Stereo- oder Subgruppen-Bus an, um Bus-Routings zu patchen."
+                : "Sobald mindestens eine Quelle und ein Ziel vorhanden sind, lassen sich hier alle direkten und Bus-Kreuzpunkte patchen.";
+            float ey = Bounds.Y + Math.Max(20, (Bounds.H - Draw.EmptyHeight(Bounds.W, msg)) / 2);
+            Draw.Empty(g, Bounds, ey, Icon.Matrix, "Keine Kreuzpunkte in dieser Ansicht", msg);
+            return;
+        }
+
+        var inn = Inner;
+        var ca = CellArea;
+
+        // Ecke oben links: Legende
+        g.Text("QUELLE  ↓   \\   ZIEL  →", new RectF(inn.X + 8, inn.Y + 8, RowHeadW - 14, ColHeadH - 12), Theme.MicroStrong, Theme.TextTertiary);
+
+        // Spaltenköpfe
+        g.PushClip(new RectF(ca.X, inn.Y, ca.W, ColHeadH));
+        for (int c = 0; c < _cols.Count; c++)
+        {
+            var cp = _cols[c];
+            var hr = new RectF(ca.X + c * _cellW - _sx + 2, inn.Y + 2, _cellW - 4, ColHeadH - 6);
+            if (hr.Right < ca.X || hr.X > ca.Right) continue;
+            g.FillRound(hr, Theme.RadiusSmall, c == _hc ? Theme.ControlHover : Theme.Surface2);
+            g.FillPill(new RectF(hr.X + 6, hr.Y + 4, hr.W - 12, 3), cp.Color);
+            g.Text(cp.GroupTag, new RectF(hr.X + 4, hr.Y + 9, hr.W - 8, 13), Theme.MicroStrong, cp.Color, HAlign.Center);
+            g.Text(cp.Label, new RectF(hr.X + 4, hr.Y + 22, hr.W - 8, hr.H - 25), Theme.CaptionStrong, Theme.Text, HAlign.Center, VAlign.Middle, true, true);
+        }
+        g.PopClip();
+
+        // Zeilenköpfe
+        g.PushClip(new RectF(inn.X, ca.Y, RowHeadW, ca.H));
+        for (int r = 0; r < _rows.Count; r++)
+        {
+            var rp = _rows[r];
+            var hr = new RectF(inn.X + 2, ca.Y + r * _cellH - _sy + 2, RowHeadW - 6, _cellH - 4);
+            if (hr.Bottom < ca.Y || hr.Y > ca.Bottom) continue;
+            g.FillRound(hr, Theme.RadiusSmall, r == _hr ? Theme.ControlHover : Theme.Surface2);
+            g.FillPill(new RectF(hr.X + 4, hr.Y + 6, 3, hr.H - 12), rp.Color);
+            g.Text(rp.GroupTag, new RectF(hr.X + 12, hr.Y + 3, hr.W - 16, 13), Theme.MicroStrong, rp.Color);
+            g.Text(rp.Label, new RectF(hr.X + 12, hr.Y + 15, hr.W - 16, hr.H - 17), Theme.CalloutMedium, Theme.Text);
+        }
+        g.PopClip();
+
+        // Kreuzpunkt-Zellen
+        g.PushClip(ca);
+        for (int r = 0; r < _rows.Count; r++)
+        {
+            float cy = ca.Y + r * _cellH - _sy;
+            if (cy + _cellH < ca.Y || cy > ca.Bottom) continue;
+            var rp = _rows[r];
+
+            for (int c = 0; c < _cols.Count; c++)
             {
-                var r = CellRect(i, o);
-                if (r.Right < a.X || r.X > a.Right || r.Bottom < a.Y || r.Y > a.Bottom) continue;
-                PaintCell(g, r, i, o);
+                var cr = CellRect(r, c).Deflate(2);
+                if (cr.Right < ca.X || cr.X > ca.Right) continue;
+                var cp = _cols[c];
+
+                if (IsBlockedCell(rp, cp))
+                {
+                    g.FillRound(cr, Theme.RadiusSmall, Theme.Well.With(0.45f));
+                    continue;
+                }
+
+                double db = GetCellDb(rp, cp);
+                bool active = !Db.IsOff(db);
+                bool hot = r == _hr && c == _hc;
+                bool isBusCell = rp.Port.Kind == RouteKind.Bus || cp.Port.Kind == RouteKind.Bus;
+                var activeTint = isBusCell ? Theme.Purple : Theme.Accent;
+
+                var bg = active
+                    ? activeTint.With(Theme.IsDark ? 0.28f : 0.18f)
+                    : (hot ? Theme.ControlHover : Theme.Well);
+                g.FillRound(cr, Theme.RadiusSmall, bg);
+                if (active || hot)
+                    g.StrokeRound(cr, Theme.RadiusSmall, active ? activeTint.With(0.85f) : Theme.BorderStrong);
+
+                if (active)
+                {
+                    g.Text(Db.Format(db), cr, _cellW < 64 ? Theme.CaptionStrong : Theme.Value,
+                        db > 0.05 ? Theme.Yellow : Theme.Text, HAlign.Center);
+                }
+                else if (hot)
+                {
+                    g.Text("—", cr, Theme.Caption, Theme.TextTertiary, HAlign.Center);
+                }
+
+                // Parallel-Pfad-Warnpunkt (Direkt + Bus aktiv)
+                if (rp.Port.Kind == RouteKind.Input && cp.Port.Kind == RouteKind.Output && _parallelPairs.Contains((rp.Port.Id, cp.Port.Id)))
+                {
+                    g.FillCircle(cr.Right - 6, cr.Y + 6, 3.5f, Theme.Orange);
+                }
             }
         }
+        if (NeedV) g.FillPill(VBar().Thumb, Theme.TextTertiary.With(0.6f));
+        if (NeedH) g.FillPill(HBar().Thumb, Theme.TextTertiary.With(0.6f));
         g.PopClip();
-
-        // Spaltenkoepfe (Ausgaenge)
-        g.PushClip(new RectF(a.X, inner.Y, a.W, ColHeaderH));
-        for (int o = 0; o < no; o++)
-        {
-            float x = a.X + o * _cellW - _sx;
-            if (x + _cellW < a.X || x > a.Right) continue;
-            var r = new RectF(x + 3, inner.Y + 4, _cellW - 6, ColHeaderH - 12);
-            bool hot = o == _ho;
-            var oc = _m.Settings.Outputs[o];
-            bool prot = AppModel.IsProtected(oc);
-            if (hot) g.FillRound(r, 8, Theme.AccentSoft);
-            g.Text($"OUT {o + 1:00}", new RectF(r.X, r.Y + 6, r.W, 14), Theme.MicroStrong, hot ? Theme.AccentText : Theme.TextTertiary, HAlign.Center, VAlign.Middle, false);
-            g.Text(_m.DisplayName(false, o), new RectF(r.X + 4, r.Y + 21, r.W - 8, 34), Theme.CalloutStrong,
-                string.IsNullOrWhiteSpace(oc.Name) ? Theme.TextTertiary : Theme.Text, HAlign.Center, VAlign.Middle, true, true);
-            if (prot) Icons.Draw(g, Icon.Lock, r.CX, r.Bottom - 8, 12, Theme.Orange);
-        }
-        g.PopClip();
-
-        // Zeilenkoepfe (Eingaenge)
-        g.PushClip(new RectF(inner.X, a.Y, RowHeaderW, a.H));
-        for (int i = 0; i < ni; i++)
-        {
-            float y = a.Y + i * _cellH - _sy;
-            if (y + _cellH < a.Y || y > a.Bottom) continue;
-            var r = new RectF(inner.X, y + 3, RowHeaderW - 10, _cellH - 6);
-            bool hot = i == _hi;
-            var ic = _m.Settings.Inputs[i];
-            if (hot) g.FillRound(r, 8, Theme.AccentSoft);
-            g.Text($"IN {i + 1:00}", new RectF(r.X + 10, r.Y, 40, r.H), Theme.MicroStrong, hot ? Theme.AccentText : Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
-            bool named = !string.IsNullOrWhiteSpace(ic.Name) || _m.LinkAt(i) != null;
-            g.Text(_m.DisplayName(true, i), new RectF(r.X + 52, r.Y, r.W - 58, r.H), Theme.CalloutStrong,
-                named ? Theme.Text : Theme.TextTertiary, HAlign.Left, VAlign.Middle, true, true);
-        }
-        g.PopClip();
-
-        g.Text("Eingang ↓  ·  Ausgang →", new RectF(inner.X + 10, inner.Y + 4, RowHeaderW - 16, ColHeaderH - 12), Theme.Caption, Theme.TextTertiary, HAlign.Left, VAlign.Bottom, false);
-
-        if (NeedV) { var (_, th) = VBar(); g.FillPill(th, _dragBar == 1 ? Theme.TextSecondary.With(0.8f) : Theme.TextTertiary.With(0.5f)); }
-        if (NeedH) { var (_, th) = HBar(); g.FillPill(th, _dragBar == 2 ? Theme.TextSecondary.With(0.8f) : Theme.TextTertiary.With(0.5f)); }
-    }
-
-    void PaintCell(Renderer g, RectF cell, int i, int o)
-    {
-        var r = cell.Deflate(3);
-        double v = _m.Settings.MatrixDb[i][o];
-        bool on = !Db.IsOff(v);
-        bool hover = i == _hi && o == _ho;
-        bool prot = AppModel.IsProtected(_m.Settings.Outputs[o]);
-        if (on)
-        {
-            float level = (float)Math.Clamp((v - Theme.MatrixMinDb) / (Theme.MatrixMaxDb - Theme.MatrixMinDb), 0, 1);
-            bool boost = v > 0.05;
-            g.FillRound(r, 8, hover ? (boost ? Theme.Yellow.With(0.32f) : Theme.AccentHover) : (boost ? Theme.Soft(Theme.Yellow) : Theme.Accent));
-            var fg = boost ? (Theme.IsDark ? Theme.Yellow : Theme.Rgb(0x8A6500)) : Theme.OnAccent;
-            string t = Math.Abs(v) < 0.05 ? "0 dB" : Db.Format(v);
-            g.Text(t, new RectF(r.X, r.Y, r.W, r.H - 6), Theme.CalloutStrong, fg, HAlign.Center, VAlign.Middle, false);
-            var track = new RectF(r.X + 10, r.Bottom - 8, r.W - 20, 3);
-            g.FillPill(track, boost ? Theme.Yellow.With(0.25f) : Theme.White.With(0.25f));
-            g.FillPill(new RectF(track.X, track.Y, Math.Max(3, track.W * level), 3), boost ? Theme.Yellow : Theme.White.With(0.9f));
-        }
-        else
-        {
-            g.FillRound(r, 8, hover ? Theme.ControlHover : Theme.Surface2);
-            if (hover) Icons.Draw(g, Icon.Plus, r.CX, r.CY, 15, Theme.TextSecondary);
-            else g.FillCircle(r.CX, r.CY, 2f, Theme.TextTertiary.With(0.5f));
-        }
-        if (prot && on && v >= Theme.ProtectedMatrixMaxDb - 0.05)
-            Icons.Draw(g, Icon.Lock, r.Right - 9, r.Y + 9, 10, Theme.IsDark ? Theme.Orange : Theme.White);
     }
 }
 
+/// <summary>Tab „Patching Matrix“ (Strg+4): hierarchische 2D-Kreuzschiene für Eingänge, VAIOs, Mix-Busse und Ausgänge.</summary>
 internal sealed class MatrixPage : Page
 {
     readonly AppModel _m;
-    readonly MatrixView _view;
-    readonly Button _addIn, _addOut, _addInPair, _addOutPair;
+    readonly Segmented _scopeSeg = new("Komplett", "Direkt In→Out", "Bus-Routing") { Font = Theme.CaptionMedium };
+    readonly Segmented _zoomSeg = new("Kompakt", "Standard", "Groß") { Font = Theme.CaptionMedium };
+    readonly Button _diagBtn = new("1:1 Diagonal", ButtonStyle.Gray) { Font = Theme.CalloutMedium, Tooltip = "Eingang 1→Ausgang 1, 2→2 usw. mit 0 dB verbinden" };
+    readonly Button _stereoBtn = new("Stereo L/R", ButtonStyle.Gray) { Font = Theme.CalloutMedium, Tooltip = "Ungerade Eingänge auf Ausgang 1 (L), gerade auf Ausgang 2 (R) patchen" };
+    readonly Button _clearBtn = new("Direkt trennen", ButtonStyle.DestructiveTinted) { Font = Theme.CalloutMedium };
+    readonly Button _addBusBtn = new("+ Mix-Bus", ButtonStyle.Filled, Icon.Plus) { Font = Theme.CalloutMedium };
+    readonly MatrixGridWidget _grid;
 
-    public override string Title => "Matrix";
+    public override string Title => "Patching Matrix";
     public override Icon Icon => Icon.Matrix;
-    public override string? Subtitle => Empty ? null
-        : $"{Fmt.Inputs(_m.InputCount)} × {Fmt.Outputs(_m.OutputCount)}  ·  Klick verbindet/trennt  ·  Ziehen oder Mausrad: Pegel  ·  Doppelklick: 0 dB  ·  Rechtsklick: trennen";
-    internal MatrixView View => _view;
+    public override string? Subtitle
+    {
+        get
+        {
+            int direct = _m.Settings.MatrixDb.Sum(r => r.Count(v => !Db.IsOff(v)));
+            int busRoutes = _m.Settings.BusRoutes.Count;
+            int par = _m.ParallelWarnings.Count;
+            return $"{direct} Direkt-Routen  ·  {busRoutes} Bus-Routen" + (par > 0 ? $"  ·  ⚡ {par} Parallelpfade" : "");
+        }
+    }
+
+    internal MatrixGridWidget Grid => _grid;
 
     public MatrixPage(AppModel m)
     {
         _m = m;
-        _view = Add(new MatrixView(m));
-        _addIn = Add(new Button("Eingang", ButtonStyle.Filled, Icon.Plus));
-        _addOut = Add(new Button("Ausgang", ButtonStyle.Filled, Icon.Plus));
-        _addInPair = Add(new Button("Stereo-Eingang", ButtonStyle.Gray, Icon.Plus));
-        _addOutPair = Add(new Button("Stereo-Ausgang", ButtonStyle.Gray, Icon.Plus));
-        _addIn.Clicked += () => m.AddChannels(true, 1);
-        _addOut.Clicked += () => m.AddChannels(false, 1);
-        _addInPair.Clicked += () => m.AddChannels(true, 2, m.NextPairNames(true));
-        _addOutPair.Clicked += () => m.AddChannels(false, 2, m.NextPairNames(false));
-        m.StructureChanged += () => { Layout(); Invalidate(); };
-        m.ValuesChanged += Invalidate;
+        _grid = Add(new MatrixGridWidget(m));
+        Add(_scopeSeg); Add(_zoomSeg); Add(_diagBtn); Add(_stereoBtn); Add(_clearBtn); Add(_addBusBtn);
+
+        _zoomSeg.SetSelected(1);
+        _scopeSeg.Changed += i => { _grid.ScopeFilter = i; _grid.RebuildAxes(); Invalidate(); };
+        _zoomSeg.Changed += i => { _grid.ZoomMode = i; _grid.Layout(); Invalidate(); };
+        _diagBtn.Clicked += () => { _m.PatchDiagonal1To1(); Root?.Notify.Flash("1:1 Diagonal-Patch (0.0 dB) gesetzt."); };
+        _stereoBtn.Clicked += () => { _m.PatchStereoPairs(); Root?.Notify.Flash("Stereo-Paare L/R (0.0 dB) gepatcht."); };
+        _clearBtn.Clicked += () => Root?.Confirm("Alle direkten Kreuzpunkte trennen?",
+            "Alle direkten In→Out-Verbindungen werden auf −∞ gesetzt. Bus-Routen bleiben erhalten.",
+            "Trennen", () => _m.ClearAllDirectMatrix(), danger: true);
+        _addBusBtn.Clicked += ShowAddBusMenu;
+
+        m.StructureChanged += () => { _grid.RebuildAxes(); Invalidate(); };
+        m.ValuesChanged += () => { _grid.RebuildAxes(); Invalidate(); };
+        _grid.RebuildAxes();
     }
 
-    bool Empty => _m.InputCount == 0 || _m.OutputCount == 0;
+    void ShowAddBusMenu()
+    {
+        if (Root is not { } root) return;
+        PopupMenu.Show(root, _addBusBtn.Bounds, new List<MenuItem>
+        {
+            new("Stereo-Bus anlegen (2 Kanäle)", null, () => _m.AddBus(2)) { Icon = Icon.Plus },
+            new("Mono-Bus anlegen (1 Kanal)", null, () => _m.AddBus(1)) { Icon = Icon.Plus },
+            new("Surround-/Mehrkanal-Bus (6 Kanäle)", null, () => _m.AddBus(6)) { Icon = Icon.Plus },
+        }, 250);
+    }
 
-    public override void OnShow() { Layout(); }
-
-    RectF Area => new(Bounds.X + Theme.Pad, Bounds.Y + 2, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - Theme.Pad - 2));
+    public override void OnShow() { _grid.RebuildAxes(); Layout(); }
 
     public override void Layout()
     {
-        var area = Area;
-        _view.Visible = !Empty;
-        var (pw, ph) = _view.PreferredSize(area.W, area.H);
-        _view.Bounds = new RectF(area.X, area.Y, pw, ph);
-        _view.Layout();
-        _addIn.Visible = _addOut.Visible = _addInPair.Visible = _addOutPair.Visible = false;
-        if (Empty)
-        {
-            var card = EmptyCard();
-            bool needIn = _m.InputCount == 0, needOut = _m.OutputCount == 0;
-            _addIn.Visible = _addInPair.Visible = needIn;
-            _addOut.Visible = _addOutPair.Visible = needOut;
-            var list = new List<Button>();
-            if (needIn) { list.Add(_addIn); list.Add(_addInPair); }
-            if (needOut) { list.Add(_addOut); list.Add(_addOutPair); }
-            float total = list.Sum(b => b.PreferredWidth + 10) + (list.Count - 1) * 10;
-            float x = card.CX - total / 2;
-            float y = card.Bottom - 40 - Theme.ControlH;
-            foreach (var bt in list)
-            {
-                float w = bt.PreferredWidth + 10;
-                bt.Bounds = new RectF(x, y, w, Theme.ControlH);
-                x += w + 10;
-            }
-        }
-    }
+        if (Bounds.W < 20 || Bounds.H < 20) return;
+        var area = Bounds.Deflate(Theme.Pad, 10, Theme.Pad, Theme.Pad);
+        float barH = Theme.ControlH;
 
-    public override void Paint(Renderer g)
-    {
-        if (Empty) PaintEmpty(g);
-        PaintChildren(g);
-    }
+        float rx = area.Right;
+        float wBus = _addBusBtn.PreferredWidth;
+        _addBusBtn.Bounds = new RectF(rx - wBus, area.Y, wBus, barH); rx -= wBus + 8;
 
-    const string EmptyBodyText = "Hier verteilst du jeden Eingang auf beliebige Ausgänge – mit eigenem Pegel je Kreuzungspunkt. Lege dafür zuerst Kanäle an (auch direkt hier), ohne Namen und ohne Vorbelegung.";
+        float x = area.X;
+        float scopeW = Math.Min(270f, Math.Max(140f, rx - x - 6f));
+        _scopeSeg.Bounds = new RectF(x, area.Y, scopeW, barH); x += scopeW + 8;
 
-    RectF EmptyCard()
-    {
-        var a = Area;
-        float h = Math.Min(a.H, Draw.EmptyHeight(640, EmptyBodyText) + 60 + Theme.ControlH + 40);
-        return RectF.Centered(a.CX, a.Y + a.H / 2, Math.Max(100, Math.Min(680, a.W)), Math.Max(100, h));
-    }
+        _zoomSeg.Bounds = new RectF(x, area.Y, 200f, barH);
+        _zoomSeg.Visible = _zoomSeg.Bounds.Right + 6 <= rx;
+        if (_zoomSeg.Visible) x += 208f;
 
-    void PaintEmpty(Renderer g)
-    {
-        var card = EmptyCard();
-        Draw.Card(g, card);
-        string need = _m.InputCount == 0 && _m.OutputCount == 0 ? "Eingänge und Ausgänge fehlen" : _m.InputCount == 0 ? "Es fehlen Eingänge" : "Es fehlen Ausgänge";
-        Draw.Empty(g, card, card.Y + 36, Icon.Matrix, "Die Matrix wartet auf Kanäle", EmptyBodyText + " " + need + ".");
+        float wClr = _clearBtn.PreferredWidth;
+        _clearBtn.Bounds = new RectF(rx - wClr, area.Y, wClr, barH);
+        _clearBtn.Visible = _clearBtn.Bounds.X > x;
+        if (_clearBtn.Visible) rx -= wClr + 6;
+
+        float wSt = _stereoBtn.PreferredWidth;
+        _stereoBtn.Bounds = new RectF(rx - wSt, area.Y, wSt, barH);
+        _stereoBtn.Visible = _stereoBtn.Bounds.X > x;
+        if (_stereoBtn.Visible) rx -= wSt + 6;
+
+        float wDg = _diagBtn.PreferredWidth;
+        _diagBtn.Bounds = new RectF(rx - wDg, area.Y, wDg, barH);
+        _diagBtn.Visible = _diagBtn.Bounds.X > x;
+
+        _grid.Bounds = new RectF(area.X, area.Y + barH + 10, area.W, Math.Max(0, area.H - barH - 10));
+        _grid.Layout();
     }
 }

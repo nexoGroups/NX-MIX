@@ -3,13 +3,20 @@ using NxMix.Engine;
 
 namespace NxMix.Audio.Host;
 
-/// <summary>Ein Durchlauf von Start() bis Stop(): Plan aus der Konfiguration, alle Streams/Threads, gemeinsame Zaehler.</summary>
+/// <summary>Ein Durchlauf von Start() bis Stop(): Plan aus der Konfiguration, alle Streams/Threads, gemeinsame Zaehler.
+/// Takt-Hierarchie (ASIO-First):
+///   1. Explizit gewaehltes PreferredMasterDeviceId (ASIO oder WASAPI Render)
+///   2. Aktives ASIO-Ausgabe-/Duplex-Geraet mit passender Samplerate (AsioStream mit IsMaster = true, 0 Ringpuffer)
+///   3. Erstes WASAPI-Ausgabegeraet mit passender Samplerate (MasterDeviceStream)
+///   4. Software-Takt (MasterTimerStream, z. B. bei reinen Capture-/App-Link-Konfigurationen oder wenn Ausgabegeraete offline sind).</summary>
 internal sealed class HostRun
 {
     private const int OpenTimeoutMs = 20000;
 
     private readonly List<StreamSpec> _specs = new();
-    private readonly StreamSpec? _masterSpec;
+    private readonly StreamSpec? _masterWasapiSpec;
+    private readonly string? _masterAsioDriver;
+    private readonly List<DeviceStat> _offlineDevices = new();
     private StreamBase[] _all = Array.Empty<StreamBase>();
     private int _faulted;
     private bool _shutdown;
@@ -46,7 +53,9 @@ internal sealed class HostRun
         Config = config;
         Processor = processor;
 
-        if (config.Bindings == null || config.Bindings.Count == 0)
+        bool hasBindings = config.Bindings is { Count: > 0 };
+        bool hasApps = config.AppBindings is { Count: > 0 };
+        if (!hasBindings && !hasApps)
             throw new ArgumentException("Keine Geraete-Anbindungen konfiguriert.");
         if (config.SampleRate < 8000 || config.SampleRate > 768000)
             throw new ArgumentException($"Ungueltige Samplerate {config.SampleRate}.");
@@ -56,8 +65,9 @@ internal sealed class HostRun
         EngineRate = config.SampleRate;
         Chunk = Math.Clamp((Math.Max(config.BlockFrames, 1) + 7) / 8 * 8, 32, 16384);
 
+        var bindings = config.Bindings ?? Array.Empty<DeviceBinding>();
         var byKey = new Dictionary<string, StreamSpec>();
-        foreach (DeviceBinding b in config.Bindings)
+        foreach (DeviceBinding b in bindings)
         {
             if (b.Count < 1) throw new ArgumentException($"Bindung auf '{b.DeviceId}': Count muss >= 1 sein.");
             if (b.DeviceFirstChannel < 0 || b.EngineFirstChannel < 0)
@@ -87,22 +97,62 @@ internal sealed class HostRun
                 throw new ArgumentException("Alle Zuordnungen eines Geräts müssen dieselben Geräteeinstellungen verwenden.");
             spec.Add(b.DeviceFirstChannel, b.EngineFirstChannel, b.Count);
         }
-        _masterSpec = _specs.FirstOrDefault(s => !s.IsCapture && (s.SampleRate == null || s.SampleRate == EngineRate));
-        Asios = config.Bindings.Where(b => AsioCatalog.IsAsio(b.DeviceId)).GroupBy(b => AsioCatalog.DriverName(b.DeviceId))
-            .Select(g => new AsioStream(this, g.Key, g.ToArray())).ToArray();
 
-        if (config.AppBindings is { Count: > 0 })
+        var asioGroups = bindings
+            .Where(b => AsioCatalog.IsAsio(b.DeviceId))
+            .GroupBy(b => AsioCatalog.DriverName(b.DeviceId))
+            .Select(g => (Driver: g.Key, Bindings: g.ToArray()))
+            .ToArray();
+
+        // Master-Clock bestimmen (1. Preferred -> 2. ASIO Render -> 3. WASAPI Render -> 4. Software-Timer)
+        string? pref = config.PreferredMasterDeviceId;
+        if (!string.IsNullOrWhiteSpace(pref))
+        {
+            if (AsioCatalog.IsAsio(pref))
+            {
+                string prefDriver = AsioCatalog.DriverName(pref);
+                var match = asioGroups.FirstOrDefault(g => string.Equals(g.Driver, prefDriver, StringComparison.OrdinalIgnoreCase));
+                if (match.Bindings != null && AsioStream.CanActAsMaster(match.Bindings, EngineRate))
+                    _masterAsioDriver = match.Driver;
+            }
+            else
+            {
+                _masterWasapiSpec = _specs.FirstOrDefault(s =>
+                    !s.IsCapture &&
+                    string.Equals(s.DeviceId, pref, StringComparison.OrdinalIgnoreCase) &&
+                    (s.SampleRate == null || s.SampleRate == EngineRate));
+            }
+        }
+
+        if (_masterAsioDriver == null && _masterWasapiSpec == null)
+        {
+            var firstAsioMaster = asioGroups.FirstOrDefault(g => AsioStream.CanActAsMaster(g.Bindings, EngineRate));
+            if (firstAsioMaster.Bindings != null)
+            {
+                _masterAsioDriver = firstAsioMaster.Driver;
+            }
+            else
+            {
+                _masterWasapiSpec = _specs.FirstOrDefault(s => !s.IsCapture && (s.SampleRate == null || s.SampleRate == EngineRate));
+            }
+        }
+
+        Asios = asioGroups
+            .Select(g => new AsioStream(this, g.Driver, g.Bindings, isMaster: _masterAsioDriver != null && g.Driver == _masterAsioDriver))
+            .ToArray();
+
+        if (hasApps)
         {
             var taken = new HashSet<int>();
             var renderIds = new List<string?>();
-            foreach (DeviceBinding b in config.Bindings)
+            foreach (DeviceBinding b in bindings)
             {
                 if (b.Loopback || b.Flow == DeviceFlow.Capture)
                     for (int k = 0; k < b.Count; k++) taken.Add(b.EngineFirstChannel + k);
                 else
                     renderIds.Add(b.DeviceId);
             }
-            Apps = new AppLinkEngine(this, config.AppBindings, config.ParkingDeviceId, processor.InputChannels, taken,
+            Apps = new AppLinkEngine(this, config.AppBindings!, config.ParkingDeviceId, processor.InputChannels, taken,
                 () => new LaneContext(EngineRate, Chunk, Math.Max(1, Volatile.Read(ref MasterPeriodFrames)), () => Aborting), renderIds);
         }
     }
@@ -122,40 +172,112 @@ internal sealed class HostRun
         StopEvent = Native.CreateEvent(0, 1, 0, null);
         if (StopEvent == 0) throw new AudioException(0, "Stop-Event konnte nicht erzeugt werden.");
 
-        Master = _masterSpec != null ? new MasterDeviceStream(this, _masterSpec) : new MasterTimerStream(this);
+        AsioStream? asioMaster = Asios.FirstOrDefault(a => a.IsMaster);
+        Master = asioMaster != null
+            ? asioMaster
+            : _masterWasapiSpec != null
+                ? new MasterDeviceStream(this, _masterWasapiSpec)
+                : new MasterTimerStream(this);
+
         var captures = new List<CaptureStream>();
         var renders = new List<RenderStream>();
         foreach (StreamSpec spec in _specs)
         {
-            if (ReferenceEquals(spec, _masterSpec)) continue;
+            if (ReferenceEquals(spec, _masterWasapiSpec)) continue;
             if (spec.IsCapture) captures.Add(new CaptureStream(this, spec));
             else renders.Add(new RenderStream(this, spec));
         }
-        Captures = captures.ToArray();
-        Renders = renders.ToArray();
-        _all = new StreamBase[] { Master }.Concat(Captures).Concat(Renders).Concat(Asios).ToArray();
-        Core = new MixCore(Processor, EngineRate, Chunk, Captures, Renders, Apps?.Slots, Asios);
 
-        // Master zuerst: seine Periode bestimmt die Sollfuellstaende der uebrigen Geraete.
+        // 1. Master-Stream oeffnen (falls Offline und AllowOfflineAuxDevices aktiv: sauber auf Software-Timer zurueckfallen!)
         Master.StartThread();
-        WaitOpened(Master);
-        foreach (StreamBase s in _all)
-            if (!ReferenceEquals(s, Master)) s.StartThread();
-        foreach (StreamBase s in _all)
-            if (!ReferenceEquals(s, Master)) WaitOpened(s);
+        if (!TryWaitOpened(Master, out string? masterErr))
+        {
+            if (Config.AllowOfflineAuxDevices && Master is not MasterTimerStream)
+            {
+                RecordOffline(Master, masterErr!);
+                if (ReferenceEquals(Master, asioMaster))
+                    Asios = Asios.Where(a => !ReferenceEquals(a, asioMaster)).ToArray();
+                Master = new MasterTimerStream(this);
+                Master.StartThread();
+                WaitOpenedStrict(Master);
+            }
+            else
+            {
+                throw new AudioException(0, $"Geraet '{Master.Name}': {masterErr}");
+            }
+        }
 
+        // 2. Hilfs-Streams parallel oeffnen
+        var auxCandidates = captures.Cast<StreamBase>()
+            .Concat(renders)
+            .Concat(Asios.Where(a => !ReferenceEquals(a, Master)))
+            .ToArray();
+
+        foreach (StreamBase s in auxCandidates) s.StartThread();
+
+        var activeCaptures = new List<CaptureStream>(captures.Count);
+        var activeRenders = new List<RenderStream>(renders.Count);
+        var activeAsios = new List<AsioStream>(Asios.Length);
+        if (Master is AsioStream masterAsioActive) activeAsios.Add(masterAsioActive);
+
+        foreach (StreamBase s in auxCandidates)
+        {
+            if (TryWaitOpened(s, out string? err))
+            {
+                if (s is CaptureStream cs) activeCaptures.Add(cs);
+                else if (s is RenderStream rs) activeRenders.Add(rs);
+                else if (s is AsioStream asx) activeAsios.Add(asx);
+            }
+            else if (Config.AllowOfflineAuxDevices)
+            {
+                RecordOffline(s, err!);
+            }
+            else
+            {
+                throw new AudioException(0, $"Geraet '{s.Name}': {err}");
+            }
+        }
+
+        Captures = activeCaptures.ToArray();
+        Renders = activeRenders.ToArray();
+        Asios = activeAsios.ToArray();
+
+        _all = new StreamBase[] { Master }
+            .Concat(Captures)
+            .Concat(Renders)
+            .Concat(Asios.Where(a => !ReferenceEquals(a, Master)))
+            .ToArray();
+
+        Core = new MixCore(Processor, EngineRate, Chunk, Captures, Renders, Apps?.Slots, Asios);
         Core.Prepare();
-        if (_masterSpec == null && Asios.Length > 0) OutputLatencyMs = Asios.Max(a => a.OutputLatencyMs);
+        if (Master is MasterTimerStream && Asios.Length > 0)
+            OutputLatencyMs = Asios.Max(a => a.OutputLatencyMs);
+
         Go.Set();
         Apps?.StartThread();
     }
 
-    private static void WaitOpened(StreamBase s)
+    private void RecordOffline(StreamBase s, string error)
+    {
+        string devId = s.Spec?.DeviceId ?? (s is AsioStream asio ? asio.PrimaryDeviceId : s.Name);
+        _offlineDevices.Add(new DeviceStat(devId, s.Name, 0, 0, 0, IsMasterClock: false, IsOffline: true, OfflineReason: error));
+    }
+
+    private static bool TryWaitOpened(StreamBase s, out string? error)
     {
         if (!s.Opened.Wait(OpenTimeoutMs))
-            throw new TimeoutException($"Geraet '{s.Name}' antwortet beim Oeffnen nicht.");
-        if (s.OpenError != null)
-            throw new AudioException(0, $"Geraet '{s.Name}': {s.OpenError}");
+        {
+            error = "antwortet beim Oeffnen nicht (Timeout).";
+            return false;
+        }
+        error = s.OpenError;
+        return error == null;
+    }
+
+    private static void WaitOpenedStrict(StreamBase s)
+    {
+        if (!TryWaitOpened(s, out string? err))
+            throw new AudioException(0, $"Geraet '{s.Name}': {err}");
     }
 
     /// <summary>Beendet alle Threads (zuerst sanft: Master blendet aus und schiebt Stille nach) und gibt alles frei. Mehrfach aufrufbar.</summary>
@@ -197,7 +319,8 @@ internal sealed class HostRun
         long underruns = Interlocked.Read(ref MasterUnderruns);
         long overruns = 0;
 
-        if (Master is MasterDeviceStream) devices.Add(Master.GetStat());
+        if (Master is MasterDeviceStream)
+            devices.Add(Master.GetStat() with { IsMasterClock = true });
         foreach (CaptureStream c in Captures)
         {
             devices.Add(c.GetStat());
@@ -208,9 +331,19 @@ internal sealed class HostRun
             devices.Add(rs.GetStat());
             if (rs.Reader is { } r) { underruns += r.Underruns; overruns += r.Overruns; }
         }
-        foreach (var asio in Asios) { devices.Add(asio.GetStat()); underruns += asio.Underruns; overruns += asio.Overruns; }
+        foreach (var asio in Asios)
+        {
+            devices.Add(asio.GetStat());
+            underruns += asio.Underruns;
+            overruns += asio.Overruns;
+        }
+        if (_offlineDevices.Count > 0)
+            devices.AddRange(_offlineDevices);
 
         return new HostStats(state, lastError, Chunk, Volatile.Read(ref CpuLoad), underruns, overruns,
-            Volatile.Read(ref OutputLatencyMs), devices);
+            Volatile.Read(ref OutputLatencyMs), devices)
+        {
+            MasterClockName = Master?.Name,
+        };
     }
 }

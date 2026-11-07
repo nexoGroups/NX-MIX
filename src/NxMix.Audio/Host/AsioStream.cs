@@ -1,113 +1,367 @@
-using NAudio.Wave;
+using System.Diagnostics;
 using NxMix.Audio.Dsp;
 using NxMix.Audio.Interop;
 
 namespace NxMix.Audio.Host;
 
-/// <summary>One native duplex ASIO driver, bridged to the common mixer clock through adaptive rings.
-/// Input and output bindings for the same driver share one driver instance and sample rate.</summary>
+/// <summary>Nativer Duplex-ASIO-Stream.
+/// Im Master-Modus (IsMaster = true) treibt der ASIO-BufferSwitch-Callback direkt und ohne Ringpuffer/Resampling
+/// MixCore.ProcessChunk an (minimale Hardware-Latenz, bitgenauer Takt).
+/// Im Hilfs-Modus (IsMaster = false, z. B. zweites ASIO-Interface oder erzwungener WASAPI-Master) wird wie bei
+/// Hilfs-WASAPI-Geraeten ueber SpscFloatRing + ClockMatchedReader adaptiv synchronisiert.</summary>
 internal sealed class AsioStream : StreamBase
 {
-    readonly DeviceBinding[] _bindings;
-    readonly string _driver;
-    AsioDevice? _device;
-    (int Device, int Engine)[] _inputs = Array.Empty<(int, int)>(), _outputs = Array.Empty<(int, int)>();
-    SpscFloatRing? _inRing, _outRing;
-    ClockMatchedReader? _inReader, _outReader;
-    float[] _inStage = Array.Empty<float>(), _outStage = Array.Empty<float>();
-    float[][] _inputTargets = Array.Empty<float[]>(), _outBuffers = Array.Empty<float[]>();
+    private readonly DeviceBinding[] _bindings;
+    private readonly string _driver;
+    private IAsioSession? _device;
+    private (int Device, int Engine)[] _inputs = Array.Empty<(int, int)>();
+    private (int Device, int Engine)[] _outputs = Array.Empty<(int, int)>();
+    private SpscFloatRing? _inRing, _outRing;
+    private ClockMatchedReader? _inReader, _outReader;
+    private float[] _inStage = Array.Empty<float>(), _outStage = Array.Empty<float>();
+    private float[][] _inputTargets = Array.Empty<float[]>(), _outBuffers = Array.Empty<float[]>();
+    private float[][] _masterEngineInputs = Array.Empty<float[]>();
+
+    // Zustand fuer Master-Clock-Callback (nur auf dem ASIO-Callback-Thread benutzt)
+    private readonly ManualResetEventSlim _masterDrainDone = new(false);
+    private nint _cbMmcss;
+    private bool _cbEnteredMmcss;
+    private bool _fading;
+    private bool _draining;
+    private int _drainLeft;
+    private double _load;
+
+    public bool IsMaster { get; }
+    public string DriverName => _driver;
+    public string PrimaryDeviceId => _bindings.FirstOrDefault()?.DeviceId ?? _driver;
     public IEnumerable<int> BoundInputs => _bindings.Where(b => b.Flow == DeviceFlow.Capture).SelectMany(b => Enumerable.Range(b.EngineFirstChannel, b.Count));
     public double OutputLatencyMs { get; private set; }
     public long Underruns => (_inReader?.Underruns ?? 0) + (_outReader?.Underruns ?? 0);
     public long Overruns => (_inReader?.Overruns ?? 0) + (_outReader?.Overruns ?? 0);
-    public AsioStream(HostRun run, string driver, DeviceBinding[] bindings) : base(run, null, driver)
-    { _driver = driver; _bindings = bindings; }
+
+    public AsioStream(HostRun run, string driver, DeviceBinding[] bindings, bool isMaster)
+        : base(run, null, driver)
+    {
+        _driver = driver;
+        _bindings = bindings;
+        IsMaster = isMaster;
+    }
+
+    public static bool CanActAsMaster(DeviceBinding[] bindings, int engineRate)
+    {
+        bool hasRender = bindings.Any(b => b.Flow == DeviceFlow.Render && b.Count > 0);
+        if (!hasRender) return false;
+        var rates = bindings.Where(b => b.SampleRate.HasValue).Select(b => b.SampleRate!.Value).Distinct().ToArray();
+        return rates.Length == 0 || (rates.Length == 1 && rates[0] == engineRate);
+    }
+
     protected override void OpenDevice()
     {
-        _device = AsioDevice.Open(_driver);
-        _inputs = _bindings.Where(b => b.Flow == DeviceFlow.Capture).SelectMany(b => Enumerable.Range(0, b.Count).Select(k => (b.DeviceFirstChannel + k, b.EngineFirstChannel + k))).ToArray();
-        _outputs = _bindings.Where(b => b.Flow == DeviceFlow.Render).SelectMany(b => Enumerable.Range(0, b.Count).Select(k => (b.DeviceFirstChannel + k, b.EngineFirstChannel + k))).ToArray();
-        if (_inputs.Select(x => x.Device).Distinct().Count() != _inputs.Length || _outputs.Select(x => x.Device).Distinct().Count() != _outputs.Length)
+        _device = AsioBackendRegistry.Current.Open(_driver);
+        _inputs = _bindings.Where(b => b.Flow == DeviceFlow.Capture)
+            .SelectMany(b => Enumerable.Range(0, b.Count).Select(k => (b.DeviceFirstChannel + k, b.EngineFirstChannel + k))).ToArray();
+        _outputs = _bindings.Where(b => b.Flow == DeviceFlow.Render)
+            .SelectMany(b => Enumerable.Range(0, b.Count).Select(k => (b.DeviceFirstChannel + k, b.EngineFirstChannel + k))).ToArray();
+
+        if (_inputs.Select(x => x.Device).Distinct().Count() != _inputs.Length ||
+            _outputs.Select(x => x.Device).Distinct().Count() != _outputs.Length)
             throw new ArgumentException("ASIO-Gerätekanäle dürfen je Richtung nur einmal zugeordnet sein.");
+
+        var cap = _device.Capabilities;
+        if (_inputs.Any(x => x.Device >= cap.InputChannels))
+            throw new AudioException(0, $"ASIO-Treiber '{_driver}' hat nur {cap.InputChannels} Eingänge.");
+        if (_outputs.Any(x => x.Device >= cap.OutputChannels))
+            throw new AudioException(0, $"ASIO-Treiber '{_driver}' hat nur {cap.OutputChannels} Ausgänge.");
+
         var rates = _bindings.Where(b => b.SampleRate.HasValue).Select(b => b.SampleRate!.Value).Distinct().ToArray();
         var sizes = _bindings.Where(b => b.BufferFrames.HasValue).Select(b => b.BufferFrames!.Value).Distinct().ToArray();
-        if (rates.Length > 1 || sizes.Length > 1) throw new ArgumentException("Ein ASIO-Gerät benötigt eine gemeinsame Abtastrate und Puffergröße für Ein- und Ausgänge.");
+        if (rates.Length > 1 || sizes.Length > 1)
+            throw new ArgumentException("Ein ASIO-Gerät benötigt eine gemeinsame Abtastrate und Puffergröße für Ein- und Ausgänge.");
+
         int rate = rates.FirstOrDefault();
-        if (rate == 0) rate = _device.IsSampleRateSupported(Run.EngineRate) ? Run.EngineRate : _device.CurrentSampleRate;
+        if (rate == 0)
+        {
+            if (IsMaster)
+            {
+                if (!_device.IsSampleRateSupported(Run.EngineRate))
+                    throw new AudioException(0, $"Master-ASIO-Treiber '{_driver}' unterstützt {Run.EngineRate} Hz nicht.");
+                rate = Run.EngineRate;
+            }
+            else
+            {
+                rate = _device.IsSampleRateSupported(Run.EngineRate) ? Run.EngineRate : _device.CurrentSampleRate;
+            }
+        }
+        else if (IsMaster && rate != Run.EngineRate)
+        {
+            throw new AudioException(0, $"Master-ASIO-Treiber '{_driver}' ({rate} Hz) muss mit der Engine-Samplerate ({Run.EngineRate} Hz) laufen.");
+        }
+
         int? buffer = sizes.Length == 0 ? null : sizes[0];
-        _device.DriverResetRequest += (_, _) => Run.Fault(_driver + ": Treibereinstellungen geändert. Audio bitte neu starten.");
-        _device.Stopped += (_, e) => { if (!Run.StopRequested && !Run.Aborting) Run.Fault(_driver + ": " + (e.Exception?.Message ?? "ASIO wurde beendet.")); };
+        _device.DriverResetRequest += (_, _) => Run.Fault(_driver + ": ASIO-Treibereinstellungen geändert (Reset angefordert).");
+        _device.UnexpectedStop += (_, msg) =>
+        {
+            if (!Run.StopRequested && !Run.Aborting)
+                Run.Fault(_driver + ": " + (msg ?? "ASIO wurde vom Treiber beendet."));
+        };
+
+        if (IsMaster)
+        {
+            _device.InitDuplex(
+                _inputs.Select(x => x.Device).ToArray(),
+                _outputs.Select(x => x.Device).ToArray(),
+                rate,
+                buffer,
+                ProcessMaster);
+
+            int period = Math.Max(1, _device.FramesPerBuffer);
+            Run.MasterPeriodFrames = period;
+            OutputLatencyMs = (period + Math.Max(0, _device.OutputLatencySamples)) * 1000.0 / rate;
+            Run.OutputLatencyMs = OutputLatencyMs;
+            return;
+        }
+
+        // Hilfs-ASIO-Modus (ueber SPSC-Ring + ClockMatchedReader)
         if (_outputs.Length == 0)
         {
-            _device.InitRecording(new AsioRecordingOptions { InputChannels = _inputs.Select(x => x.Device).ToArray(), SampleRate = rate, BufferSize = buffer });
-            _device.AudioCaptured += (_, e) =>
-            {
-                if (Run.IsFaulted) return;
-                for (int c = 0; c < _inputs.Length; c++)
-                {
-                    var src = e.GetChannel(c);
-                    for (int f = 0; f < e.Frames; f++) _inStage[f * _inputs.Length + c] = float.IsFinite(src[f]) ? src[f] : 0;
-                }
-                _inRing!.Write(_inStage, e.Frames);
-            };
+            _device.InitRecording(
+                _inputs.Select(x => x.Device).ToArray(),
+                rate,
+                buffer,
+                ProcessAuxCapture);
         }
-        else _device.InitDuplex(new AsioDuplexOptions
+        else
         {
-            InputChannels = _inputs.Select(x => x.Device).ToArray(), OutputChannels = _outputs.Select(x => x.Device).ToArray(),
-            SampleRate = rate, BufferSize = buffer, Processor = Process,
-        });
-        int period = _device.FramesPerBuffer;
+            _device.InitDuplex(
+                _inputs.Select(x => x.Device).ToArray(),
+                _outputs.Select(x => x.Device).ToArray(),
+                rate,
+                buffer,
+                ProcessAuxDuplex);
+        }
+
+        int auxPeriod = Math.Max(1, _device.FramesPerBuffer);
         if (_inputs.Length > 0)
         {
-            int target = period * 2 + (int)Math.Ceiling(Run.Chunk * (double)rate / Run.EngineRate) + rate / 250;
+            int target = auxPeriod * 2 + (int)Math.Ceiling(Run.Chunk * (double)rate / Run.EngineRate) + rate / 250;
             _inRing = new SpscFloatRing(_inputs.Length, target * 5);
             _inReader = new ClockMatchedReader(_inRing, rate / (double)Run.EngineRate, Run.EngineRate, target, Run.Chunk);
-            _inStage = new float[period * _inputs.Length];
+            _inStage = new float[auxPeriod * _inputs.Length];
         }
         if (_outputs.Length > 0)
         {
-            int target = Run.Chunk * 2 + (int)Math.Ceiling(period * (double)Run.EngineRate / rate) + Run.EngineRate / 250;
+            int target = Run.Chunk * 2 + (int)Math.Ceiling(auxPeriod * (double)Run.EngineRate / rate) + Run.EngineRate / 250;
             _outRing = new SpscFloatRing(_outputs.Length, target * 5);
-            _outReader = new ClockMatchedReader(_outRing, Run.EngineRate / (double)rate, rate, target, period);
+            _outReader = new ClockMatchedReader(_outRing, Run.EngineRate / (double)rate, rate, target, auxPeriod);
             _outStage = new float[Run.Chunk * _outputs.Length];
-            _outBuffers = _outputs.Select(_ => new float[period]).ToArray();
+            _outBuffers = _outputs.Select(_ => new float[auxPeriod]).ToArray();
             OutputLatencyMs = target * 1000.0 / Run.EngineRate + _device.OutputLatencySamples * 1000.0 / rate;
         }
     }
-    void Process(in AsioProcessBuffers buffer)
+
+    private void ProcessMaster(in AsioFrameBlock buffer)
     {
-        if (Run.IsFaulted) return; // library clears output before callback; normal Stop drains the mixer's fade-out
+        int totalFrames = buffer.Frames;
+        if (totalFrames <= 0) return;
+
+        if (!_cbEnteredMmcss)
+        {
+            _cbEnteredMmcss = true;
+            _cbMmcss = Mmcss.Enter();
+        }
+
+        // Solange Launch() die Hilfs-Streams noch vorbereitet: exakte Stille ausgeben
+        if (!Run.Go.IsSet || Run.Core == null)
+        {
+            for (int c = 0; c < _outputs.Length; c++)
+                buffer.GetOutput(c).Clear();
+            return;
+        }
+
+        long t0 = Stopwatch.GetTimestamp();
+        MixCore core = Run.Core;
+        int chunk = Run.Chunk;
+
+        if (!_fading && (Run.StopRequested || Run.IsFaulted))
+        {
+            _fading = true;
+            core.BeginFadeOut();
+        }
+
+        int offset = 0;
+        while (offset < totalFrames)
+        {
+            int n = Math.Min(chunk, totalFrames - offset);
+            if (_draining)
+            {
+                for (int c = 0; c < _outputs.Length; c++)
+                    buffer.GetOutput(c).Slice(offset, n).Clear();
+                _drainLeft -= n;
+            }
+            else
+            {
+                for (int c = 0; c < _inputs.Length; c++)
+                {
+                    ReadOnlySpan<float> src = buffer.GetInput(c).Slice(offset, n);
+                    float[] dst = _masterEngineInputs[_inputs[c].Engine];
+                    for (int f = 0; f < n; f++)
+                    {
+                        float v = src[f];
+                        dst[f] = float.IsFinite(v) ? v : 0f;
+                    }
+                }
+
+                core.ProcessChunk(n);
+
+                for (int c = 0; c < _outputs.Length; c++)
+                {
+                    ReadOnlySpan<float> src = core.Outputs[_outputs[c].Engine].AsSpan(0, n);
+                    Span<float> dst = buffer.GetOutput(c).Slice(offset, n);
+                    for (int f = 0; f < n; f++)
+                    {
+                        float v = src[f];
+                        dst[f] = float.IsFinite(v) ? v : 0f;
+                    }
+                }
+
+                if (_fading && core.FadeOutDone)
+                {
+                    _draining = true;
+                    _drainLeft = Math.Max(totalFrames, chunk);
+                }
+            }
+            offset += n;
+        }
+
+        double budget = (double)totalFrames / Run.EngineRate * Stopwatch.Frequency;
+        if (budget > 0)
+        {
+            double inst = (Stopwatch.GetTimestamp() - t0) / budget;
+            _load += (inst - _load) * 0.1;
+            Volatile.Write(ref Run.CpuLoad, _load);
+        }
+
+        ProbeAllocation();
+
+        if (_draining && _drainLeft <= 0)
+        {
+            _masterDrainDone.Set();
+            Native.SetEvent(Run.StopEvent);
+        }
+    }
+
+    private void ProcessAuxCapture(in AsioCaptureBlock e)
+    {
+        if (Run.IsFaulted || e.Frames <= 0) return;
+        int maxFrames = _inStage.Length / Math.Max(1, _inputs.Length);
+        int frames = Math.Min(e.Frames, maxFrames);
+        for (int c = 0; c < _inputs.Length; c++)
+        {
+            var src = e.GetChannel(c);
+            for (int f = 0; f < frames; f++)
+                _inStage[f * _inputs.Length + c] = float.IsFinite(src[f]) ? src[f] : 0f;
+        }
+        _inRing!.Write(_inStage, frames);
+        ProbeAllocation();
+    }
+
+    private void ProcessAuxDuplex(in AsioFrameBlock buffer)
+    {
+        if (Run.IsFaulted || buffer.Frames <= 0) return;
+        int frames = buffer.Frames;
         if (_inputs.Length > 0)
         {
+            int inFrames = Math.Min(frames, _inStage.Length / _inputs.Length);
             for (int c = 0; c < _inputs.Length; c++)
             {
                 var source = buffer.GetInput(c);
-                for (int f = 0; f < buffer.Frames; f++) _inStage[f * _inputs.Length + c] = float.IsFinite(source[f]) ? source[f] : 0;
+                for (int f = 0; f < inFrames; f++)
+                    _inStage[f * _inputs.Length + c] = float.IsFinite(source[f]) ? source[f] : 0f;
             }
-            _inRing!.Write(_inStage, buffer.Frames);
+            _inRing!.Write(_inStage, inFrames);
         }
-        _outReader!.Read(_outBuffers, 0, buffer.Frames);
-        for (int c = 0; c < _outputs.Length; c++) _outBuffers[c].AsSpan(0, buffer.Frames).CopyTo(buffer.GetOutput(c));
+        int outFrames = Math.Min(frames, _outBuffers[0].Length);
+        _outReader!.Read(_outBuffers, 0, outFrames);
+        for (int c = 0; c < _outputs.Length; c++)
+        {
+            _outBuffers[c].AsSpan(0, outFrames).CopyTo(buffer.GetOutput(c).Slice(0, outFrames));
+            if (outFrames < frames) buffer.GetOutput(c).Slice(outFrames).Clear();
+        }
+        ProbeAllocation();
     }
-    public void Bind(float[][] inputs) => _inputTargets = _inputs.Select(i => inputs[i.Engine]).ToArray();
-    public void ReadInputs(int frames) => _inReader?.Read(_inputTargets, 0, frames);
+
+    public void Bind(float[][] inputs)
+    {
+        if (IsMaster) _masterEngineInputs = inputs;
+        else _inputTargets = _inputs.Select(i => inputs[i.Engine]).ToArray();
+    }
+
+    public void ReadInputs(int frames)
+    {
+        if (!IsMaster) _inReader?.Read(_inputTargets, 0, frames);
+    }
+
     public void WriteOutputs(float[][] output, int frames)
     {
-        if (_outRing == null) return;
+        if (IsMaster || _outRing == null) return;
         for (int c = 0; c < _outputs.Length; c++)
         {
             var source = output[_outputs[c].Engine];
-            for (int f = 0; f < frames; f++) _outStage[f * _outputs.Length + c] = float.IsFinite(source[f]) ? source[f] : 0;
+            for (int f = 0; f < frames; f++)
+                _outStage[f * _outputs.Length + c] = float.IsFinite(source[f]) ? source[f] : 0f;
         }
         _outRing.Write(_outStage, frames);
     }
+
     protected override void StartDevice() => _device!.Start();
-    protected override void RunLoop() => Native.WaitForSingleObject(Run.StopEvent, uint.MaxValue);
-    protected override void CloseDevice() { try { _device?.Stop(); } finally { _device?.Dispose(); } }
+
+    protected override void RunLoop()
+    {
+        if (IsMaster)
+        {
+            while (!Run.StopRequested && !Run.IsFaulted)
+            {
+                if (Native.WaitForSingleObject(Run.StopEvent, 50) == Native.WaitObject0)
+                    break;
+            }
+            // Bei geordnetem Stopp kurz auf das 20-ms-Fade-Out des ASIO-Callbacks warten
+            if (Run.StopRequested && !Run.IsFaulted)
+                _masterDrainDone.Wait(400);
+        }
+        else
+        {
+            Native.WaitForSingleObject(Run.StopEvent, uint.MaxValue);
+        }
+    }
+
+    protected override void CloseDevice()
+    {
+        try { _device?.Stop(); }
+        finally
+        {
+            _device?.Dispose();
+            if (_cbMmcss != 0)
+            {
+                Mmcss.Leave(_cbMmcss);
+                _cbMmcss = 0;
+            }
+        }
+    }
+
+    protected override void OnExit()
+    {
+        if (IsMaster) Native.SetEvent(Run.StopEvent);
+    }
+
     public override DeviceStat GetStat()
     {
+        if (IsMaster)
+        {
+            return new DeviceStat(_bindings[0].DeviceId, _driver, 1.0, 0.0,
+                Interlocked.Read(ref Run.MasterUnderruns), IsMasterClock: true);
+        }
         var r = _outReader ?? _inReader;
-        return new DeviceStat(_bindings[0].DeviceId, Name, r?.FillFraction ?? 0, r?.CorrectionPpm ?? 0,
+        return new DeviceStat(_bindings[0].DeviceId, _driver, r?.FillFraction ?? 0, r?.CorrectionPpm ?? 0,
             (_inReader?.Underruns ?? 0) + (_inReader?.Overruns ?? 0) + (_outReader?.Underruns ?? 0) + (_outReader?.Overruns ?? 0));
     }
 }

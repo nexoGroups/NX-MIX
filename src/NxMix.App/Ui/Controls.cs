@@ -12,6 +12,7 @@ internal class Button : Widget
     public Icon Icon { get; set; }
     public TextStyle Font { get; set; } = Theme.BodyMedium;
     public bool Pill { get; set; }
+    public HAlign ContentAlign { get; set; } = HAlign.Center;
     public event Action? Clicked;
 
     public Button(string text, ButtonStyle style = ButtonStyle.Gray, Icon icon = Icon.None)
@@ -26,7 +27,7 @@ internal class Button : Widget
     public override void OnMouseUp(in MouseEvent e)
     {
         Invalidate();
-        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y)) Clicked?.Invoke();
+        if (e.Button == 0 && Enabled && HitOnRelease(e)) Clicked?.Invoke();
     }
     public override CursorKind CursorAt(float x, float y) => Enabled ? CursorKind.Hand : CursorKind.Arrow;
 
@@ -50,12 +51,15 @@ internal class Button : Widget
 
     public override void Paint(Renderer g)
     {
-        bool hot = IsHovered && Enabled, down = IsPressed && hot;
-        var (bg, fg) = Colors(Style, Enabled, hot, down);
         var b = Bounds;
+        if (b.IsEmpty) return;
+        float hover = HoverAmount(IsHovered && Enabled);
+        float press = PressAmount(IsPressed && IsHovered && Enabled);
+        var (restBg, fg) = Colors(Style, Enabled, false, false);
+        var (hotBg, _) = Colors(Style, Enabled, true, false);
+        var (downBg, _) = Colors(Style, Enabled, true, true);
         float radius = Pill ? b.H / 2 : Theme.RadiusControl;
-        g.FillRound(b, radius, bg);
-        float tw = Renderer.MeasureWidth(Text, Font);
+        g.FillRound(b, radius, Theme.Mix(Theme.Mix(restBg, hotBg, hover), downBg, press));
         float iconS = Font.Size >= 13 ? 16 : 14;
         if (Icon != Icon.None && Text.Length == 0)
         {
@@ -64,12 +68,13 @@ internal class Button : Widget
         }
         if (Icon != Icon.None)
         {
+            float tw = Math.Min(Renderer.MeasureWidth(Text, Font), Math.Max(0, b.W - iconS - 22));
             float total = iconS + 6 + tw;
-            float x0 = MathF.Round(b.CX - total / 2);
+            float x0 = g.Snap(ContentAlign == HAlign.Left ? b.X + 10 : b.CX - total / 2);
             Icons.Draw(g, Icon, x0 + iconS / 2, b.CY, iconS, fg);
-            g.Text(Text, new RectF(x0 + iconS + 6, b.Y, tw + 4, b.H), Font, fg, HAlign.Left, VAlign.Middle, false);
+            g.Text(Text, new RectF(x0 + iconS + 6, b.Y, tw + 2, b.H), Font, fg, HAlign.Left, VAlign.Middle, true);
         }
-        else g.Text(Text, b.Deflate(8, 0), Font, fg, HAlign.Center);
+        else g.Text(Text, b.Deflate(8, 0), Font, fg, ContentAlign);
     }
 }
 
@@ -91,18 +96,19 @@ internal sealed class IconButton : Widget
     public override void OnMouseUp(in MouseEvent e)
     {
         Invalidate();
-        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y)) Clicked?.Invoke(Bounds);
+        if (e.Button == 0 && Enabled && HitOnRelease(e)) Clicked?.Invoke(Bounds);
     }
 
     public override void Paint(Renderer g)
     {
-        bool hot = IsHovered && Enabled;
+        float hover = HoverAmount(IsHovered && Enabled);
+        float press = PressAmount(IsPressed && IsHovered && Enabled);
         var b = Bounds;
         float rad = Circle ? Math.Min(b.W, b.H) / 2 : Theme.RadiusControl;
         var ac = ActiveColor ?? Theme.AccentText;
-        if (hot) g.FillRound(b, rad, IsPressed ? Theme.ControlPressed : Theme.ControlHover);
-        else if (Active) g.FillRound(b, rad, Theme.Soft(ac));
-        var c = !Enabled ? Theme.TextTertiary : Active ? ac : hot ? Theme.Text : Theme.TextSecondary;
+        var bg = Theme.Mix(Active ? Theme.Soft(ac) : Theme.ControlHover.With(0), Theme.ControlHover, hover);
+        g.FillRound(b, rad, Theme.Mix(bg, Theme.ControlPressed, press));
+        var c = !Enabled ? Theme.TextTertiary : Active ? ac : Theme.Mix(Theme.TextSecondary, Theme.Text, hover);
         Icons.Draw(g, Icon, b.CX, b.CY, IconSize, c);
     }
 }
@@ -116,6 +122,7 @@ internal sealed class Toggle : Widget
     public bool Checked { get; private set; }
     public TextStyle Font { get; set; } = Theme.CalloutStrong;
     public event Action<bool>? Toggled;
+    Motion _checkedMotion;
 
     public Toggle(string text, Func<Color4> activeColor) { Text = text; ActiveColor = activeColor; Cursor = CursorKind.Hand; }
 
@@ -128,7 +135,7 @@ internal sealed class Toggle : Widget
     public override void OnMouseUp(in MouseEvent e)
     {
         Invalidate();
-        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y))
+        if (e.Button == 0 && Enabled && HitOnRelease(e))
         {
             Checked = !Checked;
             Toggled?.Invoke(Checked);
@@ -138,15 +145,13 @@ internal sealed class Toggle : Widget
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        bool hot = IsHovered && Enabled;
-        Color4 bg, fg;
-        if (Checked)
-        {
-            var ac = ActiveColor();
-            bg = hot ? Theme.Mix(ac, Theme.White, 0.12f) : ac; fg = ActiveText();
-        }
-        else { bg = hot ? Theme.ControlHover : Theme.Control; fg = hot ? Theme.Text : Theme.TextSecondary; }
-        if (IsPressed && hot) bg = Theme.Mix(bg, Theme.Black, 0.15f);
+        float hover = HoverAmount(IsHovered && Enabled);
+        float press = PressAmount(IsPressed && IsHovered && Enabled);
+        float selected = _checkedMotion.At(Root, Checked ? 1 : 0, Motion.Selection);
+        var active = Theme.Mix(ActiveColor(), Theme.White, hover * 0.12f);
+        var bg = Theme.Mix(Theme.Mix(Theme.Control, Theme.ControlHover, hover), active, selected);
+        bg = Theme.Mix(bg, Theme.Black, press * 0.15f);
+        var fg = Theme.Mix(Theme.Mix(Theme.TextSecondary, Theme.Text, hover), ActiveText(), selected);
         g.FillRound(b, Theme.RadiusSmall, bg);
         g.Text(Text, b, Font, fg, HAlign.Center);
     }
@@ -157,6 +162,7 @@ internal sealed class Switch : Widget
 {
     public bool On { get; private set; }
     public event Action<bool>? Changed;
+    Motion _selection;
 
     public Switch() { Cursor = CursorKind.Hand; }
     public void SetOn(bool on) { if (on != On) { On = on; Invalidate(); } }
@@ -167,7 +173,7 @@ internal sealed class Switch : Widget
     public override CursorKind CursorAt(float x, float y) => Enabled ? CursorKind.Hand : CursorKind.Arrow;
     public override void OnMouseUp(in MouseEvent e)
     {
-        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y))
+        if (e.Button == 0 && Enabled && HitOnRelease(e))
         {
             On = !On;
             Invalidate();
@@ -181,12 +187,14 @@ internal sealed class Switch : Widget
     public override void Paint(Renderer g)
     {
         var t = Track;
-        bool hot = IsHovered && Enabled;
-        Color4 track = On ? (hot ? Theme.AccentHover : Theme.Accent) : (Theme.IsDark ? (hot ? Theme.Rgb(0x4A4D55) : Theme.Rgb(0x3E4148)) : (hot ? Theme.Rgb(0xD3D6DB) : Theme.Rgb(0xDDE0E4)));
+        float hover = HoverAmount(IsHovered && Enabled);
+        float selected = _selection.At(Root, On ? 1 : 0, Motion.Selection);
+        Color4 off = Theme.Mix(Theme.Control, Theme.ControlHover, hover);
+        Color4 track = Theme.Mix(off, Theme.Mix(Theme.Accent, Theme.AccentHover, hover), selected);
         if (!Enabled) track = track.With(0.45f);
         g.FillPill(t, track);
         float d = t.H - 4;
-        float kx = On ? t.Right - 2 - d : t.X + 2;
+        float kx = t.X + 2 + selected * (t.W - d - 4);
         var knob = new RectF(kx, t.Y + 2, d, d);
         g.Shadow(knob, d / 2, 3, 0.8f, 1);
         g.FillPill(knob, Enabled ? Theme.White : Theme.Rgb(0xE8E8E8));
@@ -203,6 +211,7 @@ internal sealed class Segmented : Widget
     public TextStyle Font { get; set; } = Theme.CalloutMedium;
     public event Action<int>? Changed;
     int _hot = -1, _press = -1;
+    Motion _selection;
 
     public Segmented(params string[] items) { Items = items; Cursor = CursorKind.Hand; }
 
@@ -233,7 +242,7 @@ internal sealed class Segmented : Widget
     public override void OnMouseUp(in MouseEvent e)
     {
         int i = IndexAt(e.X, e.Y);
-        if (i >= 0 && i == _press && IsEnabled(i))
+        if (e.Button == 0 && i >= 0 && i == _press && IsEnabled(i) && HitOnRelease(e))
         {
             Selected = i;
             Changed?.Invoke(i);
@@ -246,21 +255,25 @@ internal sealed class Segmented : Widget
     {
         var b = Bounds;
         g.FillRound(b, Theme.RadiusControl + 1, Theme.Control);
+        if (Items.Length == 0) return;
+        float position = Math.Clamp(_selection.At(Root, Selected, Motion.Selection), 0, Items.Length - 1);
+        var first = SegRect(0);
+        var thumb = first.Offset(position * first.W, 0);
+        if (_hot >= 0 && _hot < Items.Length && _hot != Selected && IsEnabled(_hot))
+            g.FillRound(SegRect(_hot).Deflate(1), Theme.RadiusControl - 1, Theme.ControlHover);
+        for (int i = 0; i < Items.Length; i++)
+        {
+            var r = SegRect(i);
+            if (i > 0 && i != Selected && i - 1 != Selected)
+                g.Fill(new RectF(r.X - 0.5f, r.CY - r.H * 0.25f, 1, r.H * 0.5f), Theme.BorderStrong.With(0.7f));
+        }
+        if (!Theme.IsDark) g.Shadow(thumb, Theme.RadiusControl - 1, 2.5f, 0.7f, 1);
+        g.FillRound(thumb, Theme.RadiusControl - 1, Theme.SegmentThumb);
         for (int i = 0; i < Items.Length; i++)
         {
             var r = SegRect(i);
             bool sel = i == Selected;
-            bool en = IsEnabled(i);
-            if (sel)
-            {
-                if (!Theme.IsDark) g.Shadow(r, Theme.RadiusControl - 1, 2.5f, 0.7f, 1);
-                g.FillRound(r, Theme.RadiusControl - 1, Theme.SegmentThumb);
-            }
-            else if (i == _hot && en) g.FillRound(r.Deflate(1), Theme.RadiusControl - 1, Theme.ControlHover);
-            // Trennstrich zwischen zwei nicht gewaehlten Abschnitten
-            if (i > 0 && !sel && i - 1 != Selected)
-                g.Fill(new RectF(r.X - 0.5f, r.CY - r.H * 0.25f, 1, r.H * 0.5f), Theme.BorderStrong.With(0.7f));
-            var fg = !en ? Theme.TextTertiary : sel ? Theme.Text : Theme.TextSecondary;
+            var fg = !IsEnabled(i) ? Theme.TextTertiary : Theme.Mix(Theme.TextSecondary, Theme.Text, Math.Max(0, 1 - Math.Abs(position - i)));
             g.Text(Items[i], r.Deflate(4, 0), sel ? new TextStyle(Font.Size, Vortice.DirectWrite.FontWeight.SemiBold) : Font, fg, HAlign.Center);
         }
     }
@@ -282,15 +295,17 @@ internal sealed class Dropdown : Widget
     public override void OnMouseUp(in MouseEvent e)
     {
         Invalidate();
-        if (e.Button == 0 && Enabled && Bounds.Contains(e.X, e.Y) && Root != null)
+        if (e.Button == 0 && Enabled && HitOnRelease(e) && Root != null)
             PopupMenu.Show(Root, Bounds, Items(), Bounds.W);
     }
 
     public override void Paint(Renderer g)
     {
         var b = Bounds;
-        bool hot = IsHovered && Enabled;
-        g.FillRound(b, Theme.RadiusControl, !Enabled ? Theme.Control.With(0.6f) : hot ? Theme.ControlHover : Theme.Control);
+        float hover = HoverAmount(IsHovered && Enabled);
+        float press = PressAmount(IsPressed && IsHovered && Enabled);
+        var bg = Theme.Mix(Theme.Mix(Theme.Control, Theme.ControlHover, hover), Theme.ControlPressed, press);
+        g.FillRound(b, Theme.RadiusControl, Enabled ? bg : Theme.Control.With(0.6f));
         var tc = !Enabled ? Theme.TextTertiary : TextColor?.Invoke() ?? Theme.Text;
         g.Text(Text(), new RectF(b.X + 12, b.Y, b.W - 40, b.H), Theme.Body, tc, HAlign.Left, VAlign.Middle, true);
         Icons.Draw(g, Icon.UpDown, b.Right - 16, b.CY, 14, Enabled ? Theme.TextSecondary : Theme.TextTertiary);
@@ -315,7 +330,7 @@ internal sealed class Slider : Widget
     public Func<Color4>? FillColor { get; set; }
     public event Action<double>? Changed;
 
-    bool _lastFine;
+    bool _lastFine, _dragging;
     bool _dragRebased;
     double _dragNorm0;
     float _dragX0;
@@ -353,6 +368,7 @@ internal sealed class Slider : Widget
     {
         if (e.Button != 0 || !Enabled) return;
         if (e.Clicks >= 2) { Set(Default, false); return; }
+        _dragging = true;
         var t = TrackRect;
         float kx = t.X + (float)Math.Clamp(Norm(Value), 0, 1) * t.W;
         bool onKnob = Math.Abs(e.X - kx) <= KnobD / 2 + 2;
@@ -365,14 +381,14 @@ internal sealed class Slider : Widget
 
     public override void OnMouseMove(in MouseEvent e)
     {
-        if (!IsPressed || !Enabled) return;
+        if (!_dragging || !IsPressed || !Enabled) return;
         if (e.Fine != _lastFine) { _dragNorm0 = Math.Clamp(Norm(Value), 0, 1); _dragX0 = e.X; _lastFine = e.Fine; }
         double k = e.Fine ? 0.1 : 1.0;
         double t = Math.Clamp(_dragNorm0 + (e.X - _dragX0) / TrackRect.W * k, 0, 1);
         Set(Val(t), e.Fine);
     }
 
-    public override void OnMouseUp(in MouseEvent e) => Invalidate();
+    public override void OnMouseUp(in MouseEvent e) { _dragging = false; Invalidate(); }
 
     public override bool OnMouseWheel(in MouseEvent e)
     {
@@ -398,7 +414,8 @@ internal sealed class Slider : Widget
         if (n > 0) g.FillPill(new RectF(t.X, t.Y, n * t.W, t.H), Enabled ? fill : Theme.TextTertiary);
         float kx = t.X + n * t.W;
         var knob = RectF.Centered(kx, t.CY, KnobD, KnobD);
-        g.Shadow(knob, KnobD / 2, 4, 1f, 1.5f);
+        float hover = HoverAmount((IsHovered || _dragging) && Enabled);
+        g.Shadow(knob, KnobD / 2, 4 + hover, 1f + hover * 0.35f, 1.5f);
         g.FillPill(knob, Theme.White);
         g.StrokeRound(knob, KnobD / 2, Theme.IsDark ? Theme.Rgb(0x000000, 0.25f) : Theme.Rgb(0x000000, 0.10f));
     }
@@ -428,7 +445,8 @@ internal sealed class ValueBox : Widget
     {
         var b = Bounds;
         g.FillRound(b, Theme.RadiusSmall, Theme.IsDark ? Theme.Well : Theme.Control);
-        if (IsHovered && Editable) g.StrokeRound(b, Theme.RadiusSmall, Theme.BorderStrong);
+        float hover = HoverAmount(IsHovered && Editable);
+        if (hover > 0) g.StrokeRound(b, Theme.RadiusSmall, Theme.BorderStrong.With(hover));
         g.Text(Text, b, Theme.Value, TextColor ?? Theme.Text, HAlign.Center, VAlign.Middle, false);
     }
 }
@@ -448,15 +466,16 @@ internal sealed class VScroll
         Offset = Math.Clamp(Offset, 0, Math.Max(0, ContentH - View.H));
     }
 
-    public bool Needed => ContentH > View.H + 0.5f;
+    public bool Needed => !View.IsEmpty && ContentH > View.H + 0.5f;
     public RectF Track => new(View.Right - 9, View.Y + 3, 6, Math.Max(0, View.H - 6));
+    public bool HitTrack(float x, float y) => Needed && Track.Inflate(4, 0).Intersect(View).Contains(x, y);
 
     public RectF Thumb
     {
         get
         {
             var t = Track;
-            float th = Math.Max(32, t.H * View.H / Math.Max(1, ContentH));
+            float th = Math.Min(t.H - Math.Min(8, t.H / 4), Math.Max(32, t.H * View.H / Math.Max(1, ContentH)));
             float max = Math.Max(1, ContentH - View.H);
             return new RectF(t.X, t.Y + (t.H - th) * (Offset / max), t.W, th);
         }
@@ -465,13 +484,14 @@ internal sealed class VScroll
     public bool Wheel(float notches)
     {
         if (!Needed) return false;
+        float before = Offset;
         Offset = Math.Clamp(Offset - notches * 60, 0, Math.Max(0, ContentH - View.H));
-        return true;
+        return before != Offset;
     }
 
     public bool Down(float x, float y)
     {
-        if (!Needed || !Track.Inflate(5).Contains(x, y)) return false;
+        if (!HitTrack(x, y)) return false;
         var th = Thumb;
         _grab = th.Contains(x, y) ? y - th.Y : th.H / 2;
         Dragging = true;

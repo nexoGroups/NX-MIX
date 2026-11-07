@@ -1,11 +1,19 @@
 name: Release
 
-# Pushing a tag like v0.2.0 builds the installer and update packages and publishes them as a GitHub release.
-# Installed copies find that release through Velopack and offer the update.
+# Zweistufige GitHub-Release-Pipeline fÃ¼r NX-MIX (Stable & Beta):
+#   - Stable-Tag (z. B. v2.0.0)        -> Build -> Tests -> Headless-Selftest -> NX-MIX-Setup.exe      -> RegulÃ¤res GitHub Release (Kanal: win)
+#   - Beta-Tag   (z. B. v2.1.0-beta.1) -> Build -> Tests -> Headless-Selftest -> NX-MIX-Beta-Setup.exe -> GitHub Prerelease        (Kanal: win-beta)
+#   - Manuelles workflow_dispatch      -> Reiner Trockenlauf (Build + Tests + Artefakt-PrÃ¼fung OHNE VerÃ¶ffentlichung auf GitHub)
 on:
   push:
-    tags: ['v*']
-    branches: ['release/v*']
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Test-Versionsnummer fÃ¼r Trockenlauf ohne VerÃ¶ffentlichung (z. B. 2.0.0 oder 2.1.0-beta.1)'
+        required: true
+        default: '2.1.0-beta.1'
 
 permissions:
   contents: write
@@ -14,43 +22,145 @@ jobs:
   release:
     runs-on: windows-latest
     env:
-      VPK_VERSION: 1.2.161   # keep in step with the Velopack package in the app csproj
+      VPK_VERSION: 1.2.161 # synchron halten mit PackageReference Include="Velopack" in NxMix.App.csproj
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
-      - name: Version from tag
+      - name: Tag & Release-Kanal validieren
+        id: meta
         shell: pwsh
         run: |
-          $version = ($env:GITHUB_REF_NAME -split '/')[-1].TrimStart('v')
-          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $version" }
-          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $ErrorActionPreference = 'Stop'
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch') {
+            $raw = "${{ inputs.version }}"
+            $dryRun = 'true'
+          } else {
+            $raw = ($env:GITHUB_REF_NAME -split '/')[-1]
+            if ($raw -notmatch '^v') {
+              throw "Release-Tags mÃ¼ssen mit 'v' beginnen (erhalten: $raw)."
+            }
+            $dryRun = 'false'
+          }
 
-      # Echtzeit-Tests (zwei Threads, keine Allokation im Audio-Pfad) brauchen freie Kerne: Testklassen nacheinander
-      - name: Test
-        run: dotnet test NxMix.slnx -c Release --filter "Category!=Performance" -- RunConfiguration.DisableParallelization=true
+          $version = $raw.Trim().TrimStart('v', 'V')
+          $stableRegex = '^\d+\.\d+\.\d+$'
+          $betaRegex   = '^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)?$'
 
-      - name: Install Velopack CLI
+          if ($version -match $stableRegex) {
+            $channel      = 'stable'
+            $vpkChannel   = 'win'
+            $isPrerelease = 'false'
+            $setupName    = 'NX-MIX-Setup.exe'
+            $releaseTitle = "NX-MIX $version"
+          }
+          elseif ($version -match $betaRegex) {
+            $channel      = 'beta'
+            $vpkChannel   = 'win-beta'
+            $isPrerelease = 'true'
+            $setupName    = 'NX-MIX-Beta-Setup.exe'
+            $releaseTitle = "NX-MIX $version (Beta)"
+          }
+          else {
+            throw "ABBRUCH: UngÃ¼ltige Versionsnummer '$version'. Erlaubt sind nur 'X.Y.Z' (Stable) oder 'X.Y.Z-beta.N' (Beta)."
+          }
+
+          "VERSION=$version"           | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CHANNEL=$channel"           | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VPK_CHANNEL=$vpkChannel"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "IS_PRERELEASE=$isPrerelease"| Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SETUP_NAME=$setupName"      | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_TITLE=$releaseTitle"| Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DRY_RUN=$dryRun"            | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "Kanal=$channel ($vpkChannel) | Version=$version | Prerelease=$isPrerelease | Setup=$setupName | DryRun=$dryRun"
+
+      - name: Build Solution (Release)
+        run: dotnet build NxMix.slnx -c Release -p:Version=${{ env.VERSION }}
+
+      # Echtzeit- & Update-Tests; schlÃ¤gt ein Test fehl, bricht der Workflow vor dem Packaging/Release ab!
+      - name: Automatisierte Unit- & Integrationstests
+        run: dotnet test NxMix.slnx -c Release --no-build --filter "Category!=Performance&Category!=Hardware" -- RunConfiguration.DisableParallelization=true
+
+      - name: Headless UI-, Geometrie- & Invarianten-Selbsttest
+        shell: pwsh
+        run: |
+          dotnet src/NxMix.App/bin/Release/net10.0-windows/NX-MIX.dll --selftest artifacts/selftest.log
+          $ec = $LASTEXITCODE
+          Get-Content artifacts/selftest.log
+          if ($ec -ne 0) { throw "NX-MIX --selftest fehlgeschlagen (ExitCode=$ec)" }
+
+      - name: Velopack CLI installieren
         run: dotnet tool install -g vpk --version $env:VPK_VERSION
 
-      # Previous releases make Velopack create small delta packages. The first release has none, so this may fail.
-      - name: Download previous releases
+      # LÃ¤dt die letzte Version desselben Kanals herunter, damit Velopack kleine Delta-Pakete erzeugen kann
+      - name: Vorheriges Kanal-Release fÃ¼r Delta-Pakete laden
         continue-on-error: true
-        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} --outputDir Releases
-
-      - name: Pack
         shell: pwsh
-        run: ./tools/pack.ps1 -Version $env:VERSION
+        run: |
+          $preArg = if ($env:IS_PRERELEASE -eq 'true') { @('--pre') } else { @() }
+          vpk --skip-updates download github `
+            --repoUrl "https://github.com/${{ github.repository }}" `
+            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --channel $env:VPK_CHANNEL `
+            --outputDir Releases `
+            @preArg
 
-      - name: Publish release
-        run: >
-          vpk upload github
-          --repoUrl https://github.com/${{ github.repository }}
-          --token ${{ secrets.GITHUB_TOKEN }}
-          --outputDir Releases
-          --tag v${{ env.VERSION }}
-          --targetCommitish ${{ github.sha }}
-          --releaseName "NX-MIX ${{ env.VERSION }}"
-          --publish
+      - name: Kanalgerechtes Velopack-Paket schnÃ¼ren
+        shell: pwsh
+        run: ./tools/pack.ps1 -Version $env:VERSION -Channel $env:CHANNEL -OutputDir Releases
+
+      - name: Erzeugte Release-Artefakte verifizieren
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setupPath = Join-Path 'Releases' $env:SETUP_NAME
+          $feedPath  = Join-Path 'Releases' "releases.$($env:VPK_CHANNEL).json"
+          if (-not (Test-Path $setupPath)) { throw "Installer fehlt: $setupPath" }
+          if (-not (Test-Path $feedPath))  { throw "Update-Feed fehlt: $feedPath" }
+
+          # Sicherstellen, dass im Stable-Kanal niemals ein Prerelease-Paket liegt:
+          $feedJson = Get-Content -Raw -Path $feedPath | ConvertFrom-Json
+          foreach ($asset in $feedJson.Assets) {
+            if ($env:CHANNEL -eq 'stable' -and $asset.Version -match '-') {
+              throw "SICHERHEITSFEHLER: Prerelease-Paket $($asset.Version) im Stable-Feed entdeckt!"
+            }
+            if ($env:CHANNEL -eq 'beta' -and $asset.Version -eq $env:VERSION -and $asset.Version -notmatch '-') {
+              throw "SICHERHEITSFEHLER: Nicht-Beta-Version $($asset.Version) im Beta-Feed entdeckt!"
+            }
+          }
+          Get-ChildItem Releases | Format-Table Name, Length
+
+      - name: Trockenlauf-Artefakte hochladen (nur bei workflow_dispatch)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nx-mix-${{ env.CHANNEL }}-${{ env.VERSION }}
+          path: |
+            Releases/${{ env.SETUP_NAME }}
+            Releases/*.nupkg
+            Releases/releases.${{ env.VPK_CHANNEL }}.json
+            Releases/assets.${{ env.VPK_CHANNEL }}.json
+
+      - name: GitHub Release / Prerelease verÃ¶ffentlichen (nur bei echtem Git-Tag)
+        if: env.DRY_RUN == 'false'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $preArg = if ($env:IS_PRERELEASE -eq 'true') { @('--pre') } else { @() }
+          vpk --skip-updates upload github `
+            --repoUrl "https://github.com/${{ github.repository }}" `
+            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --channel $env:VPK_CHANNEL `
+            --outputDir Releases `
+            --tag "v$($env:VERSION)" `
+            --targetCommitish "${{ github.sha }}" `
+            --releaseName "$($env:RELEASE_TITLE)" `
+            --publish `
+            @preArg
+          if ($LASTEXITCODE -ne 0) { throw "vpk upload github fehlgeschlagen" }

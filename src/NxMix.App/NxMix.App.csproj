@@ -16,16 +16,24 @@
   <ItemGroup>
     <ProjectReference Include="..\NxMix.Engine\NxMix.Engine.csproj" />
     <ProjectReference Include="..\NxMix.Audio\NxMix.Audio.csproj" />
+    <ProjectReference Include="..\NxMix.Ipc\NxMix.Ipc.csproj" />
+    <ProjectReference Include="..\NxMix.Daemon\NxMix.Daemon.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Velopack" Version="1.2.161" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Schrift Inter (SIL Open Font License 1.1), wird zur Laufzeit aus dem Ordner Fonts geladen -->
     <None Include="Fonts\Inter-*.ttf;Fonts\Inter-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
-    <!-- Lizenz und Fremdkomponenten liegen auch im Programmordner -->
     <None Update="Licenses\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\LICENSE.txt;..\..\THIRD-PARTY.md" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <Target Name="CopyDaemonExecutable" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' == ''">
+    <ItemGroup>
+      <DaemonArtifacts Include="..\NxMix.Daemon\bin\$(Configuration)\$(TargetFramework)\NxMix.Daemon.exe" />
+      <DaemonArtifacts Include="..\NxMix.Daemon\bin\$(Configuration)\$(TargetFramework)\NxMix.Daemon.runtimeconfig.json" />
+      <DaemonArtifacts Include="..\NxMix.Daemon\bin\$(Configuration)\$(TargetFramework)\NxMix.Daemon.deps.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DaemonArtifacts)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('%(FullPath)')" />
+  </Target>
 </Project>

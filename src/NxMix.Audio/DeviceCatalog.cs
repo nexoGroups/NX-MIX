@@ -2,8 +2,8 @@ using NxMix.Audio.Interop;
 
 namespace NxMix.Audio;
 
-/// <summary>Listet die aktiven Windows-Audiogeraete (Render + Capture) mit Id, Name, Kanalzahl, Samplerate und Standard-Flag.
-/// Wirft nie: bei Fehlern wird eine (ggf. unvollstaendige) Liste zurueckgegeben.</summary>
+/// <summary>Listet die aktiven Windows-Audiogeraete (Render + Capture + ASIO) mit Id, Name, Kanalzahl, Samplerate, Standard-Flag
+/// sowie ehrlicher Unterscheidung zwischen physischer Hardware und echten Windows-Virtual-Audio-Endpunkten.</summary>
 public sealed class DeviceCatalog : IDeviceCatalog
 {
     public IReadOnlyList<AudioDeviceInfo> List()
@@ -69,8 +69,14 @@ public sealed class DeviceCatalog : IDeviceCatalog
                     string name = DeviceNames.ReadFriendlyName(device) ?? id;
                     if (!DeviceNames.TryReadDeviceFormat(device, out int channels, out int rate))
                         TryReadMixFormat(device, out channels, out rate);
+                    var (isVirtual, provider) = DeviceNames.ClassifyEndpoint(device, name);
                     bool isDefault = defaultId != null && string.Equals(defaultId, id, StringComparison.OrdinalIgnoreCase);
-                    result.Add(new AudioDeviceInfo(id, name, flow, channels, rate, isDefault));
+                    result.Add(new AudioDeviceInfo(id, name, flow, channels, rate, isDefault)
+                    {
+                        Backend = AudioBackend.Windows,
+                        IsVirtualEndpoint = isVirtual,
+                        DriverProvider = provider,
+                    });
                 }
                 catch
                 {

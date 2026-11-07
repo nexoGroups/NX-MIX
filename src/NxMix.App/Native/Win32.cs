@@ -104,6 +104,9 @@ internal static unsafe partial class Win32
     [LibraryImport("user32.dll", EntryPoint = "SendMessageW")] public static partial nint SendMessage(nint hwnd, uint msg, nint w, nint l);
     [LibraryImport("user32.dll")] public static partial nuint SetTimer(nint hwnd, nuint id, uint ms, nint proc);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool KillTimer(nint hwnd, nuint id);
+    public const uint SPI_GETCLIENTAREAANIMATION = 0x1042;
+    [LibraryImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)] public static partial bool SystemParametersInfo(uint action, uint param, out int value, uint flags);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool InvalidateRect(nint hwnd, nint rect, [MarshalAs(UnmanagedType.Bool)] bool erase);
     [LibraryImport("user32.dll")] public static partial nint BeginPaint(nint hwnd, out PAINTSTRUCT ps);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool EndPaint(nint hwnd, in PAINTSTRUCT ps);
@@ -133,6 +136,9 @@ internal static unsafe partial class Win32
     [LibraryImport("user32.dll")] public static partial nint SetClipboardData(uint format, nint mem);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool SetProcessDpiAwarenessContext(nint ctx);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool GetClipCursor(out RECT r);
+    [LibraryImport("user32.dll", EntryPoint = "FindWindowW", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial nint FindWindow(string? className, string? windowName);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool SetForegroundWindow(nint hwnd);
 
     // ---- kernel32 --------------------------------------------------------------------------
     [LibraryImport("kernel32.dll", EntryPoint = "GetModuleHandleW", StringMarshalling = StringMarshalling.Utf16)]

@@ -2,10 +2,12 @@ using System.Numerics;
 using NxMix.App.Model;
 using NxMix.App.Ui;
 using NxMix.Engine;
+using NxMix.Ipc;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
+/// <summary>Live-Spektrum (Pre-DSP orange gestrichelt, Post-DSP türkis) + exakte mathematische Summen-Filterkurve (inkl. REW &amp; Preamp).</summary>
 internal sealed class EqSpectrumGraph : Widget
 {
     const float SpectrumTop = 12;
@@ -13,21 +15,15 @@ internal sealed class EqSpectrumGraph : Widget
     static readonly int[] s_frequencyTicks = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
 
     readonly float[] _eq = new float[512];
-    readonly float[] _before = new float[SpectrumAnalyzer.Points], _after = new float[SpectrumAnalyzer.Points];
-    readonly float[] _levels = new float[SpectrumAnalyzer.Points];
+    readonly float[] _before = new float[SpectrumAnalyzer.Points];
+    readonly float[] _after = new float[SpectrumAnalyzer.Points];
+
     IReadOnlyList<FilterSpec>? _filters;
     OutputCorrection? _correction;
-    int _curveRate;
+    int _curveRate = 48000;
     float _eqBottom = -24, _eqTop = 24;
-
-    MixerEngine? _engine;
-    SpectrumCapture? _capture;
-    SpectrumAnalyzer? _analyzer;
-    float[] _beforeSamples = Array.Empty<float>(), _afterSamples = Array.Empty<float>();
-    int _channel, _analyzerRate;
-    bool _input, _ready;
-    float _elapsed;
-    long _frame;
+    long _lastSeq = -1;
+    bool _ready;
 
     public static Color4 EqColor => Theme.AccentText;
     public static Color4 BeforeColor => Theme.Orange;
@@ -36,71 +32,82 @@ internal sealed class EqSpectrumGraph : Widget
     public bool ShowBefore { get; set; } = true;
     public bool ShowAfter { get; set; } = true;
 
-    public void Stop()
+    public EqSpectrumGraph()
     {
-        if (_capture != null) _engine!.StopSpectrum(_capture);
-        _capture = null;
-        _engine = null;
-        _frame = 0;
-        _ready = false;
-        _elapsed = 0;
+        Array.Fill(_before, SpectrumAnalyzer.FloorDb);
+        Array.Fill(_after, SpectrumAnalyzer.FloorDb);
     }
 
-    public bool Update(ChannelDsp channel, int rate, bool input, int index, MixerEngine? engine, float dt)
+    public void Stop(AppModel? model = null)
+    {
+        model?.SubscribeSpectrum(0, -1);
+        _ready = false;
+        _lastSeq = -1;
+    }
+
+    public bool Update(ChannelDsp channel, int rate, bool input, int index, AppModel model, float dt)
     {
         bool changed = RefreshCurve(channel, rate, input);
-        if (!ShowBefore && !ShowAfter) engine = null;
-        if (engine != _engine || (engine != null && (input != _input || index != _channel)))
+        if (!ShowBefore && !ShowAfter)
         {
-            Stop();
-            if (engine != null)
-            {
-                _engine = engine;
-                _input = input;
-                _channel = index;
-                _capture = engine.StartSpectrum(input, index);
-                if (_analyzer == null || _analyzerRate != _capture.SampleRate)
-                {
-                    _analyzerRate = _capture.SampleRate;
-                    _analyzer = new SpectrumAnalyzer(_capture.WindowSize, _analyzerRate);
-                    _beforeSamples = new float[_capture.WindowSize];
-                    _afterSamples = new float[_capture.WindowSize];
-                }
-            }
-            changed = true;
+            model.SubscribeSpectrum(0, -1);
+            return changed;
         }
 
-        if (_capture == null) return changed;
-        _elapsed += dt;
-        if (_elapsed < 0.045f || !_capture.TryRead(_beforeSamples, _afterSamples, ref _frame)) return changed;
-        Analyze(_beforeSamples, _before);
-        Analyze(_afterSamples, _after);
-        _ready = true;
-        _elapsed = 0;
-        return true;
+        int mode = input ? 1 : 2;
+        model.SubscribeSpectrum(mode, index);
+
+        if (!model.HostRunning)
+        {
+            if (_ready) { _ready = false; return true; }
+            return changed;
+        }
+
+        if (model.TelemetryFrameSeq != _lastSeq &&
+            model.Telemetry.SpectrumMode == mode &&
+            model.Telemetry.SpectrumChannel == index)
+        {
+            _lastSeq = model.TelemetryFrameSeq;
+            var pre = model.SpectrumPreDb;
+            var post = model.SpectrumPostDb;
+            bool hasSignal = false;
+            for (int i = 0; i < _before.Length && i < pre.Length; i++)
+            {
+                if (pre[i] > SpectrumAnalyzer.FloorDb + 0.5f || post[i] > SpectrumAnalyzer.FloorDb + 0.5f)
+                    hasSignal = true;
+                _before[i] = _ready ? Math.Max(pre[i], _before[i] - 85f * dt) : pre[i];
+                _after[i] = _ready ? Math.Max(post[i], _after[i] - 85f * dt) : post[i];
+            }
+            if (hasSignal || _ready)
+            {
+                _ready = true;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
-    void Analyze(float[] samples, float[] trace)
+    public bool RefreshCurve(ChannelDsp channel, int rate, bool input)
     {
-        _analyzer!.Analyze(samples, _levels);
-        for (int i = 0; i < trace.Length; i++)
-            trace[i] = _ready ? Math.Max(_levels[i], trace[i] - 90 * _elapsed) : _levels[i];
-    }
+        int sr = rate > 0 ? rate : 48000;
+        if (sr == _curveRate && ReferenceEquals(_filters, channel.Filters) && Equals(_correction, channel.Correction))
+            return false;
 
-    bool RefreshCurve(ChannelDsp channel, int rate, bool input)
-    {
-        if (rate == _curveRate && ReferenceEquals(_filters, channel.Filters) && ReferenceEquals(_correction, channel.Correction)) return false;
-        _curveRate = rate;
+        _curveRate = sr;
         _filters = channel.Filters;
         _correction = channel.Correction;
-        var filters = FilterDesign.DesignChannel(channel, rate, input);
+
+        var sections = FilterDesign.DesignChannel(channel, sr, input);
+        double preampDb = !input && channel.Correction is { Bypassed: false } corr && double.IsFinite(corr.PreampDb)
+            ? corr.PreampDb : 0.0;
+
         float min = -24, max = 24;
         for (int i = 0; i < _eq.Length; i++)
         {
-            double f = SpectrumAnalyzer.Frequency((double)i / (_eq.Length - 1), rate);
+            double f = SpectrumAnalyzer.Frequency((double)i / (_eq.Length - 1), sr);
             var response = Complex.One;
-            foreach (var filter in filters) response *= filter.Response(f, rate);
-            double db = 20 * Math.Log10(response.Magnitude);
+            foreach (var sec in sections) response *= sec.Response(f, sr);
+            double db = 20.0 * Math.Log10(Math.Max(1e-12, response.Magnitude)) + preampDb;
             _eq[i] = double.IsNaN(db) ? 0 : (float)Math.Clamp(db, -120, 120);
             min = Math.Min(min, _eq[i]);
             max = Math.Max(max, _eq[i]);
@@ -118,8 +125,8 @@ internal sealed class EqSpectrumGraph : Widget
         var plot = b.Deflate(47, 30, 45, 33);
         if (plot.IsEmpty) return;
 
-        g.Text("SPEKTRUM · dBFS", new RectF(b.X + 10, b.Y + 6, 122, 18), Theme.MicroStrong, Theme.TextSecondary);
-        g.Text("EQ · dB", new RectF(b.Right - 62, b.Y + 6, 52, 18), Theme.MicroStrong, EqColor, HAlign.Right);
+        g.Text("SPEKTRUM · dBFS", new RectF(b.X + 10, b.Y + 6, 132, 18), Theme.MicroStrong, Theme.TextSecondary);
+        g.Text("SUMMEN-DSP · dB", new RectF(b.Right - 115, b.Y + 6, 105, 18), Theme.MicroStrong, EqColor, HAlign.Right);
         foreach (int db in s_levelTicks)
         {
             float y = Y(plot, db, SpectrumAnalyzer.FloorDb, SpectrumTop);
@@ -149,13 +156,13 @@ internal sealed class EqSpectrumGraph : Widget
         if (ShowEq) Trace(g, plot, _eq, _eqBottom, _eqTop, EqColor, 2.2f);
         if (!_ready && (ShowBefore || ShowAfter))
         {
-            string status = _capture == null ? "Live-Spektrum bei laufendem Audio" : "Live-Spektrum startet …";
-            g.Text(status, new RectF(plot.X, plot.Bottom - 24, plot.W, 22), Theme.Caption, Theme.TextSecondary, HAlign.Center);
+            g.Text("Live-Spektrum aktiv sobald Audio läuft", new RectF(plot.X, plot.Bottom - 24, plot.W, 22),
+                Theme.Caption, Theme.TextSecondary, HAlign.Center);
         }
     }
 
     static float Y(RectF plot, float db, float bottom, float top) =>
-        plot.Bottom - plot.H * Math.Clamp((db - bottom) / (top - bottom), 0, 1);
+        plot.Bottom - plot.H * Math.Clamp((db - bottom) / Math.Max(1f, top - bottom), 0, 1);
 
     static void Trace(Renderer g, RectF plot, float[] values, float bottom, float top, Color4 color, float width, bool dashed = false)
     {

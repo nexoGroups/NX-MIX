@@ -3,17 +3,16 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Ui;
 
-/// <summary>Alle Symbole der Oberflaeche. Gezeichnet im Stil des UniFi-Webinterface: duenne Umrisslinien, runde Enden.</summary>
+/// <summary>Alle Symbole der Oberfläche im klaren Vektor-Linienstil.</summary>
 internal enum Icon
 {
-    None, Mixer, Matrix, Devices, Settings, Sidebar, Plus, Minus, Close, ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
+    None, Mixer, Decks, Matrix, Devices, Vaio, Dsp, Snapshots, Engine, Settings, Sidebar,
+    Plus, Minus, Close, ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
     Check, Lock, LockOpen, Link, Trash, Refresh, Warn, Info, Search, More, Play, Stop, Mic, Speaker, Loopback,
     Export, Import, Document, Clock, Shield, Keyboard, Phase, Bars, Edit, ArrowRight, UpDown, Palette, Hand,
+    Mute, Copy,
 }
 
-/// <summary>
-/// Zeichnet Symbole auf einem 24er-Raster (wie gaengige Icon-Sets), skaliert auf die gewuenschte Groesse s (DIPs).
-/// </summary>
 internal static class Icons
 {
     [ThreadStatic] static Vector2[]? t_buf;
@@ -64,6 +63,11 @@ internal static class Icons
                     }
                     break;
                 }
+            case Icon.Decks:
+                Poly(true, 12, 4, 20.5f, 8.5f, 12, 13, 3.5f, 8.5f);
+                Poly(false, 3.5f, 12.5f, 12, 17, 20.5f, 12.5f);
+                Poly(false, 3.5f, 16.5f, 12, 21, 20.5f, 16.5f);
+                break;
             case Icon.Matrix:
                 RRect(4, 4, 10.5f, 10.5f, 2); RRect(13.5f, 4, 20, 10.5f, 2);
                 RRect(4, 13.5f, 10.5f, 20, 2); RRect(13.5f, 13.5f, 20, 20, 2);
@@ -73,15 +77,36 @@ internal static class Icons
                 Circle(8, 12, 2.2f); Circle(13.5f, 12, 2.2f);
                 L(17.5f, 10, 17.5f, 14);
                 break;
+            case Icon.Vaio:
+                RRect(5, 7.5f, 13, 16.5f, 2);
+                L(2.5f, 10, 5, 10); L(2.5f, 14, 5, 14);
+                Poly(false, 13, 12, 17, 12, 17, 8, 21.5f, 8);
+                Poly(false, 17, 12, 17, 16, 21.5f, 16);
+                break;
+            case Icon.Dsp:
+                L(3, 18.5f, 21, 18.5f);
+                Poly(false, 3.5f, 15.5f, 7.5f, 15f, 10.5f, 6.5f, 13.5f, 16.5f, 17f, 11.5f, 20.5f, 12f);
+                break;
+            case Icon.Snapshots:
+                Poly(true, 6, 4, 18, 4, 18, 20, 12, 15.5f, 6, 20);
+                L(9, 8.5f, 15, 8.5f);
+                break;
+            case Icon.Engine:
+                RRect(6.5f, 6.5f, 17.5f, 17.5f, 2);
+                RRect(9.5f, 9.5f, 14.5f, 14.5f, 1);
+                L(9, 3.5f, 9, 6.5f); L(15, 3.5f, 15, 6.5f);
+                L(9, 17.5f, 9, 20.5f); L(15, 17.5f, 15, 20.5f);
+                L(3.5f, 9, 6.5f, 9); L(3.5f, 15, 6.5f, 15);
+                L(17.5f, 9, 20.5f, 9); L(17.5f, 15, 20.5f, 15);
+                break;
             case Icon.Settings:
                 {
-                    // Zahnrad: Polygon mit 8 Zaehnen + Nabe
                     var buf = t_buf is { Length: >= 64 } ? t_buf : (t_buf = new Vector2[64]);
                     int n = 48;
                     for (int i = 0; i < n; i++)
                     {
                         float a = i * MathF.PI * 2 / n;
-                        float phase = (i % 6);
+                        float phase = i % 6;
                         float r = phase is 0 or 1 or 2 ? 9.2f : 7.0f;
                         buf[i] = P(12 + MathF.Cos(a + 0.065f) * r, 12 + MathF.Sin(a + 0.065f) * r);
                     }
@@ -169,6 +194,14 @@ internal static class Icons
                 Arc(13, 12, 4, -45, 90);
                 Arc(13, 12, 7.5f, -50, 100);
                 break;
+            case Icon.Mute:
+                Poly(true, 3.5f, 9, 7.5f, 9, 12.5f, 4.5f, 12.5f, 19.5f, 7.5f, 15, 3.5f, 15);
+                L(15.5f, 9, 20.5f, 15); L(20.5f, 9, 15.5f, 15);
+                break;
+            case Icon.Copy:
+                RRect(8, 8, 19.5f, 19.5f, 2);
+                Poly(false, 6, 15.5f, 4.5f, 15.5f, 4.5f, 4.5f, 15.5f, 4.5f, 15.5f, 6);
+                break;
             case Icon.Loopback:
                 Poly(false, 5, 11, 5, 8, 18.5f, 8);
                 Poly(false, 15.5f, 5, 18.5f, 8, 15.5f, 11);
@@ -234,7 +267,6 @@ internal static class Icons
         }
     }
 
-    /// <summary>Kleiner Statuspunkt (z. B. "laeuft") mit weichem Hof.</summary>
     public static void StatusDot(Renderer g, float cx, float cy, Color4 c, float r = 3.5f, bool halo = true)
     {
         if (halo) g.FillCircle(cx, cy, r + 2.5f, c.With(0.22f));

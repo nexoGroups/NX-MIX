@@ -1,757 +1,446 @@
 using NxMix.App.Model;
 using NxMix.App.Ui;
 using NxMix.Audio;
+using NxMix.Ipc;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Liste der Audio-Geraete (aus IDeviceCatalog) mit Schnell-Zuordnung.</summary>
-internal sealed class DeviceListView : Widget
+/// <summary>Eine Hardware-Geräte-Karte auf dem Tab „Geräte“:
+/// Treiber-Badge (ASIO / WASAPI), Online/Offline-Status, ASIO-Control-Panel oder WASAPI-Exclusive,
+/// Geräte-Master-Pegel + Dim/Mute sowie ausklappbare digitale Einzelkanal-Regler &amp; Stereo-Kopplung.</summary>
+internal sealed class DeviceUnitCard : Widget
 {
     readonly AppModel _m;
-    public AudioBackend Backend { get; set; } = AudioBackend.Windows;
-    readonly VScroll _sc = new();
-    readonly IconButton _refresh = new(Icon.Refresh, "Geräteliste neu einlesen") { IconSize = 17 };
-    public readonly Segmented Filter = new("Alle", "Eingabe", "Ausgabe");
-    (int Row, int Act) _hot = (-1, -1), _press = (-1, -1);
-    static float RowH => Theme.Touch ? 70f : 60f;
-    float HeadH => 52 + Theme.ControlHSmall + 14;
+    public readonly Guid NodeId;
+    bool _expanded;
 
-    public DeviceListView(AppModel m)
+    readonly Switch _enabledSw = new() { Tooltip = "Gerät aktivieren / deaktivieren" };
+    readonly Button _driverBtn = new("ASIO Panel", ButtonStyle.Gray, Icon.Settings) { Font = Theme.CaptionMedium };
+    readonly Switch _exclSw = new() { Tooltip = "WASAPI-Exclusive für dieses Gerät" };
+    readonly Toggle _muteBtn = new("M", () => Theme.Red) { Tooltip = "Geräte-Master stummschalten" };
+    readonly Toggle _dimBtn = new("DIM", () => Theme.Orange) { Font = Theme.MicroStrong, Tooltip = "Dim (−20 dB)" };
+    readonly Slider _masterSlider = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Default = 0, Step = 0.1, WheelStep = 1 };
+    readonly ValueBox _masterBox = new();
+    readonly Button _expandBtn = new("▸ Kanäle", ButtonStyle.Tinted) { Font = Theme.CaptionStrong };
+    readonly Button _removeBtn = new("Entfernen", ButtonStyle.DestructiveTinted, Icon.Trash) { Font = Theme.CaptionMedium };
+
+    readonly List<(int ChIdx, Slider Slider, ValueBox Box, Button LinkBtn)> _chRows = new();
+
+    public DeviceUnitCard(AppModel m, Guid nodeId)
     {
         _m = m;
-        Add(_refresh); Add(Filter);
-        _refresh.Clicked += _ => _m.RefreshDevices();
-        Filter.Changed += _ => { Layout(); Invalidate(); };
-    }
+        NodeId = nodeId;
+        Add(_enabledSw); Add(_driverBtn); Add(_exclSw);
+        Add(_muteBtn); Add(_dimBtn); Add(_masterSlider); Add(_masterBox);
+        Add(_expandBtn); Add(_removeBtn);
 
-    public override bool AcceptsMouse => true;
+        _masterSlider.ToNorm = db => Db.IsOff(db) ? 0 : FaderScale.ToT(db);
+        _masterSlider.FromNorm = t => { double db = FaderScale.ToDb(t); return Db.IsOff(db) ? db : Math.Round(db * 10) / 10; };
 
-    List<AudioDeviceInfo> Filtered() =>
-        _m.Devices.Where(d => d.Backend == Backend && (Filter.Selected == 0 || (Filter.Selected == 1 ? d.Flow == DeviceFlow.Capture : d.Flow == DeviceFlow.Render))).ToList();
-
-    public override void Layout()
-    {
-        var b = Bounds;
-        _refresh.Bounds = new RectF(b.Right - 12 - 34, b.Y + 10, 34, 34);
-        Filter.Bounds = new RectF(b.X + Theme.CardPad, b.Y + 52, Math.Min(300, b.W - 2 * Theme.CardPad), Theme.ControlHSmall);
-        _sc.Update(new RectF(b.X + 8, b.Y + HeadH, b.W - 16, Math.Max(0, b.H - HeadH - 8)), Filtered().Count * RowH);
-    }
-
-    RectF RowRect(int row) => new(_sc.View.X, _sc.View.Y + row * RowH - _sc.Offset, _sc.View.W - (_sc.Needed ? 10 : 0), RowH);
-
-    // Aktionen je Zeile: 0 = Eingang/Ausgang zuordnen, 1 = Loopback
-    static List<(int Act, RectF Rect, string Text)> Actions(RectF row, AudioDeviceInfo d)
-    {
-        var list = new List<(int, RectF, string)>();
-        float x = row.Right - 10, h = Theme.ControlHSmall;
-        if (d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows)
+        _enabledSw.Changed += on => _m.UpdateHardwareDevice(NodeId, d => d with { Enabled = on });
+        _driverBtn.Clicked += () =>
         {
-            float w = Renderer.MeasureWidth("Loopback", Theme.CalloutMedium) + 24;
-            x -= w; list.Add((1, new RectF(x, row.CY - h / 2, w, h), "Loopback")); x -= 6;
-        }
-        string t = d.Flow == DeviceFlow.Capture ? "Eingang" : "Ausgang";
-        float w2 = Renderer.MeasureWidth(t, Theme.CalloutMedium) + 40;
-        x -= w2; list.Add((0, new RectF(x, row.CY - h / 2, w2, h), t));
-        return list;
-    }
-
-    (int Row, int Act) HitRow(float x, float y)
-    {
-        if (!_sc.View.Contains(x, y)) return (-1, -1);
-        var list = Filtered();
-        int row = (int)((y - _sc.View.Y + _sc.Offset) / RowH);
-        if (row < 0 || row >= list.Count) return (-1, -1);
-        var rr = RowRect(row);
-        foreach (var a in Actions(rr, list[row])) if (a.Rect.Contains(x, y)) return (row, a.Act);
-        return (row, -1);
-    }
-
-    public override void OnMouseMove(in MouseEvent e)
-    {
-        if (_sc.Dragging && IsPressed) { _sc.Drag(e.Y); Invalidate(); return; }
-        var h = HitRow(e.X, e.Y);
-        if (h != _hot) { _hot = h; Invalidate(); }
-    }
-    public override void OnMouseLeave() { _hot = (-1, -1); Invalidate(); }
-    public override CursorKind CursorAt(float x, float y) => HitRow(x, y).Act >= 0 && !_m.HostRunning ? CursorKind.Hand : CursorKind.Arrow;
-
-    public override void OnMouseDown(in MouseEvent e)
-    {
-        if (e.Button != 0) return;
-        if (_sc.Down(e.X, e.Y)) return;
-        _press = HitRow(e.X, e.Y);
-        Invalidate();
-    }
-
-    public override void OnMouseUp(in MouseEvent e)
-    {
-        if (_sc.Dragging) { _sc.Up(); Invalidate(); return; }
-        var h = HitRow(e.X, e.Y);
-        if (h.Act >= 0 && h == _press && !_m.HostRunning) Assign(Filtered()[h.Row], h.Act == 1);
-        _press = (-1, -1);
-        Invalidate();
-    }
-
-    public override bool OnMouseWheel(in MouseEvent e) { if (_sc.Wheel(e.Wheel)) { Invalidate(); return true; } return false; }
-
-    void Assign(AudioDeviceInfo d, bool loopback)
-    {
-        if (d.Channels <= 0) { Root?.Notify.Flash(d.UnavailableReason ?? "Der Treiber konnte nicht geöffnet werden.", true); return; }
-        var flow = d.Flow == DeviceFlow.Render && !loopback ? DeviceFlow.Render : DeviceFlow.Capture;
-        if (_m.Bindings.Any(b => b.DeviceId == d.Id && b.Flow == flow && b.Loopback == loopback))
-        {
-            if (Root is { } r) DeviceSettingsSheet.Show(r, _m, d.Id);
-            return;
-        }
-        int count = Math.Clamp(d.Channels, 1, 64);
-        int devStart = 0;
-        var refusal = _m.AddBinding(new DeviceBinding(d.Id, flow, devStart, _m.NextFreeEngineChannel(flow), count, loopback));
-        if (refusal != null) Root?.Notify.Flash(refusal, true);
-        else Root?.Notify.Flash($"Zuordnung angelegt: {d.Name}");
-    }
-
-    public override void Paint(Renderer g)
-    {
-        var b = Bounds;
-        Draw.Card(g, b);
-        Draw.CardTitle(g, new RectF(b.X + Theme.CardPad, b.Y + 2, 200, 52), "Geräte", _m.Devices.Count > 0 ? _m.Devices.Count : null);
-
-        var list = Filtered();
-        if (list.Count == 0)
-        {
-            string head, body;
-            if (_m.DevicesLoading) { head = "Lese Geräte ein …"; body = ""; }
-            else if (_m.DeviceError != null) { head = "Geräteliste nicht verfügbar"; body = _m.DeviceError; }
-            else if (_m.Devices.Count > 0) { head = "Keine Geräte in dieser Ansicht"; body = "Wähle oben „Alle“."; }
-            else { head = "Keine Geräte gefunden"; body = "Mit dem Aktualisieren-Knopf oben rechts erneut einlesen."; }
-            var area = RectF.FromLTRB(b.X, b.Y + HeadH, b.Right, b.Bottom);
-            Draw.Empty(g, area, area.Y + 20, Icon.Devices, head, body);
-        }
-        else
-        {
-            g.PushClip(_sc.View);
-            for (int i = 0; i < list.Count; i++)
-            {
-                var r = RowRect(i);
-                if (r.Bottom < _sc.View.Y || r.Y > _sc.View.Bottom) continue;
-                PaintRow(g, r, list[i], i, i == list.Count - 1);
-            }
-            g.PopClip();
-            _sc.Paint(g);
-        }
-        PaintChildren(g);
-    }
-
-    void PaintRow(Renderer g, RectF r, AudioDeviceInfo d, int idx, bool last)
-    {
-        bool rowHot = _hot.Row == idx;
-        if (rowHot) g.FillRound(r.Deflate(0, 2), 10, Theme.ControlHover.With(Theme.IsDark ? 0.5f : 0.7f));
-        else if (!last) g.Fill(new RectF(r.X + 58, r.Bottom - 0.5f, r.W - 66, 1), Theme.Separator);
-        bool cap = d.Flow == DeviceFlow.Capture;
-        var col = cap ? Theme.AccentText : Theme.Teal;
-        var ic = new RectF(r.X + 10, r.CY - 18, 36, 36);
-        g.FillRound(ic, 10, Theme.Soft(col));
-        Icons.Draw(g, cap ? Icon.Mic : Icon.Speaker, ic.CX, ic.CY, 19, col);
-        var actions = Actions(r, d);
-        float textRight = actions.Min(a => a.Rect.X) - 10;
-        float tw = Math.Max(10, textRight - r.X - 58);
-        g.Text(d.Name, new RectF(r.X + 58, r.CY - 18, tw, 18), Theme.BodyMedium, Theme.Text, HAlign.Left, VAlign.Middle, true);
-        string sub = $"{(cap ? "Aufnahme" : "Wiedergabe")}  ·  {d.Channels} {(d.Channels == 1 ? "Kanal" : "Kanäle")}  ·  {d.SampleRate / 1000.0:0.#} kHz" + (d.IsDefault ? "  ·  Standard" : "");
-        g.Text(sub, new RectF(r.X + 58, r.CY + 1, tw, 17), Theme.Caption, Theme.TextTertiary, HAlign.Left, VAlign.Middle, true);
-        foreach (var (act, rect, text) in actions)
-        {
-            bool hot = _hot.Row == idx && _hot.Act == act && !_m.HostRunning;
-            bool down = hot && _press == (idx, act);
-            Draw.ButtonLook(g, rect, text, act == 0 ? ButtonStyle.Tinted : ButtonStyle.Gray, !_m.HostRunning, hot, down, act == 0 ? Icon.Plus : Icon.None);
-        }
-    }
-
-    public override string? TooltipAt(float x, float y)
-    {
-        var h = HitRow(x, y);
-        if (h.Act < 0) return null;
-        if (_m.HostRunning) return "Zum Ändern zuerst Audio stoppen";
-        return h.Act == 1 ? "Nimmt auf, was dieses Wiedergabegerät abspielt (nur lesend)" : "Legt eine Zuordnung zu den nächsten freien Engine-Kanälen an";
-    }
-}
-
-/// <summary>Tabelle der DeviceBindings: Richtung, Geraet, Geraetekanal-Start, Engine-Kanal-Start, Anzahl.</summary>
-internal sealed class BindingTableView : Widget
-{
-    enum Reg { None, Chip, Device, DevMinus, DevVal, DevPlus, EngMinus, EngVal, EngPlus, CntMinus, CntVal, CntPlus, Status, Delete }
-
-    readonly AppModel _m;
-    readonly VScroll _sc = new();
-    public readonly Button AddButton = new("Zuordnung", ButtonStyle.Tinted, Icon.Plus) { Font = Theme.CalloutMedium };
-    (int Row, Reg R) _hot = (-1, Reg.None), _press = (-1, Reg.None);
-    static float RowH => Theme.Touch ? 62f : 52f;
-    const float HeadH = 74f;
-    const float ColH = 26f;
-
-    public BindingTableView(AppModel m)
-    {
-        _m = m;
-        Add(AddButton);
-        AddButton.Clicked += AddEmpty;
-    }
-
-    public override bool AcceptsMouse => true;
-
-    void AddEmpty()
-    {
-        if (_m.HostRunning) return;
-        var flow = DeviceFlow.Capture;
-        var dev = _m.Devices.FirstOrDefault(d => d.Flow == DeviceFlow.Capture);
-        var refusal = _m.AddBinding(new DeviceBinding(dev?.Id ?? "", flow, 0, _m.NextFreeEngineChannel(flow), 1));
-        if (refusal != null) Root?.Notify.Flash(refusal, true);
-    }
-
-    /// <summary>Aendert eine Zuordnung; lehnt das Modell ab (z. B. Konflikt mit einem App-Link), erscheint der Grund als Meldung.</summary>
-    void Upd(int row, Func<DeviceBinding, DeviceBinding> f)
-    {
-        var refusal = _m.UpdateBinding(row, f);
-        if (refusal != null) Root?.Notify.Flash(refusal, true);
-    }
-
-    public override void Layout()
-    {
-        var b = Bounds;
-        float bw = AddButton.PreferredWidth;
-        AddButton.Bounds = new RectF(b.Right - Theme.CardPad - bw + 4, b.Y + 14, bw, Theme.ControlHSmall);
-        _sc.Update(new RectF(b.X + 8, b.Y + HeadH + ColH, b.W - 16, Math.Max(0, b.H - HeadH - ColH - 8)), _m.Bindings.Count * RowH);
-        AddButton.Enabled = !_m.HostRunning;
-    }
-
-    RectF RowRect(int row) => new(_sc.View.X, _sc.View.Y + row * RowH - _sc.Offset, _sc.View.W - (_sc.Needed ? 10 : 0), RowH);
-
-    static float StepW => Theme.Touch ? 116f : 96f;
-
-    (RectF Chip, RectF Dev, RectF DevStep, RectF EngStep, RectF CntStep, RectF Status, RectF Del) Cols(RectF row)
-    {
-        float cy = row.CY, h = Theme.ControlHSmall + 2;
-        float x = row.X + 8;
-        var chip = new RectF(x, cy - h / 2, 120, h); x += 128;
-        float right = row.Right - 8;
-        var del = new RectF(right - 32, cy - 16, 32, 32); right -= 36;
-        var status = new RectF(right - 28, cy - 14, 28, 28); right -= 34;
-        var cnt = new RectF(right - StepW, cy - h / 2, StepW, h); right -= StepW + 8;
-        var eng = new RectF(right - StepW, cy - h / 2, StepW, h); right -= StepW + 8;
-        var dev = new RectF(right - StepW, cy - h / 2, StepW, h); right -= StepW + 10;
-        var device = new RectF(x, cy - h / 2, Math.Max(80, right - x), h);
-        return (chip, device, dev, eng, cnt, status, del);
-    }
-
-    static (RectF Minus, RectF Val, RectF Plus) Step(RectF s) => (new RectF(s.X, s.Y, 28, s.H), new RectF(s.X + 28, s.Y, s.W - 56, s.H), new RectF(s.Right - 28, s.Y, 28, s.H));
-
-    (int Row, Reg R) Hit(float x, float y)
-    {
-        if (!_sc.View.Contains(x, y)) return (-1, Reg.None);
-        int row = (int)((y - _sc.View.Y + _sc.Offset) / RowH);
-        if (row < 0 || row >= _m.Bindings.Count) return (-1, Reg.None);
-        var c = Cols(RowRect(row));
-        if (c.Chip.Contains(x, y)) return (row, Reg.Chip);
-        if (c.Dev.Contains(x, y)) return (row, Reg.Device);
-        if (c.Del.Contains(x, y)) return (row, Reg.Delete);
-        if (c.Status.Contains(x, y)) return (row, Reg.Status);
-        foreach (var (s, m, v, p) in new[] { (c.DevStep, Reg.DevMinus, Reg.DevVal, Reg.DevPlus), (c.EngStep, Reg.EngMinus, Reg.EngVal, Reg.EngPlus), (c.CntStep, Reg.CntMinus, Reg.CntVal, Reg.CntPlus) })
-        {
-            var st = Step(s);
-            if (st.Minus.Contains(x, y)) return (row, m);
-            if (st.Val.Contains(x, y)) return (row, v);
-            if (st.Plus.Contains(x, y)) return (row, p);
-        }
-        return (row, Reg.None);
-    }
-
-    public override void OnMouseMove(in MouseEvent e)
-    {
-        if (_sc.Dragging && IsPressed) { _sc.Drag(e.Y); Invalidate(); return; }
-        var h = Hit(e.X, e.Y);
-        if (h != _hot) { _hot = h; Invalidate(); }
-    }
-    public override void OnMouseLeave() { _hot = (-1, Reg.None); Invalidate(); }
-    public override CursorKind CursorAt(float x, float y) => Hit(x, y).R is not Reg.None and not Reg.Status && !_m.HostRunning ? CursorKind.Hand : CursorKind.Arrow;
-
-    public override void OnMouseDown(in MouseEvent e)
-    {
-        if (e.Button != 0) return;
-        if (_sc.Down(e.X, e.Y)) return;
-        _press = Hit(e.X, e.Y);
-        if (e.Clicks >= 2 && !_m.HostRunning && _press.Row >= 0) EditValue(_press);
-        Invalidate();
-    }
-
-    public override void OnMouseUp(in MouseEvent e)
-    {
-        if (_sc.Dragging) { _sc.Up(); Invalidate(); return; }
-        var h = Hit(e.X, e.Y);
-        if (h.Row >= 0 && h == _press && !_m.HostRunning && e.Clicks == 1) Act(h);
-        _press = (-1, Reg.None);
-        Invalidate();
-    }
-
-    public override bool OnMouseWheel(in MouseEvent e)
-    {
-        var h = Hit(e.X, e.Y);
-        if (h.Row >= 0 && !_m.HostRunning && h.R is Reg.DevVal or Reg.EngVal or Reg.CntVal or Reg.DevMinus or Reg.DevPlus or Reg.EngMinus or Reg.EngPlus or Reg.CntMinus or Reg.CntPlus)
-        {
-            Nudge(h.Row, h.R, e.Wheel > 0 ? 1 : -1);
-            return true;
-        }
-        if (_sc.Wheel(e.Wheel)) { Invalidate(); return true; }
-        return false;
-    }
-
-    void Nudge(int row, Reg r, int d)
-    {
-        switch (r)
-        {
-            case Reg.DevMinus: case Reg.DevPlus: case Reg.DevVal: SetDevStart(row, _m.Bindings[row].DeviceFirstChannel + d); break;
-            case Reg.EngMinus: case Reg.EngPlus: case Reg.EngVal: SetEngStart(row, _m.Bindings[row].EngineFirstChannel + d); break;
-            case Reg.CntMinus: case Reg.CntPlus: case Reg.CntVal: SetCount(row, _m.Bindings[row].Count + d); break;
-        }
-    }
-
-    void Act((int Row, Reg R) h)
-    {
-        int row = h.Row;
-        switch (h.R)
-        {
-            case Reg.DevMinus: case Reg.EngMinus: case Reg.CntMinus: Nudge(row, h.R, -1); break;
-            case Reg.DevPlus: case Reg.EngPlus: case Reg.CntPlus: Nudge(row, h.R, +1); break;
-            case Reg.Delete: _m.RemoveBinding(row); break;
-            case Reg.Device: OpenDeviceMenu(row, Cols(RowRect(row)).Dev); break;
-            case Reg.Chip: OpenChipMenu(row, Cols(RowRect(row)).Chip); break;
-        }
-    }
-
-    void SetDevStart(int row, int v)
-    {
-        var b = _m.Bindings[row];
-        var d = _m.FindDevice(b.DeviceId);
-        int max = d != null ? Math.Max(0, d.Channels - b.Count) : 63;
-        _m.UpdateBinding(row, x => x with { DeviceFirstChannel = Math.Clamp(v, 0, max) });
-    }
-
-    void SetEngStart(int row, int v)
-    {
-        var b = _m.Bindings[row];
-        int engCount = b.Flow == DeviceFlow.Capture ? _m.InputCount : _m.OutputCount;
-        int max = Math.Max(0, Math.Max(engCount, b.EngineFirstChannel + b.Count) - b.Count);
-        Upd(row, x => x with { EngineFirstChannel = Math.Clamp(v, 0, max) });
-        GrowToFit(row);
-    }
-
-    void SetCount(int row, int v)
-    {
-        var b = _m.Bindings[row];
-        var d = _m.FindDevice(b.DeviceId);
-        int max = d != null ? Math.Max(1, d.Channels - b.DeviceFirstChannel) : 64;
-        Upd(row, x => x with { Count = Math.Clamp(v, 1, max) });
-        GrowToFit(row);
-    }
-
-    /// <summary>Fehlen Engine-Kanaele fuer die Zuordnung, werden sie (ohne Namen) am Ende angelegt.</summary>
-    void GrowToFit(int row)
-    {
-        if (row >= _m.Bindings.Count) return;
-        var b = _m.Bindings[row];
-        bool input = b.Flow == DeviceFlow.Capture;
-        int have = input ? _m.InputCount : _m.OutputCount;
-        int need = b.EngineFirstChannel + b.Count;
-        if (need > have) _m.AddChannels(input, need - have);
-    }
-
-    void EditValue((int Row, Reg R) h)
-    {
-        var root = Root; if (root == null) return;
-        var c = Cols(RowRect(h.Row));
-        var b = _m.Bindings[h.Row];
-        (RectF s, int cur, Action<int> set)? target = h.R switch
-        {
-            Reg.DevVal => (c.DevStep, b.DeviceFirstChannel, v => SetDevStart(h.Row, v)),
-            Reg.EngVal => (c.EngStep, b.EngineFirstChannel, v => SetEngStart(h.Row, v)),
-            Reg.CntVal => (c.CntStep, b.Count - 1, v => SetCount(h.Row, v + 1)),
-            _ => null,
+            if (Node is { } n) _m.ShowAsioControlPanel(n.EndpointId);
         };
-        if (target == null) return;
-        var (s, cur, set) = target.Value;
-        var vr = Step(s).Val;
-        root.BeginEdit(vr.Inflate(4, 2), (cur + 1).ToString(), Theme.Value, txt =>
+        _exclSw.Changed += on => _m.UpdateHardwareDevice(NodeId, d => d with { ExclusiveOverride = on });
+        _muteBtn.Toggled += on =>
         {
-            if (int.TryParse(txt.Trim(), out int n)) set(n - 1);
-            else root.Notify.Flash("Ungültige Zahl: " + txt, true);
-        }, 3, ch => char.IsDigit(ch), HAlign.Center);
+            if (Node is { } n) _m.UpdateDeviceMaster(NodeId, dm => dm with { Mute = on }, n.DisplayTitle, n.Flow == DeviceFlow.Capture);
+        };
+        _dimBtn.Toggled += on =>
+        {
+            if (Node is { } n) _m.UpdateDeviceMaster(NodeId, dm => dm with { Dim = on }, n.DisplayTitle, n.Flow == DeviceFlow.Capture);
+        };
+        _masterSlider.Changed += v =>
+        {
+            if (Node is { } n) _m.UpdateDeviceMaster(NodeId, dm => dm with { GainDb = v }, n.DisplayTitle, n.Flow == DeviceFlow.Capture);
+        };
+        _masterBox.Typed += s =>
+        {
+            if (Node is { } n && Db.TryParse(s, out double db))
+                _m.UpdateDeviceMaster(NodeId, dm => dm with { GainDb = Math.Clamp(db, -120, Theme.FaderMaxDb) }, n.DisplayTitle, n.Flow == DeviceFlow.Capture);
+        };
+        _expandBtn.Clicked += () =>
+        {
+            _expanded = !_expanded;
+            RebuildChannelRows();
+            Parent?.Layout();
+            Invalidate();
+        };
+        _removeBtn.Clicked += () =>
+        {
+            string name = Node?.DisplayTitle ?? "Gerät";
+            Root?.Confirm($"Gerät „{name}“ entfernen?", "Die Hardware-Zuordnung wird aus der Systemkonfiguration gelöst.",
+                "Entfernen", () => _m.RemoveHardwareDevice(NodeId), danger: true);
+        };
+
+        RebuildChannelRows();
     }
 
-    void OpenDeviceMenu(int row, RectF anchor)
+    AudioDeviceNode? Node => _m.Config.Devices.FirstOrDefault(d => d.Id == NodeId);
+
+    List<int> MemberChannelIndices()
     {
-        var root = Root; if (root == null) return;
-        var b = _m.Bindings[row];
-        var wantFlow = b.Loopback ? DeviceFlow.Render : b.Flow;
-        var items = new List<MenuItem>();
-        foreach (var d in _m.Devices.Where(d => d.Flow == wantFlow))
+        var n = Node;
+        if (n == null) return new List<int>();
+        var list = n.Flow == DeviceFlow.Capture ? _m.Settings.Inputs : _m.Settings.Outputs;
+        var res = new List<int>();
+        for (int i = 0; i < list.Count; i++)
+            if (list[i].DeviceId == NodeId) res.Add(i);
+        return res;
+    }
+
+    public void RebuildChannelRows()
+    {
+        foreach (var r in _chRows)
         {
-            var dd = d;
-            items.Add(new($"{d.Name}  ({d.Channels} Kanäle)", null, () => _m.UpdateBinding(row, x => x with
-            {
-                DeviceId = dd.Id,
-                DeviceFirstChannel = Math.Min(x.DeviceFirstChannel, Math.Max(0, dd.Channels - x.Count)),
-            })) { Checked = d.Id == b.DeviceId });
+            Children.Remove(r.Slider); r.Slider.Parent = null;
+            Children.Remove(r.Box); r.Box.Parent = null;
+            Children.Remove(r.LinkBtn); r.LinkBtn.Parent = null;
         }
-        if (items.Count == 0) items.Add(new("Keine passenden Geräte gefunden", null, null, false));
-        items.Add(MenuItem.Sep);
-        items.Add(new("Geräteliste neu einlesen", null, _m.RefreshDevices) { Icon = Icon.Refresh });
-        PopupMenu.Show(root, anchor, items, Math.Max(anchor.W, 300));
-    }
+        _chRows.Clear();
+        if (!_expanded || Node is not { } node) return;
 
-    void OpenChipMenu(int row, RectF anchor)
-    {
-        var root = Root; if (root == null) return;
-        var b = _m.Bindings[row];
-        void Set(DeviceFlow flow, bool loop)
+        bool isInput = node.Flow == DeviceFlow.Capture;
+        foreach (int idx in MemberChannelIndices())
         {
-            Upd(row, x =>
+            int chIdx = idx;
+            var sl = Add(new Slider
             {
-                var d = _m.FindDevice(x.DeviceId);
-                var want = loop ? DeviceFlow.Render : flow;
-                bool keep = d != null && d.Flow == want;
-                return x with { Flow = flow, Loopback = loop, DeviceId = keep ? x.DeviceId : "" };
+                Min = Theme.FaderMinDb,
+                Max = Theme.FaderMaxDb,
+                Default = 0,
+                Step = 0.1,
+                WheelStep = 1,
+                ToNorm = db => Db.IsOff(db) ? 0 : FaderScale.ToT(db),
+                FromNorm = t => { double db = FaderScale.ToDb(t); return Db.IsOff(db) ? db : Math.Round(db * 10) / 10; },
             });
-            GrowToFit(row);
+            sl.Changed += v => _m.UpdateChannel(isInput, chIdx, c => c with { GainDb = v });
+
+            var bx = Add(new ValueBox());
+            bx.Typed += s => { if (Db.TryParse(s, out double db)) _m.UpdateChannel(isInput, chIdx, c => c with { GainDb = Math.Min(db, c.MaxGainDb) }); };
+
+            var lb = Add(new Button("Stereo-Link", ButtonStyle.Gray, Icon.Link) { Font = Theme.MicroStrong });
+            lb.Clicked += () => _m.TogglePairLink(isInput, chIdx);
+
+            _chRows.Add((chIdx, sl, bx, lb));
         }
-        var items = new List<MenuItem>
-        {
-            new("Eingang (Aufnahmegerät)", null, () => Set(DeviceFlow.Capture, false)) { Checked = b.Flow == DeviceFlow.Capture && !b.Loopback, Icon = Icon.Mic },
-            new("Loopback (Wiedergabe abgreifen)", null, () => Set(DeviceFlow.Capture, true)) { Checked = b.Loopback, Icon = Icon.Loopback },
-            new("Ausgang (Wiedergabegerät)", null, () => Set(DeviceFlow.Render, false)) { Checked = b.Flow == DeviceFlow.Render, Icon = Icon.Speaker },
-        };
-        PopupMenu.Show(root, anchor, items, 280);
     }
 
-    public override string? TooltipAt(float x, float y)
+    public float PreferredHeight()
     {
-        var h = Hit(x, y);
-        if (h.Row < 0) return null;
-        if (_m.HostRunning && h.R != Reg.None && h.R != Reg.Status) return "Zum Ändern zuerst Audio stoppen";
-        return h.R switch
+        float baseH = Theme.Touch ? 124f : 108f;
+        if (!_expanded) return baseH;
+        float rowH = Theme.Touch ? 40f : 34f;
+        return baseH + 12f + _chRows.Count * (rowH + 4f) + 8f;
+    }
+
+    public override void Layout()
+    {
+        var b = Bounds;
+        var n = Node;
+        if (n == null) return;
+
+        float pad = Theme.CardPad;
+        float ch = Theme.ControlHSmall;
+        float y1 = b.Y + 12;
+
+        _removeBtn.Bounds = new RectF(b.Right - pad - 98, y1, 98, ch);
+        _enabledSw.SetOn(n.Enabled);
+        _enabledSw.Bounds = new RectF(_removeBtn.Bounds.X - 10 - Theme.SwitchW, y1, Theme.SwitchW, ch);
+
+        bool isAsio = n.Backend == AudioBackend.Asio;
+        _driverBtn.Visible = isAsio;
+        _exclSw.Visible = !isAsio;
+        if (isAsio)
+            _driverBtn.Bounds = new RectF(_enabledSw.Bounds.X - 12 - 104, y1, 104, ch);
+        else
         {
-            Reg.Status => _m.ValidateBinding(_m.Bindings[h.Row]) ?? "In Ordnung",
-            Reg.Chip => "Richtung ändern",
-            Reg.Device => "Gerät wählen",
-            Reg.DevVal => "Erster Gerätekanal (Doppelklick: tippen)",
-            Reg.EngVal => "Erster Engine-Kanal (Doppelklick: tippen)",
-            Reg.CntVal => "Anzahl Kanäle (Doppelklick: tippen)",
-            Reg.Delete => "Zuordnung entfernen",
-            _ => null,
-        };
+            _exclSw.SetOn(n.ExclusiveOverride ?? _m.Config.DefaultWasapiExclusive);
+            _exclSw.Bounds = new RectF(_enabledSw.Bounds.X - 14 - Theme.SwitchW, y1, Theme.SwitchW, ch);
+        }
+
+        // Zeile 2: Geräte-Master
+        float y2 = b.Y + (Theme.Touch ? 62f : 54f);
+        var dm = _m.GetDeviceMaster(NodeId);
+        double mg = dm?.GainDb ?? 0.0;
+        _muteBtn.SetChecked(dm?.Mute ?? false);
+        _dimBtn.SetChecked(dm?.Dim ?? false);
+        _masterSlider.SetValue(mg);
+        _masterBox.Text = Db.Format(mg);
+
+        var members = MemberChannelIndices();
+        _expandBtn.Text = _expanded ? $"▾ {members.Count} Kanäle" : $"▸ {members.Count} Kanäle";
+        _expandBtn.Style = _expanded ? ButtonStyle.Filled : ButtonStyle.Tinted;
+
+        float expW = 108f;
+        _expandBtn.Bounds = new RectF(b.Right - pad - expW, y2, expW, ch + 4);
+        _masterBox.Bounds = new RectF(_expandBtn.Bounds.X - 8 - 68, y2 + 2, 68, ch);
+        _dimBtn.Bounds = new RectF(b.X + pad + 130, y2 + 2, 42, ch);
+        _muteBtn.Bounds = new RectF(_dimBtn.Bounds.Right + 4, y2 + 2, 34, ch);
+        _masterSlider.Bounds = new RectF(_muteBtn.Bounds.Right + 12, y2, Math.Max(60, _masterBox.Bounds.X - _muteBtn.Bounds.Right - 22), ch + 4);
+
+        if (_expanded)
+        {
+            bool isInput = n.Flow == DeviceFlow.Capture;
+            float ry = y2 + ch + 18f;
+            float rowH = Theme.Touch ? 40f : 34f;
+            foreach (var row in _chRows)
+            {
+                if (row.ChIdx >= (isInput ? _m.InputCount : _m.OutputCount)) continue;
+                var c = _m.Channel(isInput, row.ChIdx);
+                row.Slider.Limit = c.MaxGainDb < Theme.FaderMaxDb - 0.05 ? c.MaxGainDb : double.NaN;
+                row.Slider.SetValue(c.GainDb);
+                row.Box.Text = Db.Format(c.GainDb);
+                row.LinkBtn.Style = c.LinkGroupId.HasValue ? ButtonStyle.Tinted : ButtonStyle.Gray;
+                row.LinkBtn.Visible = (row.ChIdx % 2 == 0) && row.ChIdx + 1 < (isInput ? _m.InputCount : _m.OutputCount);
+
+                float rightX = b.Right - pad;
+                if (row.LinkBtn.Visible)
+                {
+                    row.LinkBtn.Bounds = new RectF(rightX - 102, ry + 3, 102, rowH - 6);
+                    rightX = row.LinkBtn.Bounds.X - 8;
+                }
+                row.Box.Bounds = new RectF(rightX - 68, ry + 4, 68, rowH - 8);
+                row.Slider.Bounds = new RectF(b.X + pad + 190, ry, Math.Max(60, row.Box.Bounds.X - (b.X + pad + 200)), rowH);
+                ry += rowH + 4f;
+            }
+        }
     }
 
     public override void Paint(Renderer g)
     {
         var b = Bounds;
+        var n = Node;
+        if (n == null) return;
         Draw.Card(g, b);
-        Draw.CardTitle(g, new RectF(b.X + Theme.CardPad, b.Y + 6, 240, 30), "Zuordnungen", _m.Bindings.Count > 0 ? _m.Bindings.Count : null);
-        g.Text("Welche Geräte-Kanäle an welchen Engine-Kanälen hängen", new RectF(b.X + Theme.CardPad, b.Y + 36, b.W - 200, 18), Theme.Callout, Theme.TextSecondary, HAlign.Left, VAlign.Middle, true);
 
-        var hr = new RectF(_sc.View.X, b.Y + HeadH, _sc.View.W - (_sc.Needed ? 10 : 0), ColH);
-        var c = Cols(hr);
-        void H(string t, RectF r, HAlign a = HAlign.Center) => g.Text(t, new RectF(r.X, hr.Y, r.W, ColH), Theme.Overline, Theme.TextTertiary, a, VAlign.Middle, false);
-        H("RICHTUNG", c.Chip.Offset(6, 0), HAlign.Left); H("GERÄT", c.Dev.Offset(4, 0), HAlign.Left); H("GERÄT AB", c.DevStep); H("ENGINE AB", c.EngStep); H("ANZAHL", c.CntStep);
-        g.Fill(new RectF(b.X + 1, hr.Bottom - 1, b.W - 2, 1), Theme.Separator);
+        float pad = Theme.CardPad;
+        float cy1 = b.Y + 12 + Theme.ControlHSmall / 2f;
+        var info = _m.FindDevice(n.EndpointId);
+        bool online = info != null && string.IsNullOrEmpty(info.UnavailableReason);
 
-        if (_m.Bindings.Count == 0)
+        float x = b.X + pad;
+        float wFlow = Draw.Chip(g, x, cy1, n.Loopback ? "LOOPBACK" : n.Flow == DeviceFlow.Capture ? "EINGANG" : "AUSGANG",
+            n.Flow == DeviceFlow.Capture ? Theme.Teal : Theme.Accent, dot: false, Theme.MicroStrong);
+        x += wFlow + 6;
+        float wDrv = Draw.Chip(g, x, cy1, n.Backend == AudioBackend.Asio ? "ASIO" : "WASAPI",
+            n.Backend == AudioBackend.Asio ? Theme.Purple : Theme.TextSecondary, dot: false, Theme.MicroStrong);
+        x += wDrv + 6;
+        float wOn = Draw.Chip(g, x, cy1, online ? "Online" : "Offline", online ? Theme.Green : Theme.Orange, dot: true, Theme.MicroStrong);
+        x += wOn + 10;
+
+        float rightLimit = (n.Backend == AudioBackend.Asio ? _driverBtn.Bounds.X : _exclSw.Bounds.X - 68) - 10;
+        g.Text($"{n.DisplayTitle}  ·  {n.ChannelCount} Kanäle (Engine {n.EngineFirstChannel + 1}..{n.EngineFirstChannel + n.ChannelCount})",
+            new RectF(x, b.Y + 10, Math.Max(40, rightLimit - x), 30), Theme.Headline, Theme.Text);
+
+        if (n.Backend != AudioBackend.Asio)
+            g.Text("Exklusiv", new RectF(_exclSw.Bounds.X - 64, b.Y + 12, 58, Theme.ControlHSmall), Theme.CaptionMedium, Theme.TextSecondary, HAlign.Right);
+
+        float y2 = b.Y + (Theme.Touch ? 62f : 54f);
+        g.Text("Geräte-Master", new RectF(b.X + pad, y2, 124, Theme.ControlHSmall + 4), Theme.BodyStrong, Theme.Text);
+
+        if (_expanded && _chRows.Count > 0)
         {
-            var area = RectF.FromLTRB(b.X, b.Y + HeadH + ColH, b.Right, b.Bottom);
-            Draw.Empty(g, area, area.Y + 24, Icon.Link, "Noch keine Zuordnung",
-                "Wähle links bei einem Gerät „Eingang“, „Ausgang“ oder „Loopback“ – oder lege oben eine leere Zuordnung an. Fehlende Engine-Kanäle werden automatisch angelegt. Audio startet erst, wenn du auf „Audio starten“ klickst.");
-        }
-        else
-        {
-            g.PushClip(_sc.View);
-            for (int i = 0; i < _m.Bindings.Count; i++)
+            Draw.HLine(g, b.X + pad, y2 + Theme.ControlHSmall + 10, b.W - 2 * pad);
+            bool isInput = n.Flow == DeviceFlow.Capture;
+            foreach (var row in _chRows)
             {
-                var r = RowRect(i);
-                if (r.Bottom < _sc.View.Y || r.Y > _sc.View.Bottom) continue;
-                PaintRow(g, r, i, i == _m.Bindings.Count - 1);
+                if (row.ChIdx >= (isInput ? _m.InputCount : _m.OutputCount)) continue;
+                string chName = _m.DisplayName(isInput, row.ChIdx);
+                g.Text($"Ch {row.ChIdx + 1:00}  ·  {chName}",
+                    new RectF(b.X + pad + 8, row.Slider.Bounds.Y, 176, row.Slider.Bounds.H),
+                    Theme.CalloutMedium, Theme.TextSecondary);
             }
-            g.PopClip();
-            _sc.Paint(g);
         }
+
         PaintChildren(g);
-    }
-
-    void PaintStepper(Renderer g, RectF s, int display, int row, Reg minus, Reg plus, bool dis)
-    {
-        var (mi, va, pl) = Step(s);
-        g.FillRound(s, Theme.RadiusControl, dis ? Theme.Control.With(0.5f) : Theme.Control);
-        bool hm = _hot.Row == row && _hot.R == minus && !dis, hp = _hot.Row == row && _hot.R == plus && !dis;
-        if (hm) g.FillRound(mi.Deflate(2), 6, Theme.ControlPressed);
-        if (hp) g.FillRound(pl.Deflate(2), 6, Theme.ControlPressed);
-        var ic = dis ? Theme.TextTertiary : Theme.TextSecondary;
-        Icons.Draw(g, Icon.Minus, mi.CX, mi.CY, 13, ic);
-        Icons.Draw(g, Icon.Plus, pl.CX, pl.CY, 13, ic);
-        g.Text(display.ToString(), va, Theme.Value, dis ? Theme.TextTertiary : Theme.Text, HAlign.Center, VAlign.Middle, false);
-    }
-
-    void PaintRow(Renderer g, RectF r, int i, bool last)
-    {
-        var bd = _m.Bindings[i];
-        bool dis = _m.HostRunning;
-        if (_hot.Row == i) g.FillRound(r.Deflate(0, 2), 10, Theme.ControlHover.With(Theme.IsDark ? 0.35f : 0.5f));
-        else if (!last) g.Fill(new RectF(r.X + 8, r.Bottom - 0.5f, r.W - 16, 1), Theme.Separator);
-        var c = Cols(r);
-        bool loop = bd.Loopback; bool cap = bd.Flow == DeviceFlow.Capture;
-        string chip = loop ? "Loopback" : cap ? "Eingang" : "Ausgang";
-        var col = loop ? Theme.Purple : cap ? Theme.AccentText : Theme.Teal;
-        bool chipHot = _hot.Row == i && _hot.R == Reg.Chip && !dis;
-        g.FillPill(c.Chip, col.With((Theme.IsDark ? 0.18f : 0.12f) + (chipHot ? 0.1f : 0)));
-        Icons.Draw(g, loop ? Icon.Loopback : cap ? Icon.Mic : Icon.Speaker, c.Chip.X + 16, c.Chip.CY, 14, col);
-        g.Text(chip, new RectF(c.Chip.X + 28, c.Chip.Y, c.Chip.W - 44, c.Chip.H), Theme.CalloutStrong, col, HAlign.Left, VAlign.Middle, false);
-        Icons.Draw(g, Icon.ChevronDown, c.Chip.Right - 13, c.Chip.CY, 11, col);
-        var dev = _m.FindDevice(bd.DeviceId);
-        bool devHot = _hot.Row == i && _hot.R == Reg.Device && !dis;
-        g.FillRound(c.Dev, Theme.RadiusControl, dis ? Theme.Control.With(0.5f) : devHot ? Theme.ControlHover : Theme.Control);
-        string dn = dev?.Name ?? (string.IsNullOrEmpty(bd.DeviceId) ? "Gerät wählen …" : "Gerät nicht gefunden");
-        g.Text(dn, new RectF(c.Dev.X + 12, c.Dev.Y, c.Dev.W - 36, c.Dev.H), Theme.Callout, dev == null ? Theme.Orange : dis ? Theme.TextTertiary : Theme.Text, HAlign.Left, VAlign.Middle, true);
-        Icons.Draw(g, Icon.UpDown, c.Dev.Right - 15, c.Dev.CY, 13, Theme.TextSecondary);
-        PaintStepper(g, c.DevStep, bd.DeviceFirstChannel + 1, i, Reg.DevMinus, Reg.DevPlus, dis);
-        PaintStepper(g, c.EngStep, bd.EngineFirstChannel + 1, i, Reg.EngMinus, Reg.EngPlus, dis);
-        PaintStepper(g, c.CntStep, bd.Count, i, Reg.CntMinus, Reg.CntPlus, dis);
-        var v = _m.ValidateBinding(bd);
-        if (v == null)
-        {
-            g.FillCircle(c.Status.CX, c.Status.CY, 11, Theme.Soft(Theme.Green));
-            Icons.Draw(g, Icon.Check, c.Status.CX, c.Status.CY, 14, Theme.Green);
-        }
-        else
-        {
-            g.FillCircle(c.Status.CX, c.Status.CY, 11, Theme.Soft(Theme.Orange));
-            Icons.Draw(g, Icon.Warn, c.Status.CX, c.Status.CY, 14, Theme.Orange);
-        }
-        bool hd = _hot.Row == i && _hot.R == Reg.Delete && !dis;
-        if (hd) g.FillPill(c.Del, Theme.Soft(Theme.Red));
-        Icons.Draw(g, Icon.Trash, c.Del.CX, c.Del.CY, 17, hd ? Theme.Red : dis ? Theme.TextTertiary : Theme.TextSecondary);
     }
 }
 
+/// <summary>Tab „Geräte“ (Strg+3): ausschließlich physische Audio-Hardware (ASIO &amp; WASAPI).
+/// Takt/Puffer liegen sauber getrennt im Tab „Engine“, virtuelle Kabel und App-Quellen im Tab „Virtual I/O“.</summary>
 internal sealed class DevicesPage : Page
 {
     readonly AppModel _m;
-    readonly DeviceOverview _list;
-    readonly BindingTableView _table;
-    public readonly Button StartButton = new("Audio starten", ButtonStyle.Filled, Icon.Play) { Font = new TextStyle(14f, Vortice.DirectWrite.FontWeight.SemiBold) };
-    readonly Dropdown _rate = new() { Tooltip = "Samplerate der Engine (nur im Stillstand änderbar)" };
-    readonly Dropdown _block = new() { Tooltip = "Blockgröße des Audio-Hosts (kleiner = weniger Latenz, mehr CPU)" };
-    readonly Switch _excl = new() { Tooltip = "Exklusiv-Modus (WASAPI): geringere Latenz, das Gerät gehört nur NX-MIX" };
-    RectF _hostCard, _rRate, _rBlock, _rExcl;
+    readonly Button _addHwBtn = new("Hardware-Gerät einbinden …", ButtonStyle.Filled, Icon.Plus);
+    readonly Button _scanBtn = new("Geräte neu scannen", ButtonStyle.Gray, Icon.Refresh);
+    readonly Button _toVaioBtn = new("Virtual I/O & Apps …", ButtonStyle.Gray, Icon.Vaio);
+    readonly Button _toEngineBtn = new("Takt & Puffer (Engine) …", ButtonStyle.Gray, Icon.Engine);
+    readonly List<DeviceUnitCard> _cards = new();
+    readonly VScroll _scroll = new();
+    RectF _listArea;
 
     public override string Title => "Geräte";
     public override Icon Icon => Icon.Devices;
-    public override string? Subtitle => $"Audio-Engine, Geräte und Zuordnungen  ·  {Fmt.Count(_m.Bindings.Count, "Zuordnung", "Zuordnungen")}";
+    public override string? Subtitle =>
+        $"{_m.Config.Devices.Count} eingebundene Hardware-Geräte  ·  {_m.PhysicalDevices.Count} physische Endpunkte erkannt";
 
     public DevicesPage(AppModel m)
     {
         _m = m;
-        _list = Add(new DeviceOverview(m));
-        _table = Add(new BindingTableView(m));
-        Add(StartButton); Add(_rate); Add(_block); Add(_excl);
-        StartButton.Clicked += OnStartClicked;
+        Add(_addHwBtn); Add(_scanBtn); Add(_toVaioBtn); Add(_toEngineBtn);
 
-        _rate.Text = () => $"{_m.Settings.SampleRate / 1000.0:0.##} kHz";
-        _rate.Items = () => AppModel.SampleRates.Select(sr => new MenuItem($"{sr / 1000.0:0.##} kHz", null, () => _m.SetSampleRate(sr)) { Checked = sr == _m.Settings.SampleRate }).ToList();
-        _block.Text = () => $"{_m.BlockFrames} Samples · {_m.BlockFrames * 1000.0 / _m.Settings.SampleRate:0.0} ms";
-        _block.Items = () => AppModel.BlockSizes.Select(f => new MenuItem($"{f} Samples · {f * 1000.0 / _m.Settings.SampleRate:0.0} ms", null, () => _m.SetBlockFrames(f)) { Checked = f == _m.BlockFrames }).ToList();
-        _excl.Changed += on => _m.SetExclusive(on);
+        _addHwBtn.Clicked += ShowAddHardwareMenu;
+        _scanBtn.Clicked += () => { _m.RefreshDevices(); Root?.Notify.Flash("Hardware-Geräte werden neu eingelesen …"); };
+        _toVaioBtn.Clicked += () => Root?.SwitchPage(UiRoot.TabVirtualIo);
+        _toEngineBtn.Clicked += () => Root?.SwitchPage(UiRoot.TabEngine);
 
-        m.BindingsChanged += Refresh;
-        m.HostChanged += Refresh;
-        m.StructureChanged += Refresh;
+        m.BindingsChanged += RebuildCards;
+        m.StructureChanged += RebuildCards;
+        m.ValuesChanged += () => { foreach (var c in _cards) c.Layout(); Invalidate(); };
+        m.HostChanged += () => { foreach (var c in _cards) c.Layout(); Invalidate(); };
+        RebuildCards();
     }
 
-    void Refresh()
+    void ShowAddHardwareMenu()
     {
-        UpdateEnabled();
-        _list.Layout(); _table.Layout();
+        if (Root is not { } root) return;
+        var items = new List<MenuItem>();
+        var phys = _m.PhysicalDevices;
+
+        var asio = phys.Where(d => d.Backend == AudioBackend.Asio).ToList();
+        if (asio.Count > 0)
+        {
+            items.Add(MenuItem.Header("ASIO-Hardware (Nativ / Master-Takt-fähig)"));
+            foreach (var d in asio)
+            {
+                var dev = d;
+                string dir = dev.Flow == DeviceFlow.Capture ? "Eingang" : "Ausgang";
+                items.Add(new MenuItem($"{dev.Name}  ·  {dir} ({dev.Channels} Ch)", "ASIO", () => _m.AddHardwareDevice(dev))
+                {
+                    Icon = dev.Flow == DeviceFlow.Capture ? Icon.Mic : Icon.Speaker,
+                    Enabled = string.IsNullOrEmpty(dev.UnavailableReason),
+                });
+            }
+        }
+
+        var wasapiIn = phys.Where(d => d.Backend == AudioBackend.Windows && d.Flow == DeviceFlow.Capture).ToList();
+        if (wasapiIn.Count > 0)
+        {
+            if (items.Count > 0) items.Add(MenuItem.Sep);
+            items.Add(MenuItem.Header("Windows WASAPI — Physische Eingänge"));
+            foreach (var d in wasapiIn)
+            {
+                var dev = d;
+                items.Add(new MenuItem($"{dev.Name} ({dev.Channels} Ch)", null, () => _m.AddHardwareDevice(dev)) { Icon = Icon.Mic });
+            }
+        }
+
+        var wasapiOut = phys.Where(d => d.Backend == AudioBackend.Windows && d.Flow == DeviceFlow.Render).ToList();
+        if (wasapiOut.Count > 0)
+        {
+            if (items.Count > 0) items.Add(MenuItem.Sep);
+            items.Add(MenuItem.Header("Windows WASAPI — Physische Ausgänge"));
+            foreach (var d in wasapiOut)
+            {
+                var dev = d;
+                items.Add(new MenuItem($"{dev.Name} ({dev.Channels} Ch)", null, () => _m.AddHardwareDevice(dev)) { Icon = Icon.Speaker });
+                items.Add(new MenuItem($"{dev.Name} (als Loopback-Aufnahme)", "Loopback", () => _m.AddHardwareDevice(dev, loopback: true)) { Icon = Icon.Loopback });
+            }
+        }
+
+        PopupMenu.Show(root, _addHwBtn.Bounds, items, 340);
+    }
+
+    void RebuildCards()
+    {
+        foreach (var c in _cards) { Children.Remove(c); c.Parent = null; }
+        _cards.Clear();
+        foreach (var d in _m.Config.Devices)
+        {
+            var card = new DeviceUnitCard(_m, d.Id);
+            _cards.Add(card);
+            Children.Insert(0, card);
+            card.Parent = this;
+        }
+        Layout();
         Invalidate();
     }
 
-    void UpdateEnabled()
-    {
-        bool run = _m.HostRunning;
-        _rate.Enabled = _block.Enabled = _excl.Enabled = !run && !_m.HostBusy;
-        _excl.SetOn(_m.Exclusive);
-        if (run)
-        {
-            StartButton.Text = _m.HostBusy && _m.HostStopping ? "Stoppt …" : "Audio stoppen";
-            StartButton.Style = ButtonStyle.Destructive; StartButton.Icon = Icon.Stop; StartButton.Enabled = !_m.HostBusy;
-        }
-        else if (_m.HostBusy) { StartButton.Text = "Startet …"; StartButton.Style = ButtonStyle.Filled; StartButton.Icon = Icon.Play; StartButton.Enabled = false; }
-        else { StartButton.Text = "Audio starten"; StartButton.Style = ButtonStyle.Filled; StartButton.Icon = Icon.Play; StartButton.Enabled = _m.CanStart(out _) || OnlyLinksBlock(); }
-    }
-
-    /// <summary>Der Start scheitert NUR an den App-Links (ohne sie ginge er): dann bleibt der Knopf klickbar und erklaert / bietet Alternativen an.</summary>
-    bool OnlyLinksBlock() => !_m.CanStart(out _) && _m.HasActiveLinks && _m.CanStartCore(false, out _);
-
-    public override void OnShow()
-    {
-        if (_m.Devices.Count == 0 && !_m.DevicesLoading && _m.DeviceError == null) _m.RefreshDevices();
-        Layout();
-        Refresh();
-    }
-
-    void OnStartClicked()
-    {
-        var root = Root; if (root == null) return;
-        if (_m.HostRunning) { _m.StopHost(); return; }
-        if (!_m.CanStart(out var why))
-        {
-            if (OnlyLinksBlock()) ShowLinkProblemDialog(why);
-            else root.Notify.Flash(why, true);
-            return;
-        }
-        if (_m.SessionConfirmed && _m.LinksConfirmed) { _m.StartHost(); return; }
-        ShowStartDialog();
-    }
-
-    /// <summary>App-Links werden nie still ignoriert: erklaeren, was fehlt, und anbieten, zu den Einstellungen zu gehen oder die Links auszuschalten.</summary>
-    public void ShowLinkProblemDialog(string why)
-    {
-        var root = Root; if (root == null) return;
-        ModalDialog.Show(root, "App-Links können nicht starten",
-            why + "\n\nApp-Links werden nie einfach ignoriert. Wähle einen Parkplatz in den Einstellungen – oder schalte die App-Links aus: Die Programme laufen dann ganz normal über Windows, die Links bleiben im Projekt gespeichert.",
-            new[] { "Abbrechen", "Einstellungen", "Links ausschalten" }, 1, -1, i =>
-            {
-                if (i == 1) root.SwitchPage(3);
-                else if (i == 2) { _m.SetAppLinksEnabled(false); root.Notify.Flash("App-Links ausgeschaltet – Programme laufen normal."); OnStartClicked(); }
-            }, Icon.Warn);
-    }
-
-    /// <summary>Vor dem ersten Start je Sitzung: "Lautstaerke und Gain-Sperren geprueft?"</summary>
-    public void ShowStartDialog()
-    {
-        var root = Root; if (root == null) return;
-        var locks = new List<string>();
-        for (int i = 0; i < _m.OutputCount; i++)
-        {
-            var c = _m.Settings.Outputs[i];
-            if (c.MaxGainDb < Theme.FaderMaxDb - 0.05) locks.Add($"{_m.DisplayName(false, i)}: max. {Db.Format(c.MaxGainDb)} dB");
-        }
-        string lockText = locks.Count == 0
-            ? "Aktuell ist KEINE Gain-Sperre auf einem Ausgang gesetzt."
-            : "Gain-Sperren an Ausgängen:\n" + string.Join("\n", locks.Take(8)) + (locks.Count > 8 ? $"\n… und {locks.Count - 8} weitere" : "");
-        string linkText = "";
-        if (_m.HasActiveLinks)
-        {
-            string progs = string.Join(", ", _m.AppLinks.Take(5).Select(l => l.Title)) + (_m.AppLinks.Count > 5 ? $" und {_m.AppLinks.Count - 5} weitere" : "");
-            linkText = $"\n\nProgramme werden auf den Parkplatz „{_m.ParkingDevice?.Name ?? _m.ParkingDeviceName ?? "?"}“ umgeleitet: {progs}. Ihr Ton läuft dann nur noch über NX-MIX – kommt dort nichts an, ist das Programm stumm. Beim Beenden stellt NX-MIX die Umleitungen wieder her.";
-        }
-        ModalDialog.Show(root, "Lautstärke und Gain-Sperren geprüft?",
-            "Audio beginnt immer mit Stille und blendet innerhalb von etwa 50 ms ein. Bitte vorher prüfen: Wiedergabe-Lautstärke der Geräte, Verstärker, Lautsprecher – und bei empfindlichen Hochtönern die Gain-Sperre des Kanals.\n\n" + lockText + linkText,
-            new[] { "Abbrechen", "Ja, starten" }, 1, -1, i =>
-            {
-                if (i == 1) { _m.SessionConfirmed = true; _m.ConfirmLinks(); _m.StartHost(); }
-            }, Icon.Shield);
-    }
+    public override void OnShow() { Layout(); Invalidate(); }
 
     public override void Layout()
     {
-        var area = new RectF(Bounds.X + Theme.Pad, Bounds.Y + 2, Math.Max(0, Bounds.W - 2 * Theme.Pad), Math.Max(0, Bounds.H - Theme.Pad - 2));
-        float rowH = Theme.ControlH;
-        float cardH = 24 + 3 * rowH + 2 * 10 + 24;
-        _hostCard = new RectF(area.X, area.Y, area.W, cardH);
-        float y = _hostCard.Bottom + Theme.Gap;
-        float h = Math.Max(0, area.Bottom - y);
-        if (area.W >= 1060)
-        {
-            float lw = Math.Clamp(area.W * 0.38f, 380, 540);
-            _list.Bounds = new RectF(area.X, y, lw, h);
-            _table.Bounds = new RectF(area.X + lw + Theme.Gap, y, Math.Max(0, area.W - lw - Theme.Gap), h);
-        }
-        else
-        {
-            // schmales Fenster: untereinander, Zuordnungen bekommen mehr Platz
-            float lh = Math.Max(200, h * 0.42f);
-            _list.Bounds = new RectF(area.X, y, area.W, lh);
-            _table.Bounds = new RectF(area.X, y + lh + Theme.Gap, area.W, Math.Max(0, h - lh - Theme.Gap));
-        }
+        var area = Bounds.Deflate(Theme.Pad, 10, Theme.Pad, Theme.Pad);
+        float barH = Theme.ControlH;
+        float x = area.X;
 
-        var c = _hostCard;
-        StartButton.Bounds = new RectF(c.X + 24, c.Y + 24, 210, Theme.Touch ? 50 : 44);
-        float rx = c.Right - 24, colW = 300;
-        float ry = c.Y + 24;
-        _rRate = new RectF(rx - colW, ry, colW, rowH);
-        _rate.Bounds = new RectF(rx - 170, ry, 170, rowH);
-        ry += rowH + 10;
-        _rBlock = new RectF(rx - colW, ry, colW, rowH);
-        _block.Bounds = new RectF(rx - 200, ry, 200, rowH);
-        ry += rowH + 10;
-        _rExcl = new RectF(rx - colW, ry, colW, rowH);
-        _excl.Bounds = new RectF(rx - 80, ry, 80, rowH);
-        _list.Layout(); _table.Layout();
-        UpdateEnabled();
+        float wAdd = _addHwBtn.PreferredWidth;
+        _addHwBtn.Bounds = new RectF(x, area.Y, wAdd, barH); x += wAdd + 8;
+        float wScan = _scanBtn.PreferredWidth;
+        _scanBtn.Bounds = new RectF(x, area.Y, wScan, barH);
+
+        float rx = area.Right;
+        float wEng = _toEngineBtn.PreferredWidth;
+        _toEngineBtn.Bounds = new RectF(rx - wEng, area.Y, wEng, barH);
+        _toEngineBtn.Visible = _toEngineBtn.Bounds.X > _scanBtn.Bounds.Right + 10;
+        if (_toEngineBtn.Visible) rx -= wEng + 8;
+
+        float wVaio = _toVaioBtn.PreferredWidth;
+        _toVaioBtn.Bounds = new RectF(rx - wVaio, area.Y, wVaio, barH);
+        _toVaioBtn.Visible = _toVaioBtn.Bounds.X > _scanBtn.Bounds.Right + 10;
+
+        _listArea = new RectF(area.X, area.Y + barH + 12, area.W, Math.Max(0, area.H - barH - 12));
+        float totalH = 0;
+        foreach (var c in _cards) totalH += c.PreferredHeight() + Theme.Gap;
+        _scroll.Update(_listArea, Math.Max(0, totalH - Theme.Gap));
+
+        float cy = _listArea.Y - _scroll.Offset;
+        float cw = _listArea.W - (_scroll.Needed ? 14f : 0f);
+        foreach (var c in _cards)
+        {
+            float h = c.PreferredHeight();
+            c.Bounds = new RectF(_listArea.X, cy, cw, h);
+            c.Layout();
+            cy += h + Theme.Gap;
+        }
+    }
+
+    public override Widget? HitTest(float x, float y)
+    {
+        if (!Visible || !Bounds.Contains(x, y)) return null;
+        foreach (var btn in new[] { _addHwBtn, _scanBtn, _toVaioBtn, _toEngineBtn })
+            if (btn.Visible && btn.Bounds.Contains(x, y)) return btn;
+        if (_listArea.Contains(x, y) && !_scroll.HitTrack(x, y))
+        {
+            for (int i = _cards.Count - 1; i >= 0; i--)
+                if (_cards[i].HitTest(x, y) is { } h) return h;
+        }
+        return this;
+    }
+
+    public override bool AcceptsMouse => true;
+    public override void OnMouseDown(in MouseEvent e) { if (e.Button == 0 && _scroll.Down(e.X, e.Y)) { Layout(); Invalidate(); } }
+    public override void OnMouseMove(in MouseEvent e) { if (_scroll.Dragging && IsPressed) { _scroll.Drag(e.Y); Layout(); Invalidate(); } }
+    public override void OnMouseUp(in MouseEvent e) { _scroll.Up(); }
+    public override bool OnMouseWheel(in MouseEvent e)
+    {
+        if (_scroll.Wheel(e.Wheel)) { Layout(); Invalidate(); return true; }
+        return false;
     }
 
     public override void Paint(Renderer g)
     {
-        UpdateEnabled();
-        var c = _hostCard;
-        Draw.Card(g, c);
-
-        // Hinweis unter dem Start-Knopf
-        string note; Color4 nc = Theme.TextTertiary;
-        var stats = _m.Stats;
-        string? err = _m.HostError ?? stats?.LastError;
-        if (!_m.HostAvailable) { note = _m.HostUnavailableReason ?? "Audio-Host nicht verfügbar."; nc = Theme.Orange; }
-        else if (err != null) { note = err; nc = Theme.Red; }
-        else if (!_m.HostRunning && !StartButton.Enabled && !_m.HostBusy) { _m.CanStart(out note!); nc = Theme.TextSecondary; }
-        else if (!_m.HostRunning && !_m.HostBusy && OnlyLinksBlock()) { note = "App-Links nicht startklar – ein Klick auf „Audio starten“ zeigt, warum."; nc = Theme.Orange; }
-        else note = _m.HostRunning ? "Zum Ändern von Geräten oder Samplerate zuerst stoppen." : "Audio startet nie automatisch – nur auf Klick.";
-        var nr = new RectF(c.X + 24, StartButton.Bounds.Bottom + 10, 210, c.Bottom - StartButton.Bounds.Bottom - 18);
-        g.Text(note, nr, Theme.Caption, nc, HAlign.Left, VAlign.Top, true, true);
-
-        // Mitte: Status + Kennzahlen
-        float mx = c.X + 24 + 210 + 32, mr = _rRate.X - 32;
-        var st = _m.HostState;
-        (string label, Color4 col) = st switch
+        if (_cards.Count == 0)
         {
-            HostState.Running => ("Läuft", Theme.Green),
-            HostState.Starting => ("Startet …", Theme.Orange),
-            HostState.Faulted => ("Fehler", Theme.Red),
-            _ => (_m.HostBusy ? "Stoppt …" : "Gestoppt", Theme.TextTertiary),
-        };
-        g.Text("Audio-Engine", new RectF(mx, c.Y + 18, 160, 26), Theme.Headline, Theme.Text, HAlign.Left, VAlign.Middle, false);
-        Draw.Chip(g, mx + Renderer.MeasureWidth("Audio-Engine", Theme.Headline) + 12, c.Y + 31, label, col);
-        bool have = stats != null && (st == HostState.Running || st == HostState.Faulted);
-        string V(Func<HostStats, string> f) => have ? f(stats!) : "–";
-        var tiles = new (string, string, bool)[]
+            Draw.Card(g, _listArea);
+            const string body = "Binde hier deine physischen Audio-Interfaces (ASIO oder WASAPI) ein. Pro Mehrkanal-Gerät entsteht automatisch ein eigener Geräte-Master samt Einzelkanälen.";
+            float ey = _listArea.Y + Math.Max(20, (_listArea.H - Draw.EmptyHeight(_listArea.W, body)) / 2);
+            Draw.Empty(g, _listArea, ey, Icon.Devices, "Noch kein Hardware-Gerät eingebunden", body);
+        }
+        else
         {
-            ("LATENZ", V(s => $"{s.OutputLatencyMs:0.0} ms"), false),
-            ("BLOCK", V(s => $"{s.BlockFrames}"), false),
-            ("CPU", V(s => $"{s.CpuLoad * 100:0.#} %"), false),
-            ("UNDERRUNS", V(s => s.Underruns.ToString()), have && stats!.Underruns > 0),
-            ("OVERRUNS", V(s => s.Overruns.ToString()), have && stats!.Overruns > 0),
-            ("GERÄTE", V(s => s.Devices.Count.ToString()), false),
-        };
-        float avail = Math.Max(0, mr - mx);
-        int cols = avail >= 6 * 96 ? 6 : 3;
-        float tw = cols == 0 ? 0 : avail / cols;
-        float ty = c.Y + 56;
-        for (int i = 0; i < tiles.Length; i++)
-        {
-            int col2 = i % cols, row = i / cols;
-            var r = new RectF(mx + col2 * tw, ty + row * (cols == 6 ? 0 : 44), tw - 8, 40);
-            if (cols == 6) r = new RectF(mx + col2 * tw, ty + 6, tw - 8, 52);
-            g.Text(tiles[i].Item1, new RectF(r.X, r.Y, r.W, 14), Theme.Overline, Theme.TextTertiary, HAlign.Left, VAlign.Middle, false);
-            g.Text(tiles[i].Item2, new RectF(r.X, r.Y + 15, r.W, 26), Theme.Stat, tiles[i].Item3 ? Theme.Orange : have ? Theme.Text : Theme.TextTertiary, HAlign.Left, VAlign.Middle, true);
+            g.PushClip(_listArea);
+            foreach (var c in _cards)
+                if (c.Bounds.Bottom > _listArea.Y && c.Bounds.Y < _listArea.Bottom)
+                    c.Paint(g);
+            g.PopClip();
+            _scroll.Paint(g);
         }
 
-        // Rechts: Beschriftungen der Einstellungen
-        g.Fill(new RectF(_rRate.X - 16, c.Y + 20, 1, c.H - 40), Theme.Separator);
-        g.Text("Samplerate", _rRate, Theme.Body, Theme.Text, HAlign.Left, VAlign.Middle, false);
-        g.Text("Blockgröße", _rBlock, Theme.Body, Theme.Text, HAlign.Left, VAlign.Middle, false);
-        g.Text("Exklusiv-Modus", _rExcl, Theme.Body, Theme.Text, HAlign.Left, VAlign.Middle, false);
-        PaintChildren(g);
+        foreach (var btn in new[] { _addHwBtn, _scanBtn, _toVaioBtn, _toEngineBtn })
+            if (btn.Visible) btn.Paint(g);
     }
 }

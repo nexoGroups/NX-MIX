@@ -17,4 +17,11 @@ jobs:
         run: dotnet build NxMix.slnx -c Release
       # Echtzeit-Tests (zwei Threads, keine Allokation im Audio-Pfad) brauchen freie Kerne: Testklassen nacheinander
       - name: Test
-        run: dotnet test NxMix.slnx -c Release --no-build --filter "Category!=Performance" -- RunConfiguration.DisableParallelization=true
+        run: dotnet test NxMix.slnx -c Release --no-build --filter "Category!=Performance&Category!=Hardware" -- RunConfiguration.DisableParallelization=true
+      - name: Headless UI & Invariants Self-Test
+        shell: pwsh
+        run: |
+          dotnet src/NxMix.App/bin/Release/net10.0-windows/NX-MIX.dll --selftest artifacts/selftest.log
+          $ec = $LASTEXITCODE
+          Get-Content artifacts/selftest.log
+          if ($ec -ne 0) { throw "SelfTest failed with exit code $ec" }

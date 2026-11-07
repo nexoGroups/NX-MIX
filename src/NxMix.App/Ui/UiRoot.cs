@@ -1,9 +1,10 @@
+using System.Diagnostics;
 using NxMix.App.Model;
 using NxMix.App.Pages;
+using NxMix.Ipc;
 
 namespace NxMix.App.Ui;
 
-/// <summary>Anbindung ans Fenster (oder Platzhalter fuer Screenshot/Selbsttest).</summary>
 internal interface IShell
 {
     void Minimize();
@@ -13,14 +14,11 @@ internal interface IShell
     void SetCapture(bool on);
     string? ShowSaveDialog(string title, string filter, string defaultName);
     string? ShowOpenDialog(string title, string filter);
-    WindowDto? WindowState { get; }
-    /// <summary>Windows steht auf "dunkler App-Modus".</summary>
+    WindowGeometry? WindowState { get; }
     bool SystemPrefersDark { get; }
-    /// <summary>Farbmodus hat gewechselt (Fensterrahmen anpassen).</summary>
+    bool ReduceMotion { get; }
     void ThemeChanged();
-    /// <summary>UI-Skalierung hat gewechselt (Renderziel und Layout anpassen).</summary>
     void UiScaleChanged();
-    /// <summary>Wie beim Schliessen: Projekt speichern, Audio stoppen, Programm-Umleitungen zuruecksetzen (vor einem Update-Neustart).</summary>
     void PrepareExit();
 }
 
@@ -36,8 +34,9 @@ internal sealed class NullShell : IShell
     public void SetCapture(bool on) { }
     public string? ShowSaveDialog(string title, string filter, string defaultName) => SaveResult;
     public string? ShowOpenDialog(string title, string filter) => OpenResult;
-    public WindowDto? WindowState => null;
+    public WindowGeometry? WindowState => null;
     public bool SystemPrefersDark => SystemDark;
+    public bool ReduceMotion { get; set; } = true;
     public void ThemeChanged() { }
     public void UiScaleChanged() { ScaleChanges++; }
     public int ScaleChanges;
@@ -45,9 +44,19 @@ internal sealed class NullShell : IShell
     public void PrepareExit() => ExitPrepared++;
 }
 
-/// <summary>Wurzel der Oberflaeche: Seitenleiste, Kopfleiste, Seiten, Ueberlagerungen (Stapel), Meldungen, Eingabeverteilung.</summary>
+/// <summary>Wurzel der NX-MIX Live-Konsole mit 8 Bereichen:
+/// 0=Mixer, 1=Decks, 2=Geräte, 3=Patching Matrix, 4=Virtual I/O, 5=Outputs / DSP, 6=Snapshots, 7=Engine.</summary>
 internal sealed class UiRoot : Widget
 {
+    public const int TabMixer = 0;
+    public const int TabDecks = 1;
+    public const int TabDevices = 2;
+    public const int TabMatrix = 3;
+    public const int TabVirtualIo = 4;
+    public const int TabOutputsDsp = 5;
+    public const int TabSnapshots = 6;
+    public const int TabEngine = 7;
+
     public AppModel Model { get; }
     public IShell Shell { get; }
     public UiPrefs Prefs { get; }
@@ -57,9 +66,11 @@ internal sealed class UiRoot : Widget
     public float H { get; private set; }
     public double Time { get; private set; }
     public bool Dirty { get; private set; } = true;
+    public bool ReduceMotion { get; private set; }
 
     public Widget? Hovered { get; private set; }
     public Widget? Captured { get; private set; }
+    int _captureButton, _captureClicks;
 
     public readonly Sidebar Side;
     public readonly TopBar Top;
@@ -67,7 +78,6 @@ internal sealed class UiRoot : Widget
     public readonly Page[] Pages;
     public readonly TextEditor Editor;
     readonly List<Overlay> _overlays = new();
-    /// <summary>Oberste Ueberlagerung (bekommt alle Eingaben) oder null.</summary>
     public Overlay? Modal => _overlays.Count > 0 ? _overlays[^1] : null;
     public IReadOnlyList<Overlay> Overlays => _overlays;
     public int PageIndex { get; private set; }
@@ -76,7 +86,7 @@ internal sealed class UiRoot : Widget
     string? _tipText;
     double _tipSince;
     bool _tipVisible;
-    double _saveDue = -1;
+    Motion _pageReveal, _tooltipReveal;
 
     public AppUpdater Updater { get; }
 
@@ -84,25 +94,48 @@ internal sealed class UiRoot : Widget
     {
         Model = model;
         Shell = shell;
+        ReduceMotion = shell.ReduceMotion;
         Prefs = prefs ?? new UiPrefs();
         Prefs.UiScalePercent = UiPrefs.ClampScale(Prefs.UiScalePercent);
-        Updater = new AppUpdater(updates ?? new FakeUpdateBackend { IsInstalled = false }, () => Model.Post);
+        var resolvedUpdates = updates ?? new FakeUpdateBackend { IsInstalled = false };
+        if (!Prefs.UpdateChannelChosen)
+            Prefs.UpdateChannel = resolvedUpdates.InstalledChannel;
+        Updater = new AppUpdater(resolvedUpdates, () => Model.Post, Prefs.UpdateChannel);
         Updater.Changed += OnUpdaterChanged;
         ApplyThemeFromPrefs(false);
-        Pages = new Page[] { new MixerPage(model), new MatrixPage(model), new DevicesPage(model), new SettingsPage(model) };
-        foreach (var p in Pages) Add(p);
-        Side = Add(new Sidebar { Expanded = Prefs.SidebarExpanded });
-        Top = Add(new TopBar());
+
         Notify = Add(new Toasts());
+        model.Toast = (msg, err) => Notify.Flash(msg, err);
+
+        Pages = new Page[]
+        {
+            new MixerPage(model),
+            new DecksPage(model),
+            new DevicesPage(model),
+            new MatrixPage(model),
+            new VirtualIoPage(model),
+            new OutputsDspPage(model),
+            new SnapshotsPage(model),
+            new EnginePage(model),
+        };
+        foreach (var p in Pages) Add(p);
+
+        Side = Add(new Sidebar { Expanded = Prefs.SidebarExpanded });
+        Side.AdvanceWidth();
+        Top = Add(new TopBar());
+        // Notify als letztes Kind malen, damit Toasts über den Seiten liegen
+        Children.Remove(Notify);
+        Children.Add(Notify);
+
         Editor = new TextEditor { Parent = this };
-        model.Changed += () => _saveDue = Time + 0.8;
+        model.HostChanged += () => Dirty = true;
+        model.SnapshotsChanged += () => Dirty = true;
         SwitchPage(0);
     }
 
     public new void Invalidate() => Dirty = true;
     public bool ConsumeDirty() { bool d = Dirty; Dirty = false; return d; }
 
-    // ---- Darstellung -------------------------------------------------------------------------
     public bool EffectiveDark => Prefs.Theme switch { ThemeMode.Dark => true, ThemeMode.Light => false, _ => Shell.SystemPrefersDark };
 
     void ApplyThemeFromPrefs(bool relayout)
@@ -110,12 +143,13 @@ internal sealed class UiRoot : Widget
         bool wasDark = Theme.IsDark;
         Theme.Apply(EffectiveDark, Prefs.Density);
         if (wasDark != Theme.IsDark) Shell.ThemeChanged();
-        if (relayout) Resize(W, H);
+        if (relayout) { Side.AdvanceWidth(); Resize(W, H); }
         Dirty = true;
     }
 
     public void SetThemeMode(ThemeMode mode) { Prefs.Theme = mode; Prefs.Save(); ApplyThemeFromPrefs(true); }
     public void SetDensity(Density d) { Prefs.Density = d; Prefs.Save(); ApplyThemeFromPrefs(true); }
+
     public void SetUiScale(double percent)
     {
         if (!double.IsFinite(percent)) percent = 100;
@@ -123,32 +157,57 @@ internal sealed class UiRoot : Widget
         int old = Prefs.UiScalePercent;
         if (next == old) return;
         Prefs.UiScalePercent = next;
-        Shell.UiScaleChanged();
         float ratio = (float)old / next;
         _mx *= ratio;
         _my *= ratio;
+        Shell.UiScaleChanged();
         if (Captured is Slider slider)
             slider.RebaseDrag(_mx);
         Prefs.Save();
         Dirty = true;
     }
-    public void SetSidebarExpanded(bool on) { Prefs.SidebarExpanded = on; Prefs.Save(); Side.Expanded = on; Resize(W, H); }
-    /// <summary>Windows hat den App-Modus gewechselt (nur relevant bei "System").</summary>
+
+    public void SetSidebarExpanded(bool on)
+    {
+        if (Side.Expanded == on) return;
+        Prefs.SidebarExpanded = Side.Expanded = on;
+        Prefs.Save();
+        if (Side.AdvanceWidth()) LayoutWindow(allPages: false);
+        Dirty = true;
+    }
+
+    public void RefreshMotionPreference()
+    {
+        bool reduce = Shell.ReduceMotion;
+        if (ReduceMotion == reduce) return;
+        ReduceMotion = reduce;
+        Dirty = true;
+    }
+
     public void SystemThemeChanged() { if (Prefs.Theme == ThemeMode.System) ApplyThemeFromPrefs(true); }
 
-    // ---- Layout --------------------------------------------------------------------------------
     public RectF ContentRect => new(Side.Width, Theme.TopBarH, Math.Max(0, W - Side.Width), Math.Max(0, H - Theme.TopBarH));
 
     public void Resize(float w, float h)
     {
         W = Math.Max(1, w); H = Math.Max(1, h);
         Bounds = new RectF(0, 0, W, H);
+        LayoutWindow(allPages: true);
+    }
+
+    void LayoutWindow(bool allPages)
+    {
         Side.Bounds = new RectF(0, 0, Side.Width, H);
         Top.Bounds = new RectF(Side.Width, 0, Math.Max(0, W - Side.Width), Theme.TopBarH);
         Notify.Bounds = ContentRect;
         var content = ContentRect;
-        foreach (var p in Pages) { p.Bounds = content; p.Layout(); }
+        foreach (var p in Pages)
+        {
+            p.Bounds = content;
+            if (allPages || p.Visible) p.Layout();
+        }
         foreach (var o in _overlays) { o.Bounds = Bounds; o.Layout(); }
+        if (Captured == null) RefreshHover(Ev(_mx, _my, -1, 1, false, false, false));
         Dirty = true;
     }
 
@@ -156,6 +215,14 @@ internal sealed class UiRoot : Widget
     {
         i = Math.Clamp(i, 0, Pages.Length - 1);
         if (Editor.Active) Editor.Commit();
+        if (i != PageIndex)
+        {
+            if (Captured != null && IsInside(Captured, CurrentPage)) CancelCapture();
+            // Wenn Outputs / DSP verlassen wird, Spektral-Tap freigeben (sofern kein Kanalblatt offen ist)
+            if (PageIndex == TabOutputsDsp && i != TabOutputsDsp && _overlays.Count == 0)
+                Model.SubscribeSpectrum(0, -1);
+            RevealPage();
+        }
         PageIndex = i;
         for (int k = 0; k < Pages.Length; k++) Pages[k].Visible = k == i;
         Pages[i].OnShow();
@@ -163,9 +230,21 @@ internal sealed class UiRoot : Widget
         Dirty = true;
     }
 
+    public void OpenOutputDsp(int outputChannelIndex)
+    {
+        if (Pages[TabOutputsDsp] is OutputsDspPage dsp)
+            dsp.SelectOutputChannel(outputChannelIndex);
+        SwitchPage(TabOutputsDsp);
+    }
+
     public Page CurrentPage => Pages[PageIndex];
 
-    /// <summary>Was liegt an (x, y) fuer das Fenster (ziehen, Maximieren-Knopf ...)?</summary>
+    public void RevealPage()
+    {
+        _pageReveal.Start(0.45f, 1, Time);
+        Dirty = true;
+    }
+
     public TitleHit CaptionHit(float x, float y)
     {
         if (Side.Bounds.Contains(x, y)) return Side.HitKind(x, y) == TitleHit.Drag ? TitleHit.Drag : TitleHit.None;
@@ -173,14 +252,18 @@ internal sealed class UiRoot : Widget
         return Top.HitAt(x, y).Kind;
     }
 
-    // ---- Zeichnen ------------------------------------------------------------------------------
     public override void Paint(Renderer g)
     {
         g.Clear(Theme.Window);
+        float opacity = _pageReveal.At(this, 1, Motion.Reveal);
+        g.PushClip(ContentRect);
+        if (opacity < 1) g.PushOpacity(ContentRect, opacity);
         CurrentPage.Paint(g);
+        if (opacity < 1) g.PopOpacity();
+        g.PopClip();
         Top.Paint(g);
         Side.Paint(g);
-        foreach (var o in _overlays) o.Paint(g);
+        foreach (var o in _overlays) o.PaintTransition(g);
         if (Editor.Active) Editor.Paint(g);
         Notify.Paint(g);
         PaintTooltip(g);
@@ -190,24 +273,30 @@ internal sealed class UiRoot : Widget
     {
         if (!_tipVisible || string.IsNullOrEmpty(_tipText) || Modal is PopupMenu or ModalDialog) return;
         float tw = Renderer.MeasureWidth(_tipText, Theme.Callout);
-        const float maxW = 360;
+        float maxW = Math.Min(380, W - 8);
+        if (maxW <= 20) return;
         bool wrap = tw + 20 > maxW;
         float w = Math.Min(tw + 20, maxW), h = 28;
         if (wrap) h = Renderer.TextHeight(_tipText, Theme.Callout, w - 20) + 14;
         float x = Math.Clamp(_mx + 14, 4, W - w - 4);
+        h = Math.Min(h, Math.Max(0, H - 8));
         float y = _my + 22 + h > H - 4 ? _my - h - 8 : _my + 22;
+        y = Math.Clamp(y, 4, Math.Max(4, H - h - 4));
         var r = new RectF(x, y, w, h);
+        float opacity = _tooltipReveal.At(this, 1, Motion.Feedback);
+        if (opacity < 1) g.PushOpacity(Bounds, opacity);
         g.Shadow(r, 8, 8, 1f, 2);
         g.FillRound(r, 8, Theme.IsDark ? Theme.Rgb(0x34363C) : Theme.Rgb(0x2A2C31));
         var tc = Theme.Rgb(0xF2F3F5);
         if (wrap) g.Text(_tipText, r.Deflate(10, 7), Theme.Callout, tc, HAlign.Left, VAlign.Top, false, true);
         else g.Text(_tipText, r.Deflate(10, 0), Theme.Callout, tc);
+        if (opacity < 1) g.PopOpacity();
     }
 
-    // ---- Takt ----------------------------------------------------------------------------------
     public void Tick(float dt)
     {
         Time += dt;
+        if (Side.AdvanceWidth()) LayoutWindow(allPages: false);
         if (Model.Tick(dt)) Dirty = true;
         CurrentPage.Tick(dt);
         if (Notify.Tick(dt)) Dirty = true;
@@ -216,26 +305,26 @@ internal sealed class UiRoot : Widget
 
         if (!_tipVisible && _tipText != null && Time - _tipSince > Theme.TooltipDelaySeconds && Captured == null)
         {
-            _tipVisible = true; Dirty = true;
+            _tipVisible = true;
+            _tooltipReveal.Start(0.2f, 1, Time);
+            Dirty = true;
         }
-
-        if (_saveDue > 0 && Time >= _saveDue) { _saveDue = -1; SaveNow(); }
     }
 
-    /// <summary>Schreibt das Projekt sofort (beim Beenden und nach der Entprellung).</summary>
+    /// <summary>Speichert lokale UI-Einstellungen und Deck-Definitionen beim Schließen des Fensters.</summary>
     public void SaveNow()
     {
-        _saveDue = -1;
-        if (!ProjectStore.Enabled) return;
-        ProjectStore.TrySaveAuto(ProjectStore.ToDto(Model, Shell.WindowState));
+        Prefs.UpdateWindow(Shell.WindowState);
+        Prefs.Save();
+        UiDeckStore.Save(Model.Decks);
     }
 
-    // ---- Maus ----------------------------------------------------------------------------------
     static MouseEvent Ev(float x, float y, int button, int clicks, bool ctrl, bool shift, bool alt, float wheel = 0) =>
         new() { X = x, Y = y, Button = button, Clicks = clicks, Ctrl = ctrl, Shift = shift, Alt = alt, Wheel = wheel };
 
     public override Widget? HitTest(float x, float y)
     {
+        if (!Bounds.Contains(x, y)) return null;
         if (Editor.Active && Editor.Bounds.Contains(x, y)) return Editor;
         if (Modal != null) return Modal.HitTest(x, y) ?? Modal;
         if (Side.Bounds.Contains(x, y)) return Side;
@@ -250,6 +339,7 @@ internal sealed class UiRoot : Widget
         Hovered = w;
         Hovered?.OnMouseEnter();
         _tipVisible = false;
+        _tipText = null;
         _tipSince = Time;
         Dirty = true;
     }
@@ -269,20 +359,25 @@ internal sealed class UiRoot : Widget
             if (Captured.Root != null) Captured.OnMouseMove(e);
             return;
         }
-        var hit = HitTest(x, y);
+        RefreshHover(e);
+    }
+
+    void RefreshHover(in MouseEvent e)
+    {
+        var hit = HitTest(e.X, e.Y);
         SetHover(hit);
-        UpdateTip();
         hit?.OnMouseMove(e);
-        if (_tipVisible && Hovered != null && _tipText != Hovered.TooltipAt(x, y)) { _tipVisible = false; Dirty = true; }
+        UpdateTip();
     }
 
     public void MouseLeave()
     {
-        if (Captured == null) { SetHover(null); UpdateTip(); }
+        if (Captured == null) { _mx = _my = -1; SetHover(null); }
     }
 
     public void MouseDown(float x, float y, int button, int clicks, bool ctrl, bool shift, bool alt)
     {
+        if (Captured != null) return;
         _mx = x; _my = y;
         var e = Ev(x, y, button, clicks, ctrl, shift, alt);
         if (Editor.Active && !Editor.Bounds.Contains(x, y)) Editor.Commit();
@@ -292,10 +387,11 @@ internal sealed class UiRoot : Widget
         if (hit != null)
         {
             Captured = hit;
+            _captureButton = button;
+            _captureClicks = clicks;
             Shell.SetCapture(true);
             hit.OnMouseDown(e);
-            // Hat der Druck eine neue Ebene geoeffnet oder die eigene geschlossen, gehoert der Rest des Klicks nicht mehr dem Element
-            if (hit.Root == null || (Modal != null && hit != Editor && !IsInside(hit, Modal))) { Captured = null; Shell.SetCapture(false); }
+            if (Captured == hit && (hit.Root == null || (Modal != null && hit != Editor && !IsInside(hit, Modal)))) CancelCapture();
         }
         Dirty = true;
     }
@@ -308,23 +404,34 @@ internal sealed class UiRoot : Widget
 
     public void MouseUp(float x, float y, int button, bool ctrl, bool shift, bool alt)
     {
+        if (Captured == null || button != _captureButton) return;
         _mx = x; _my = y;
-        var e = Ev(x, y, button, 1, ctrl, shift, alt);
+        var e = Ev(x, y, button, _captureClicks, ctrl, shift, alt);
         var c = Captured;
         if (c != null)
         {
             Captured = null;
             Shell.SetCapture(false);
             if (c.Root != null) c.OnMouseUp(e);
-            SetHover(HitTest(x, y));
-            UpdateTip();
+            RefreshHover(e);
         }
         Dirty = true;
     }
 
     public void CaptureLost()
     {
-        if (Captured != null) { var c = Captured; Captured = null; c.OnMouseUp(Ev(_mx, _my, 0, 1, false, false, false)); }
+        if (Captured is not { } captured) return;
+        Captured = null;
+        if (captured.Root == this) captured.OnMouseUp(Ev(_mx, _my, -1, 1, false, false, false));
+        SetHover(null);
+        Dirty = true;
+    }
+
+    void CancelCapture()
+    {
+        if (Captured == null) return;
+        CaptureLost();
+        Shell.SetCapture(false);
     }
 
     public void MouseWheel(float x, float y, float notches, bool ctrl, bool shift, bool alt)
@@ -338,18 +445,11 @@ internal sealed class UiRoot : Widget
             if (w is Overlay) break;
         }
         _tipVisible = false; _tipSince = Time;
+        RefreshHover(e);
     }
 
-    public CursorKind CurrentCursor
-    {
-        get
-        {
-            var w = Captured ?? Hovered;
-            return w?.CursorAt(_mx, _my) ?? CursorKind.Arrow;
-        }
-    }
+    public CursorKind CurrentCursor => (Captured ?? Hovered)?.CursorAt(_mx, _my) ?? CursorKind.Arrow;
 
-    // ---- Tastatur ------------------------------------------------------------------------------
     public bool KeyDown(int vk, bool ctrl, bool shift, bool alt)
     {
         if (Editor.Active) { Editor.OnKeyDown(vk, ctrl, shift); Dirty = true; return true; }
@@ -358,10 +458,15 @@ internal sealed class UiRoot : Widget
         {
             switch (vk)
             {
-                case 'N': NewProjectWithConfirm(); return true;
-                case 'E': ExportProject(); return true;
-                case 'O': ImportProject(); return true;
-                case >= '1' and <= '4': SwitchPage(vk - '1'); return true;
+                case >= '1' and <= '8':
+                    SwitchPage(vk - '1');
+                    return true;
+                case 'M':
+                    Model.SetPanicMute(!Model.PanicMuted);
+                    return true;
+                case 'S':
+                    QuickSaveSnapshot();
+                    return true;
             }
         }
         return false;
@@ -373,45 +478,43 @@ internal sealed class UiRoot : Widget
         if (Modal != null) { Modal.OnChar(c); Dirty = true; }
     }
 
-    // ---- Ueberlagerungen -----------------------------------------------------------------------
     public void ShowOverlay(Overlay o)
     {
         if (Editor.Active) Editor.Commit();
+        CancelCapture();
         _overlays.Add(o);
         o.Bounds = Bounds;
         o.Parent = this;
+        o.BeginReveal(Time);
         o.Layout();
-        Captured = null;
-        Shell.SetCapture(false);
         _tipText = null; _tipVisible = false;
         SetHover(null);
         Dirty = true;
     }
 
-    /// <summary>Schliesst o (und alles, was darueber liegt).</summary>
     public void CloseOverlay(Overlay? o)
     {
         if (o == null) return;
         int idx = _overlays.IndexOf(o);
         if (idx < 0) return;
-        if (Editor.Active && IsInside(Editor, o)) Editor.Cancel();
         for (int i = _overlays.Count - 1; i >= idx; i--)
         {
             var ov = _overlays[i];
+            if (Captured != null && IsInside(Captured, ov)) CancelCapture();
+            if (IsInside(Editor, ov)) { Editor.Cancel(); Editor.Parent = this; }
             _overlays.RemoveAt(i);
             ov.Parent = null;
             ov.OnClosed();
         }
-        if (Captured != null && Captured.Root == null) { Captured = null; Shell.SetCapture(false); }
         Dirty = true;
-        SetHover(HitTest(_mx, _my));
+        RefreshHover(Ev(_mx, _my, -1, 1, false, false, false));
     }
 
-    /// <summary>Bearbeitet einen Text direkt an Ort und Stelle (z. B. Kanalname, Zahlenwert).</summary>
     public void BeginEdit(RectF bounds, string text, TextStyle style, Action<string> commit, int maxLen = 40,
         Func<char, bool>? filter = null, HAlign align = HAlign.Left)
     {
         Editor.Begin(bounds, text, style, commit, maxLen, filter, align);
+        Editor.Parent = (Widget?)Modal ?? this;
         Dirty = true;
     }
 
@@ -421,65 +524,154 @@ internal sealed class UiRoot : Widget
             danger ? Icon.Warn : Icon.None);
     }
 
-    // ---- Projekt-Aktionen ----------------------------------------------------------------------
-    public void NewProjectWithConfirm()
+    // ---- Snapshot-Schnellwahl in der TopBar ----------------------------------------------------
+    public void QuickSaveSnapshot()
     {
-        Confirm("Neues leeres Projekt?", "Alle Kanäle, Einstellungen und Geräte-Zuordnungen werden verworfen. Das aktuelle Projekt ist danach nur noch über einen vorherigen Export wiederherstellbar.",
-            "Neu beginnen", () => { Model.NewProject(); Notify.Flash("Neues leeres Projekt"); }, danger: true);
+        string name = $"Szene {Model.Snapshots.Count + 1}";
+        Model.SaveSnapshot(null, name, "Schnell gespeichert aus Live-Mix", "#3B82F6", 150.0, SnapshotScopeFlags.All,
+            s => Notify.Flash($"Snapshot „{s.Name}“ gespeichert."));
     }
 
-    public void ExportProject()
+    public void ShowQuickSnapshotMenu(RectF anchor)
     {
-        var path = Shell.ShowSaveDialog("Projekt exportieren", "NX-MIX-Projekt (*.json)\0*.json\0\0", "NX-MIX-Projekt.json");
-        if (path == null) return;
-        try
+        var items = new List<MenuItem>
         {
-            ProjectStore.WriteFile(path, ProjectStore.ToDto(Model, Shell.WindowState));
-            Notify.Flash("Projekt exportiert: " + Path.GetFileName(path));
-        }
-        catch (Exception ex) { Notify.Flash("Export fehlgeschlagen: " + ex.Message, true); }
-    }
-
-    public void ImportProject()
-    {
-        var path = Shell.ShowOpenDialog("Projekt importieren", "NX-MIX-Projekt (*.json)\0*.json\0\0");
-        if (path == null) return;
-        try
+            new("Live-Mix als neuen Snapshot speichern", "Strg+S", QuickSaveSnapshot) { Icon = Icon.Plus },
+            new("Snapshots & Recall-Safe verwalten …", "Strg+7", () => SwitchPage(TabSnapshots)) { Icon = Icon.Snapshots },
+        };
+        if (Model.Snapshots.Count > 0)
         {
-            var dto = ProjectStore.ReadFile(path);
-            var (s, b) = ProjectStore.FromDto(dto);
-            Confirm("Projekt importieren?", $"Das aktuelle Projekt wird durch „{Path.GetFileName(path)}“ ersetzt ({Fmt.Inputs(s.Inputs.Count)}, {Fmt.Outputs(s.Outputs.Count)}). Gain-Sperren der Datei werden übernommen – bitte danach prüfen.",
-                "Importieren", () =>
+            items.Add(MenuItem.Sep);
+            items.Add(MenuItem.Header("Schnellabruf (mit Standard-Fade)"));
+            foreach (var s in Model.Snapshots)
+            {
+                var snap = s;
+                items.Add(new MenuItem(
+                    snap.Name,
+                    $"{snap.DefaultFadeMs:0} ms",
+                    () =>
+                    {
+                        Model.RecallSnapshot(snap.Id, snap.DefaultScope, snap.DefaultFadeMs);
+                        Notify.Flash($"Snapshot „{snap.Name}“ abgerufen ({snap.DefaultFadeMs:0} ms Fade).");
+                    })
                 {
-                    Model.LoadProject(s, b, dto.BlockFrames, dto.Exclusive, ProjectStore.AppLinksFromDto(dto), dto.Layout);
-                    Notify.Flash("Projekt importiert: " + Path.GetFileName(path));
+                    Checked = Model.ActiveSnapshotId == snap.Id,
                 });
+            }
         }
-        catch (Exception ex) { Notify.Flash("Import fehlgeschlagen: " + ex.Message, true); }
+        PopupMenu.Show(this, anchor, items, 270);
     }
 
-    // ---- Updates ------------------------------------------------------------------------------
+    // ---- Updates & Release-Kanäle -------------------------------------------------------------
     UpdateStage _lastStage;
 
-    /// <summary>Beim Start im Hintergrund suchen, wenn in den Einstellungen erlaubt.</summary>
     public void StartUpdateCheck() { if (Prefs.AutoUpdateCheck) Updater.Check(); }
 
-    public void SetAutoUpdateCheck(bool on) { Prefs.AutoUpdateCheck = on; Prefs.Save(); Dirty = true; }
+    public void SetAutoUpdateCheck(bool on)
+    {
+        Prefs.AutoUpdateCheck = on;
+        Prefs.Save();
+        Dirty = true;
+    }
+
+    public void SetUpdateChannel(ReleaseChannel channel, bool autoCheckNow = true)
+    {
+        if (Prefs.UpdateChannel == channel && Prefs.UpdateChannelChosen && Updater.SelectedChannel == channel)
+            return;
+
+        Prefs.UpdateChannel = channel;
+        Prefs.UpdateChannelChosen = true;
+        Prefs.Save();
+        Updater.SetChannel(channel, autoCheckNow);
+
+        if (channel == ReleaseChannel.Stable && Updater.IsCurrentBetaBuild)
+            Notify.Flash("Update-Kanal: Stable gewählt. Beim Wechsel auf die aktuelle Stable-Version wird vorab automatisch ein Konfigurations-Backup angelegt.");
+        else if (channel == ReleaseChannel.Beta)
+            Notify.Flash("Update-Kanal: Beta gewählt (Vorabversionen & neue Funktionen).");
+        else
+            Notify.Flash("Update-Kanal: Stable gewählt (offizielle Live-Versionen).");
+
+        Dirty = true;
+    }
+
+    public void OpenEngineUpdatesSection()
+    {
+        SwitchPage(TabEngine);
+        if (Pages[TabEngine] is EnginePage ep)
+            ep.SelectLeftSection(2);
+    }
+
+    public void OpenChangelog()
+    {
+        var offer = Updater.Offer;
+        string targetVer = offer?.Version ?? Updater.CurrentVersion;
+        string url = offer != null
+            ? $"{VelopackUpdateBackend.ReleasesPageUrl}/tag/v{offer.Version}"
+            : VelopackUpdateBackend.ReleasesPageUrl;
+
+        string notes = PlainNotes(offer?.Notes, 1100);
+        if (notes.Length > 0)
+        {
+            string chanLabel = offer?.IsPrerelease == true ? "Beta-Prerelease" : "Stable-Release";
+            ModalDialog.Show(
+                this,
+                $"Changelog – NX-MIX v{targetVer} ({chanLabel})",
+                notes,
+                new[] { "Schließen", "Auf GitHub öffnen" },
+                0,
+                -1,
+                i => { if (i == 1) OpenBrowserUrl(url); },
+                Icon.Engine);
+        }
+        else
+        {
+            ModalDialog.Show(
+                this,
+                $"Versionshinweise – NX-MIX v{Updater.CurrentVersion}",
+                $"Aktuell installiert: v{Updater.CurrentVersion} ({ReleaseChannelInfo.DisplayName(Updater.InstalledChannel)}-Kanal).\n\n" +
+                "Vollständige Release Notes für alle Stable- und Beta-Versionen sind auf der GitHub-Releases-Seite verfügbar.",
+                new[] { "Schließen", "GitHub Releases öffnen" },
+                1,
+                -1,
+                i => { if (i == 1) OpenBrowserUrl(url); },
+                Icon.Engine);
+        }
+    }
+
+    static void OpenBrowserUrl(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Program.LogCrash(ex);
+        }
+    }
 
     void OnUpdaterChanged()
     {
         var st = Updater.Stage;
         if (st != _lastStage)
         {
-            if (st == UpdateStage.Ready) Notify.Flash($"Update {Updater.Offer?.Version} ist geladen – oben auf „Update bereit“ klicken.");
-            else if (st == UpdateStage.Failed && _lastStage == UpdateStage.Downloading) Notify.Flash("Update konnte nicht geladen werden: " + Updater.Error, true);
+            if (st == UpdateStage.Ready)
+            {
+                string kind = Updater.Offer?.IsDowngrade == true ? "Kanalwechsel auf Stable" : "Update";
+                Notify.Flash($"{kind} v{Updater.Offer?.Version} geprüft & bereit – Installation wartet auf deine Freigabe.");
+            }
+            else if (st == UpdateStage.Failed && _lastStage == UpdateStage.Downloading)
+            {
+                Notify.Flash("Update-Download fehlgeschlagen: " + Updater.Error, true);
+            }
             _lastStage = st;
         }
+        if (Pages[TabEngine] is EnginePage ep && PageIndex == TabEngine)
+            ep.Layout();
         Top.Layout();
         Dirty = true;
     }
 
-    /// <summary>Was ein Klick auf die Update-Pille / "Update installieren" tut - abhaengig vom Stand.</summary>
     public void ShowUpdate()
     {
         var u = Updater;
@@ -487,34 +679,37 @@ internal sealed class UiRoot : Widget
         {
             case UpdateStage.Available:
                 {
-                    string notes = PlainNotes(u.Offer?.Notes);
-                    ModalDialog.Show(this, $"NX-MIX {u.Offer!.Version} ist verfügbar",
-                        $"Installiert ist {u.CurrentVersion}. Das Update wird im Hintergrund geladen; installiert wird erst, wenn du es sagst."
-                        + (notes.Length > 0 ? "\n\n" + notes : ""),
-                        new[] { "Später", "Herunterladen" }, 1, -1, i => { if (i == 1) u.Download(); }, Icon.Import);
+                    var offer = u.Offer!;
+                    string notes = PlainNotes(offer.Notes, 700);
+                    string title = offer.IsDowngrade
+                        ? $"Kanalwechsel auf Stable v{offer.Version}"
+                        : $"NX-MIX v{offer.Version} ({ReleaseChannelInfo.DisplayName(offer.SourceChannel)}) verfügbar";
+                    string body = offer.IsDowngrade
+                        ? $"Installiert ist Beta v{u.CurrentVersion}. Für den Wechsel auf den offiziellen Stable-Kanal wird v{offer.Version} geladen; vor der Installation sichert NX-MIX automatisch alle Einstellungen, Decks und Snapshots."
+                        : $"Installiert ist v{u.CurrentVersion}. Das Paket wird im Hintergrund geladen und per SHA256 geprüft; der laufende Audiobetrieb bleibt unberührt.";
+                    if (notes.Length > 0) body += "\n\n" + notes;
+
+                    ModalDialog.Show(this, title, body,
+                        new[] { "Später", "Im Engine-Tab öffnen", "Herunterladen" }, 2, -1, i =>
+                        {
+                            if (i == 1) OpenEngineUpdatesSection();
+                            else if (i == 2) u.Download();
+                        }, Icon.Import);
                     break;
                 }
             case UpdateStage.Downloading:
-                Notify.Flash($"Update {u.Offer?.Version} wird geladen … {u.Progress} %");
+                Notify.Flash($"Paket v{u.Offer?.Version} wird geladen … {u.Progress} %");
                 break;
             case UpdateStage.Ready:
-                {
-                    if (u.InstallOnExitPending) { Notify.Flash($"Update {u.Offer?.Version} wird beim Beenden installiert."); break; }
-                    bool live = Model.HostRunning;
-                    string msg = $"Version {u.Offer!.Version} ist geladen. „Jetzt neu starten“ speichert das Projekt, stoppt Audio, setzt alle Programm-Umleitungen zurück und startet die neue Version."
-                        + (live ? "\n\nAchtung: Audio läuft gerade – ein Neustart unterbricht es. Im laufenden Betrieb besser „Beim Beenden installieren“ wählen." : "");
-                    ModalDialog.Show(this, "Update bereit", msg, new[] { "Später", "Beim Beenden installieren", "Jetzt neu starten" }, live ? 1 : 2, -1, i =>
-                    {
-                        if (i == 1) { u.InstallOnExit(); Notify.Flash($"Update {u.Offer?.Version} wird beim Beenden installiert."); }
-                        else if (i == 2) RestartForUpdate();
-                    }, Icon.Import);
-                    break;
-                }
+                ConfirmAndInstallUpdate();
+                break;
             case UpdateStage.Failed:
-                Notify.Flash("Update-Suche fehlgeschlagen: " + u.Error, true);
+                OpenEngineUpdatesSection();
+                Notify.Flash("Update-Fehler: " + u.Error, true);
                 break;
             case UpdateStage.NotInstalled:
-                Notify.Flash("Updates gibt es nur für die installierte Version (Setup.exe von GitHub).");
+                OpenEngineUpdatesSection();
+                Notify.Flash("Automatische Updates erfordern eine Setup-Installation (NX-MIX-Setup.exe oder NX-MIX-Beta-Setup.exe).");
                 break;
             default:
                 u.Check();
@@ -522,15 +717,61 @@ internal sealed class UiRoot : Widget
         }
     }
 
+    public void ConfirmAndInstallUpdate()
+    {
+        var u = Updater;
+        if (u.Stage != UpdateStage.Ready || u.Offer == null) return;
+        if (u.InstallOnExitPending)
+        {
+            Notify.Flash($"Version v{u.Offer.Version} ist bereits für die Installation beim Beenden vorgemerkt.");
+            return;
+        }
+
+        bool live = Model.HostRunning;
+        bool downgrade = u.Offer.IsDowngrade;
+        string title = downgrade
+            ? $"Auf Stable v{u.Offer.Version} wechseln"
+            : $"NX-MIX v{u.Offer.Version} installieren";
+
+        string msg = downgrade
+            ? $"Kanalwechsel von v{u.CurrentVersion} auf Stable v{u.Offer.Version}: Vor dem Austausch legt NX-MIX automatisch ein vollständiges Backup aller Routings, DSP-Filter, Decks und Snapshots an."
+            : $"Paket v{u.Offer.Version} wurde heruntergeladen und per Prüfsumme verifiziert. Deine Einstellungen, Decks und Snapshots bleiben vollständig erhalten.";
+
+        msg += live
+            ? "\n\nACHTUNG – Aktiver Live-Audiobetrieb erkannt!\nEin sofortiger Update-Neustart stoppt kontrolliert NxMix.Daemon.exe und unterbricht Audio-Streams für wenige Sekunden. Empfehlung im Live-Betrieb: „Beim Beenden installieren“."
+            : "\n\n„Jetzt neu starten“ speichert alle Einstellungen, beendet kontrolliert die Hintergrund-Engine (NxMix.Daemon.exe) und startet die aktualisierte Version.";
+
+        ModalDialog.Show(
+            this,
+            title,
+            msg,
+            new[] { "Später", "Beim Beenden installieren", "Jetzt kontrolliert neu starten" },
+            live ? 1 : 2,
+            -1,
+            i =>
+            {
+                if (i == 1)
+                {
+                    u.InstallOnExit(UiPrefs.DataDirectory);
+                    Notify.Flash($"v{u.Offer.Version} wird nach dem Schließen kontrolliert installiert (Backup erstellt).");
+                }
+                else if (i == 2)
+                {
+                    RestartForUpdate();
+                }
+            },
+            Icon.Import);
+    }
+
     void RestartForUpdate()
     {
         SaveNow();
-        Shell.PrepareExit();
-        Updater.InstallNow();
+        Updater.CreatePreUpdateBackup(UiPrefs.DataDirectory);
+        Model.ShutdownDaemonExplicitly(5000);
+        Updater.InstallNow(null);
     }
 
-    /// <summary>Release-Notizen (Markdown) als schlichter Text, gekuerzt.</summary>
-    static string PlainNotes(string? md)
+    static string PlainNotes(string? md, int maxChars = 700)
     {
         if (string.IsNullOrWhiteSpace(md)) return "";
         var lines = md.Replace("\r", "").Split('\n')
@@ -538,18 +779,6 @@ internal sealed class UiRoot : Widget
             .Select(l => l.StartsWith("- ") ? "• " + l[2..] : l);
         var text = string.Join("\n", lines).Trim();
         while (text.Contains("\n\n\n")) text = text.Replace("\n\n\n", "\n\n");
-        return text.Length > 700 ? text[..700].TrimEnd() + " …" : text;
-    }
-
-    public void ShowProjectMenu(RectF anchor)
-    {
-        var items = new List<MenuItem>
-        {
-            new("Neues leeres Projekt", "Strg+N", NewProjectWithConfirm) { Icon = Icon.Document, Danger = true },
-            MenuItem.Sep,
-            new("Projekt exportieren …", "Strg+E", ExportProject) { Icon = Icon.Export },
-            new("Projekt importieren …", "Strg+O", ImportProject) { Icon = Icon.Import },
-        };
-        PopupMenu.Show(this, anchor, items, 240);
+        return text.Length > maxChars ? text[..maxChars].TrimEnd() + " …" : text;
     }
 }

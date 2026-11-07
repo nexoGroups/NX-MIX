@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>NxMix.Daemon</AssemblyName>
+    <RootNamespace>NxMix.Daemon</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>..\NxMix.App\Assets\app.ico</ApplicationIcon>
+    <TieredCompilation>false</TieredCompilation>
+    <TieredPGO>false</TieredPGO>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NxMix.Engine\NxMix.Engine.csproj" />
+    <ProjectReference Include="..\NxMix.Audio\NxMix.Audio.csproj" />
+    <ProjectReference Include="..\NxMix.Ipc\NxMix.Ipc.csproj" />
+  </ItemGroup>
+</Project>

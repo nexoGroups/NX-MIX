@@ -1,35 +1,59 @@
+using System.Diagnostics;
 using System.Globalization;
-using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using NxMix.App.Model;
 using NxMix.App.Native;
 using NxMix.App.Pages;
 using NxMix.App.Ui;
-using NxMix.Audio;
+using NxMix.Daemon;
 using NxMix.Engine;
+using NxMix.Ipc;
 using Vortice.Direct2D1;
 using Vortice.DXGI;
-using Vortice.Mathematics;
 using Vortice.WIC;
 using Velopack;
 
 namespace NxMix.App;
 
+internal sealed class HeadlessSession : IDisposable
+{
+    public DaemonEngineController Controller { get; }
+    public AppModel Model { get; }
+    public string TempDirectory { get; }
+
+    public HeadlessSession(DaemonEngineController controller, AppModel model, string tempDirectory)
+    {
+        Controller = controller;
+        Model = model;
+        TempDirectory = tempDirectory;
+    }
+
+    public void Dispose()
+    {
+        try { Controller.Dispose(); } catch { }
+        try
+        {
+            if (Directory.Exists(TempDirectory))
+                Directory.Delete(TempDirectory, recursive: true);
+        }
+        catch { }
+    }
+}
+
 internal static class Program
 {
     sealed class Options
     {
-        public string? Shot, SelfTest, DataDir, Show, UpdateTest;
+        public string? Shot, SelfTest, DataDir, Show, UpdateTest, Channel;
         public string Page = "mixer";
         public int W = 1600, H = 900;
         public float Scale = 1f;
         public int UiScale = 100;
-        public bool Demo, HostRunning, ForceDemoEngine;
-        /// <summary>--restorer unsupported: Screenshot mit "Windows unterstuetzt es nicht".</summary>
+        public bool Demo, HostRunning;
         public string? Restorer;
-        /// <summary>Screenshots: --theme light|dark, --touch, --expanded (Seitenleiste ausgeklappt).</summary>
         public string Theme = "dark";
         public bool Touch, Expanded;
-        /// <summary>Screenshots: --update available|ready (Update-Pille mit Attrappe).</summary>
         public string? Update;
         public double T = 4.2;
         public int ExitAfterMs;
@@ -60,9 +84,10 @@ internal static class Program
                 case "--show": o.Show = Next(ref i); break;
                 case "--selftest": o.SelfTest = Next(ref i); break;
                 case "--update-check-test": o.UpdateTest = Next(ref i); break;
+                case "--channel": o.Channel = Next(ref i); break;
                 case "--data-dir": o.DataDir = Next(ref i); break;
                 case "--exit-after": int.TryParse(Next(ref i), out o.ExitAfterMs); break;
-                case "--engine": o.ForceDemoEngine = string.Equals(Next(ref i), "demo", StringComparison.OrdinalIgnoreCase); break;
+                case "--engine": _ = Next(ref i); break;
                 case "--restorer": o.Restorer = Next(ref i); break;
                 case "--theme": o.Theme = (Next(ref i) ?? "dark").ToLowerInvariant(); break;
                 case "--touch": o.Touch = true; break;
@@ -78,13 +103,16 @@ internal static class Program
     {
         try
         {
-            // Muss zuerst laufen: Installer und Updater starten die Exe mit eigenen Argumenten, die hier behandelt werden.
-            VelopackApp.Build().Run();
+            VelopackApp.Build()
+                .OnBeforeUpdateFastCallback(_ => StopDaemonForInstaller(removeAutostart: false))
+                .OnBeforeUninstallFastCallback(_ => StopDaemonForInstaller(removeAutostart: true))
+                .Run();
+
             var o = Parse(args);
-            if (o.DataDir != null) ProjectStore.Directory = o.DataDir;
+            if (o.DataDir != null) UiPrefs.DataDirectory = o.DataDir;
             if (o.Shot != null) return RunShot(o);
             if (o.SelfTest != null) return SelfTest.Run(o.SelfTest);
-            if (o.UpdateTest != null) return RunUpdateTest(o.UpdateTest);
+            if (o.UpdateTest != null) return RunUpdateTest(o.UpdateTest, o.Channel);
             return RunWindow(o);
         }
         catch (Exception ex)
@@ -94,24 +122,62 @@ internal static class Program
         }
     }
 
-    // ---- Update-Pruefung ohne Fenster ----------------------------------------------------------
-    /// <summary>
-    /// Nur fuer den Test eines Releases: sucht in NXMIX_UPDATE_SOURCE (Ordner mit Velopack-Paketen) nach einer neueren Version,
-    /// laedt sie ueber denselben Weg wie die Oberflaeche und laesst sie nach dem Beenden installieren (ohne Neustart,
-    /// beruehrt keine Projektdaten). Schreibt das Ergebnis in outFile. Ohne die Variable passiert nichts.
-    /// </summary>
-    static int RunUpdateTest(string outFile)
+    static void StopDaemonForInstaller(bool removeAutostart)
     {
-        var log = new System.Text.StringBuilder();
+        try
+        {
+            if (removeAutostart)
+                NxMix.Daemon.Persistence.SystemConfigStore.RemoveWindowsLogonAutostart();
+
+            // 1. Sauberes IPC-Shutdown an laufenden Standard-Daemon senden (hebt App-Loopbacks auf & sichert Mix)
+            try
+            {
+                using var client = new NamedPipeBackendClient();
+                client.ConnectAsync(TimeSpan.FromMilliseconds(900)).GetAwaiter().GetResult();
+                if (client.IsConnected)
+                    client.RequestDaemonShutdownAsync().GetAwaiter().GetResult();
+            }
+            catch { }
+
+            // 2. Warten bis alle NxMix.Daemon-Prozesse im selben Installationsstamm beendet sind
+            string installRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
+            var sw = Stopwatch.StartNew();
+            foreach (var proc in Process.GetProcessesByName("NxMix.Daemon"))
+            {
+                using (proc)
+                {
+                    try
+                    {
+                        string? exePath = proc.MainModule?.FileName;
+                        if (exePath == null || !exePath.StartsWith(installRoot, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        int remain = Math.Max(250, 4000 - (int)sw.ElapsedMilliseconds);
+                        if (!proc.WaitForExit(remain))
+                            proc.Kill();
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+    }
+
+    static int RunUpdateTest(string outFile, string? channelArg)
+    {
+        var log = new StringBuilder();
         int code = 1;
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(VelopackUpdateBackend.SourceOverrideVariable)))
             log.AppendLine($"ABBRUCH: {VelopackUpdateBackend.SourceOverrideVariable} ist nicht gesetzt");
         else
         {
-            var updater = new AppUpdater(new VelopackUpdateBackend(), () => a => a()) { RunInline = true };
-            log.AppendLine($"Installiert: {updater.IsInstalled}  Version: {updater.CurrentVersion}");
+            var initialChannel = string.Equals(channelArg, "beta", StringComparison.OrdinalIgnoreCase)
+                ? ReleaseChannel.Beta
+                : ReleaseChannel.Stable;
+            var updater = new AppUpdater(new VelopackUpdateBackend(), () => a => a(), initialChannel) { RunInline = true };
+            log.AppendLine($"Installiert: {updater.IsInstalled}  Version: {updater.CurrentVersion}  Kanal: {updater.SelectedChannel}");
             updater.Check();
-            log.AppendLine($"Suche: {updater.Stage} {updater.Offer?.Version} {updater.Error}");
+            log.AppendLine($"Suche: {updater.Stage} {updater.Offer?.Version} (Downgrade={updater.Offer?.IsDowngrade}) {updater.Error}");
             if (updater.Stage == UpdateStage.Available)
             {
                 updater.Download();
@@ -125,56 +191,173 @@ internal static class Program
         return code;
     }
 
-    // ---- normaler Start ------------------------------------------------------------------------
-    static int RunWindow(Options o)
+    static string? ComputeCustomKey(string? dataDir)
     {
-        // Sicherheit zuerst: Umleitungen, die ein frueherer Lauf (auch nach einem Absturz) hinterlassen hat, zuruecksetzen
-        AudioFactory.TryRestoreAll();
-        if (o.ForceDemoEngine) EngineFactory.ForceDemo = true;
-        var dto = ProjectStore.TryLoadAuto();
-        MixerSettings settings = AppModel.EmptySettings();
-        List<DeviceBinding> bindings = new();
-        if (dto != null)
-        {
-            try { (settings, bindings) = ProjectStore.FromDto(dto); }
-            catch { settings = AppModel.EmptySettings(); bindings = new(); dto = null; }
-        }
-        var model = new AppModel(settings, bindings, EngineFactory.Create, AudioFactory.CreateCatalog, AudioFactory.CreateHost,
-            AudioFactory.HostAvailable, AudioFactory.HostUnavailableReason);
-        if (dto != null)
-        {
-            model.InitOptions(dto.BlockFrames, dto.Exclusive);
-            model.InitAppLinks(ProjectStore.AppLinksFromDto(dto)); // fehlendes Feld in alten Dateien = keine Links
-            model.InitLayout(dto.Layout);
-        }
-        var win = new MainWindow(model, dto?.Window, o.ExitAfterMs, UiPrefs.Load(), new VelopackUpdateBackend());
-        return win.Run();
+        if (string.IsNullOrWhiteSpace(dataDir)) return null;
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(dataDir).ToUpperInvariant()));
+        return "dir-" + Convert.ToHexString(hash)[..12].ToLowerInvariant();
     }
 
-    // ---- Screenshot ----------------------------------------------------------------------------
+    static string QuoteArg(string value) =>
+        "\"" + value.Replace("\"", "\\\"") + "\"";
+
+    // ---- Regulärer Start (verbindet sich ohne Bestätigungsdialoge mit NxMix.Daemon.exe) --------
+    static int RunWindow(Options o)
+    {
+        string? customKey = ComputeCustomKey(o.DataDir);
+
+        // Einzelinstanz-Schutz für das Konsolenfenster (Tray-/Shortcut-Doppelklick holt bestehendes Fenster nach vorn)
+        Mutex? uiMutex = null;
+        if (o.ExitAfterMs <= 0)
+        {
+            uiMutex = new Mutex(initiallyOwned: true, IpcNames.UiWindowMutexName(customKey), out bool createdNew);
+            if (!createdNew)
+            {
+                uiMutex.Dispose();
+                if (customKey == null)
+                {
+                    nint existingHwnd = Win32.FindWindow("NxMixMainWindow", null);
+                    if (existingHwnd != 0)
+                    {
+                        if (Win32.IsIconic(existingHwnd))
+                            Win32.ShowWindow(existingHwnd, Win32.SW_RESTORE);
+                        Win32.SetForegroundWindow(existingHwnd);
+                    }
+                }
+                return 0;
+            }
+        }
+
+        try
+        {
+            var prefs = UiPrefs.Load();
+
+            var client = new NamedPipeBackendClient(customKey, async ct =>
+            {
+                string daemonExe = Path.Combine(AppContext.BaseDirectory, "NxMix.Daemon.exe");
+                if (!File.Exists(daemonExe)) return;
+
+                var argParts = new List<string>();
+                if (!string.IsNullOrWhiteSpace(o.DataDir))
+                {
+                    argParts.Add("--data-dir");
+                    argParts.Add(QuoteArg(Path.GetFullPath(o.DataDir)));
+                }
+                if (!string.IsNullOrWhiteSpace(customKey))
+                {
+                    argParts.Add("--key");
+                    argParts.Add(QuoteArg(customKey));
+                }
+
+                // UseShellExecute = true löst NxMix.Daemon.exe vollständig vom Eltern-Job/Konsolen-Handle ab
+                var psi = new ProcessStartInfo(daemonExe)
+                {
+                    WorkingDirectory = AppContext.BaseDirectory,
+                    UseShellExecute = true,
+                    Arguments = string.Join(" ", argParts),
+                };
+
+                try
+                {
+                    Process.Start(psi);
+                    await Task.Delay(260, ct).ConfigureAwait(false);
+                }
+                catch { }
+            });
+
+            // Kurz auf den ersten Laufzeit-Snapshot warten, damit das Fenster direkt vollständig gefüllt öffnet
+            client.ConnectAsync(TimeSpan.FromSeconds(4)).GetAwaiter().GetResult();
+
+            var model = new AppModel(client);
+            var win = new MainWindow(model, prefs.Window, o.ExitAfterMs, prefs, new VelopackUpdateBackend());
+            return win.Run();
+        }
+        finally
+        {
+            if (uiMutex != null)
+            {
+                try { uiMutex.ReleaseMutex(); } catch { }
+                uiMutex.Dispose();
+            }
+        }
+    }
+
+    // ---- Deterministische Headless-Sitzung für --shot und --selftest ---------------------------
+    public static HeadlessSession CreateHeadlessSession(bool demo, bool hostRunning, bool restorerSupported = true, string? restorerReason = null)
+    {
+        UiPrefs.PersistenceEnabled = false;
+        string tempDir = Path.Combine(Path.GetTempPath(), "nxmix-hl-" + Guid.NewGuid().ToString("N")[..10]);
+        Directory.CreateDirectory(tempDir);
+
+        SystemConfig cfg;
+        MixerSettings mix;
+        UiDeckCollection decks;
+        if (demo)
+        {
+            (cfg, mix, decks) = DemoProject.Create(runningOnBoot: hostRunning);
+        }
+        else
+        {
+            cfg = new SystemConfig { AutoStartAudioOnBoot = hostRunning, CompanionApiEnabled = false };
+            mix = MixerSettings.Create(48000, 0, 0);
+            decks = new UiDeckCollection();
+        }
+
+        var controller = new DaemonEngineController(new DaemonEngineOptions
+        {
+            CustomDataDir = tempDir,
+            CustomIpcKey = "hl-" + Guid.NewGuid().ToString("N")[..8],
+            DeviceCatalog = new DemoCatalog(),
+            AppCatalog = new DemoAppCatalog(),
+            AppRouteRestorer = new DemoRestorer(restorerSupported, restorerReason),
+            HostFactory = () => new DemoHost(initiallyRunning: false),
+            InitialSystemConfigOverride = cfg,
+            InitialMixerOverride = mix,
+        });
+
+        if (demo)
+        {
+            // Zwei Beispiel-Snapshots anlegen, damit TopBar und Snapshots-Tab realistisch gefüllt sind
+            controller.SaveSnapshotAsync(null, "Streaming Live", "Standard-Sendemischung mit Musik-Bus", "#3B82F6", 150, SnapshotScopeFlags.All)
+                .GetAwaiter().GetResult();
+            controller.SaveSnapshotAsync(null, "Talk-Runde", "Musik abgesenkt, Fokus auf Mikrofone", "#10B981", 500, SnapshotScopeFlags.All)
+                .GetAwaiter().GetResult();
+        }
+
+        if (hostRunning && controller.Snapshot.HostStats.State != Audio.HostState.Running)
+            controller.StartAudioAsync().GetAwaiter().GetResult();
+
+        controller.PumpTelemetryNow();
+
+        var model = new AppModel(controller, decks)
+        {
+            RunInline = true,
+            Post = a => a(),
+        };
+        return new HeadlessSession(controller, model, tempDir);
+    }
+
+    static int ParsePageName(string page) => page switch
+    {
+        "mixer" or "0" => UiRoot.TabMixer,
+        "decks" or "1" => UiRoot.TabDecks,
+        "devices" or "geraete" or "2" => UiRoot.TabDevices,
+        "matrix" or "patching" or "3" => UiRoot.TabMatrix,
+        "vaio" or "virtual-io" or "virtualio" or "4" => UiRoot.TabVirtualIo,
+        "dsp" or "outputs" or "outputs-dsp" or "5" => UiRoot.TabOutputsDsp,
+        "snapshots" or "scenes" or "6" => UiRoot.TabSnapshots,
+        "engine" or "settings" or "7" => UiRoot.TabEngine,
+        _ => UiRoot.TabMixer,
+    };
+
     static int RunShot(Options o)
     {
-        ProjectStore.Enabled = false;
-        EngineFactory.ForceDemo = true;
-        double clockT = o.T;
-        EngineFactory.DemoClock = () => clockT;
-
-        MixerSettings settings = AppModel.EmptySettings();
-        List<DeviceBinding> bindings = new();
-        if (o.Demo) (settings, bindings) = DemoProject.Create();
-        var model = new AppModel(settings, bindings, EngineFactory.Create, () => new DemoCatalog(), () => new DemoHost(o.HostRunning), true, null)
-        { Post = a => a() };
-        model.SetDevicesNow(new DemoCatalog().List());
-        // App-Links: erfundene Programme, Attrappen fuer Katalog und Umleitung; --demo zeigt Links in verschiedenen Zustaenden
-        model.RunInline = true;
-        model.AppCatalogFactory = () => new DemoAppCatalog();
-        model.RestorerFactory = () => o.Restorer == "unsupported" ? new DemoRestorer(false, "Demo: Diese Windows-Version kennt keine Pro-App-Umleitung.") : new DemoRestorer();
-        if (o.Demo)
-        {
-            model.InitAppLinks(DemoProject.AppLinks());
-            model.LinkStatusSource = DemoProject.LinkStatuses;
-        }
-        if (o.HostRunning) model.AttachHostForShot(new DemoHost(true));
+        bool restorerOk = !string.Equals(o.Restorer, "unsupported", StringComparison.OrdinalIgnoreCase);
+        using var session = CreateHeadlessSession(
+            o.Demo,
+            o.HostRunning,
+            restorerOk,
+            restorerOk ? null : "Demo: Diese Windows-Version unterstützt kein ProcessLoopback.");
 
         var prefs = new UiPrefs
         {
@@ -183,26 +366,23 @@ internal static class Program
             SidebarExpanded = o.Expanded,
             UiScalePercent = UiPrefs.ClampScale(o.UiScale),
         };
-        var fake = new FakeUpdateBackend { Offer = o.Update != null ? new UpdateOffer("0.2.0", "## NX-MIX 0.2.0\n\n- Beispiel") : null };
-        var root = new UiRoot(model, new NullShell(), prefs, fake);
+        var fake = new FakeUpdateBackend { Offer = o.Update != null ? new UpdateOffer("0.2.0", "## NX-MIX 0.2.0\n\n- Live-Konsolen-Architektur") : null };
+        var root = new UiRoot(session.Model, new NullShell(), prefs, fake);
         root.Updater.RunInline = true;
         if (o.Update != null) { root.Updater.Check(); if (o.Update == "ready") root.Updater.Download(); }
+
         float effectiveScale = o.Scale * prefs.ScaleFactor;
         float dipW = o.W / effectiveScale, dipH = o.H / effectiveScale;
         root.Resize(dipW, dipH);
-        int page = o.Page switch { "matrix" => 1, "devices" => 2, "settings" => 3, _ => 0 };
-        root.SwitchPage(page);
-        // Zeit vorspulen, damit Meter und Spitzenhalten natuerlich aussehen
-        for (int k = 0; k < 120; k++) { clockT = o.T - 2.0 + k / 60.0; root.Tick(1f / 60f); }
-        clockT = o.T;
-        root.Tick(1f / 60f);
+        root.SwitchPage(ParsePageName(o.Page));
+
+        for (int k = 0; k < 45; k++) root.Tick(1f / 60f);
         if (o.Show != null) ShowOverlay(root, o.Show);
 
         RenderRoot(root, o.W, o.H, effectiveScale, o.Shot);
         return 0;
     }
 
-    /// <summary>Zeichnet die Oberflaeche offscreen (D2D WIC-Bitmap) und schreibt optional eine PNG-Datei.</summary>
     public static void RenderRoot(UiRoot root, int pw, int ph, float scale, string? pngPath)
     {
         float dpi = 96f * scale;
@@ -215,7 +395,7 @@ internal static class Program
         {
             rt.BeginDraw();
             root.Paint(g);
-            rt.EndDraw();
+            rt.EndDraw().CheckError();
         }
         if (pngPath == null) return;
         string full = Path.GetFullPath(pngPath);
@@ -233,18 +413,16 @@ internal static class Program
         enc.Commit();
     }
 
-    /// <summary>Kanal-Blatt oeffnen (Mixer-Seite) - fuer Screenshots und Selbsttest.</summary>
     public static ChannelSheet? Sheet(UiRoot root, bool input, int index)
     {
-        root.SwitchPage(0);
-        return ((MixerPage)root.Pages[0]).OpenSheet(input, Math.Clamp(index, 0, Math.Max(0, (input ? root.Model.InputCount : root.Model.OutputCount) - 1)));
+        root.SwitchPage(UiRoot.TabMixer);
+        return ((MixerPage)root.Pages[UiRoot.TabMixer]).OpenSheet(input, Math.Clamp(index, 0, Math.Max(0, (input ? root.Model.InputCount : root.Model.OutputCount) - 1)));
     }
 
-    /// <summary>App-Link-Auswahl fuer einen Eingang oeffnen (ueber dessen Kanal-Blatt).</summary>
     public static void Picker(UiRoot root, int input, bool manual = false)
     {
         var s = Sheet(root, true, input);
-        for (int i = 0; i < 20; i++) root.Tick(1f / 60f);
+        for (int i = 0; i < 15; i++) root.Tick(1f / 60f);
         s?.OpenPicker(manual);
     }
 
@@ -252,68 +430,21 @@ internal static class Program
     {
         switch (what)
         {
-            case "project-menu": root.ShowProjectMenu(root.Top.MenuRect); break;
-            case "new-dialog": root.NewProjectWithConfirm(); break;
-            case "start-dialog": ((DevicesPage)root.Pages[2]).ShowStartDialog(); break;
-            case "sheet-out": Sheet(root, false, 2); break;                 // Hochtoener mit Gain-Sperre
-            case "sheet-in": Sheet(root, true, 6); break;                   // Spotify (Stereo-Link)
-            case "eq-out": ChannelSheet.Show(root, root.Model, false, 2, eq: true); break;
-            case "eq-in": ChannelSheet.Show(root, root.Model, true, 6, eq: true); break;
-            case "device-add": DeviceAddSheet.Show(root, root.Model); break;
-            case "deck": case "deck-edit": case "bus":
-                {
-                    var m = root.Model;
-                    Guid bus = m.AddBus(2);
-                    m.UpdateBus(bus, b => b with { Name = "Musik", GainDb = -6 });
-                    m.AddBusRoute(new BusRoute(new RoutePort(RouteKind.Input, m.Settings.Inputs[0].Id), new RoutePort(RouteKind.Bus, bus)));
-                    m.AddBusRoute(new BusRoute(new RoutePort(RouteKind.Bus, bus), new RoutePort(RouteKind.Output, m.Settings.Outputs[0].Id)));
-                    m.SaveDeck(new MixerDeck { Name = "Mein Mixer", Columns = 8, Rows = 1, Slots = new FaderSlot?[]
-                    {
-                        new(RouteKind.Input, m.Settings.Inputs[0].Id), new(RouteKind.Input, m.Settings.Inputs[1].Id), null,
-                        new(RouteKind.Input, m.Settings.Inputs[6].Id), new(RouteKind.Bus, bus), null,
-                        new(RouteKind.Output, m.Settings.Outputs[0].Id), new(RouteKind.Output, m.Settings.Outputs[1].Id),
-                    } });
-                    if (what == "deck-edit") root.Pages[0].Children.OfType<DeckWorkspace>().Single().BeginEditing();
-                    if (what == "bus") BusSheet.Show(root, m, bus);
-                    break;
-                }
-            case "sheet-scroll":
-                {
-                    var s = Sheet(root, false, 5);
-                    for (int i = 0; i < 20; i++) root.Tick(1f / 60f);
-                    if (s != null) root.MouseWheel(root.W - 100, root.H - 200, -12f, false, false, false);
-                    break;
-                }
-            case "add-menu":
-                {
-                    var b = ((MixerPage)root.Pages[0]).Inputs.AddButton;
-                    root.MouseDown(b.Bounds.CX, b.Bounds.CY, 0, 1, false, false, false);
-                    root.MouseUp(b.Bounds.CX, b.Bounds.CY, 0, false, false, false);
-                    break;
-                }
+            case "snapshots-menu": root.ShowQuickSnapshotMenu(root.Top.Bounds); break;
+            case "sheet-out": Sheet(root, false, 2); break;
+            case "sheet-in": Sheet(root, true, 6); break;
+            case "eq-out": root.OpenOutputDsp(0); break;
             case "rename": Sheet(root, true, 0)?.BeginRename(); break;
-            case "applink-picker": Picker(root, 10); break;          // freier Eingang: Liste + Mono/Stereo
-            case "applink-picker-linked": Picker(root, 8); break;    // Chrome gebunden: "Verknuepfung loesen"
-            case "applink-picker-pair": Picker(root, 7); break;      // Stereo-Link (zweite Haelfte)
-            case "applink-conflict": Picker(root, 2); break;         // haengt an einer Geraete-Zuordnung
-            case "applink-manual": Picker(root, 10, true); break;
-            case "applink-problem": // Start mit App-Links, aber ohne Parkplatz: Erklaerung + Alternativen
-                root.Model.SetParking(null);
-                root.SwitchPage(2);
-                ((DevicesPage)root.Pages[2]).ShowLinkProblemDialog(root.Model.AppLinkProblem() ?? "");
-                break;
-            case "applink-filter":
-                Picker(root, 10);
-                foreach (char c in "ch") root.Char(c);
-                break;
-            case "update": root.ShowUpdate(); break;   // mit --update available|ready
+            case "applink-picker": Picker(root, 6); break;
+            case "applink-manual": Picker(root, 6, true); break;
+            case "update": root.ShowUpdate(); break;
             case "tooltip":
                 {
-                    var strips = ((MixerPage)root.Pages[0]).Outputs.Strips;
-                    if (strips.Count > 2)
+                    var strips = ((MixerPage)root.Pages[UiRoot.TabMixer]).OutputChannelStrips;
+                    if (strips.Count > 0)
                     {
-                        var b = strips[2].Bounds;
-                        root.MouseMove(b.CX - 4, b.Y + b.H * 0.55f, false, false, false);
+                        var b = strips[0].Bounds;
+                        root.MouseMove(b.CX, b.CY, false, false, false);
                         for (int i = 0; i < 60; i++) root.Tick(1f / 60f);
                     }
                     break;
@@ -322,13 +453,12 @@ internal static class Program
         root.Tick(1f / 60f);
     }
 
-    // ---- Fehlerprotokoll (neben der Exe) -------------------------------------------------------
     public static void LogCrash(Exception ex)
     {
         try
         {
             File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "nx-mix-error.log"), $"[{DateTime.Now:s}] {ex}\n\n");
         }
-        catch { /* nichts zu tun */ }
+        catch { }
     }
 }

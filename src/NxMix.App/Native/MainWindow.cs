@@ -13,8 +13,9 @@ using static NxMix.App.Native.Win32;
 namespace NxMix.App.Native;
 
 /// <summary>
-/// Das Hauptfenster in reinem Win32: rahmenlos mit eigener Titelleiste (WM_NCCALCSIZE/WM_NCHITTEST, Aero-Snap, Snap-Layouts),
-/// DPI PerMonitorV2, Direct2D-HwndRenderTarget, Neuzeichnen nur bei Bedarf (Timer ~60 Hz).
+/// Win32-Hauptfenster der NX-MIX Live-Konsole.
+/// Wichtigste Konsolen-Invariante: Normales Schließen des Fensters trennt ausschließlich die Client-Sitzung
+/// (NxMix.Daemon, Audio-Streams und App-Links laufen unterbrechungsfrei weiter).
 /// </summary>
 internal sealed unsafe class MainWindow : IShell
 {
@@ -38,13 +39,13 @@ internal sealed unsafe class MainWindow : IShell
     bool _minimized;
     double _normalW = Theme.DefaultWindowWidth, _normalH = Theme.DefaultWindowHeight;
     int _exitAfterMs;
-    readonly WindowDto? _initial;
+    readonly WindowGeometry _initial;
     readonly UiPrefs _prefs;
     readonly IUpdateBackend _updates;
     bool _exitPrepared;
     const uint WM_SETTINGCHANGE = 0x001A;
 
-    public MainWindow(AppModel model, WindowDto? initial, int exitAfterMs, UiPrefs prefs, IUpdateBackend updates)
+    public MainWindow(AppModel model, WindowGeometry initial, int exitAfterMs, UiPrefs prefs, IUpdateBackend updates)
     {
         _model = model;
         _initial = initial;
@@ -53,7 +54,6 @@ internal sealed unsafe class MainWindow : IShell
         _updates = updates;
     }
 
-    // ---- IShell --------------------------------------------------------------------------------
     public void Minimize() => ShowWindow(_hwnd, SW_MINIMIZE);
     public void ToggleMaximize() => ShowWindow(_hwnd, IsZoomed(_hwnd) ? SW_RESTORE : SW_SHOWMAXIMIZED);
     public void Close() => PostMessage(_hwnd, WM_CLOSE, 0, 0);
@@ -61,9 +61,9 @@ internal sealed unsafe class MainWindow : IShell
     public void SetCapture(bool on) { if (on) Win32.SetCapture(_hwnd); else ReleaseCapture(); }
     public string? ShowSaveDialog(string title, string filter, string defaultName) => FileDialogs.Save(_hwnd, title, filter, defaultName);
     public string? ShowOpenDialog(string title, string filter) => FileDialogs.Open(_hwnd, title, filter);
-    public WindowDto? WindowState => new() { Width = Math.Round(_normalW), Height = Math.Round(_normalH), Maximized = IsMaximized };
+    public WindowGeometry? WindowState => new(Math.Round(_normalW), Math.Round(_normalH), IsMaximized);
+    public bool ReduceMotion => SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, out int enabled, 0) && enabled == 0;
 
-    /// <summary>Windows-Einstellung "Standard-App-Modus" (Registry: AppsUseLightTheme = 0 heisst dunkel).</summary>
     public bool SystemPrefersDark
     {
         get
@@ -77,14 +77,17 @@ internal sealed unsafe class MainWindow : IShell
         }
     }
 
-    /// <summary>Beim Schliessen und vor einem Update-Neustart: Projekt speichern, Audio stoppen, Umleitungen zuruecksetzen.</summary>
+    /// <summary>Beim Schließen des Fensters: UI-Einstellungen &amp; Decks speichern und NUR die Pipe trennen.
+    /// Einzig wenn ein Velopack-Update „Beim Beenden installieren“ aussteht, wird auch der Daemon beendet.</summary>
     public void PrepareExit()
     {
         if (_exitPrepared) return;
         _exitPrepared = true;
         _root?.SaveNow();
-        _model.Shutdown();
-        AudioFactory.TryRestoreAll(); // Sicherheit: alle Programm-Umleitungen beim Beenden zuruecksetzen
+        if (_root?.Updater.InstallOnExitPending == true)
+            _model.ShutdownDaemonExplicitly(5000);
+        else
+            _model.DisconnectClientOnly();
     }
 
     public void ThemeChanged()
@@ -110,7 +113,6 @@ internal sealed unsafe class MainWindow : IShell
         InvalidateRect(_hwnd, 0, false);
     }
 
-    /// <summary>Fensterrahmen passend zum Farbmodus: dunkler/heller Rahmen, runde Ecken, Randfarbe.</summary>
     void ApplyFrameTheme()
     {
         int dark = Theme.IsDark ? 1 : 0;
@@ -122,7 +124,6 @@ internal sealed unsafe class MainWindow : IShell
         DwmSetWindowAttribute(_hwnd, DWMWA_BORDER_COLOR, ref border, sizeof(int));
     }
 
-    // ---- Start ---------------------------------------------------------------------------------
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     static nint WndProc(nint hwnd, uint msg, nint wParam, nint lParam)
     {
@@ -145,7 +146,7 @@ internal sealed unsafe class MainWindow : IShell
             var wc = new WNDCLASSEXW
             {
                 cbSize = (uint)sizeof(WNDCLASSEXW),
-                style = 0x0008, // CS_DBLCLKS
+                style = 0x0008,
                 lpfnWndProc = &WndProc,
                 hInstance = hInst,
                 hCursor = Cursor(IDC_ARROW),
@@ -156,14 +157,16 @@ internal sealed unsafe class MainWindow : IShell
         }
 
         const uint style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
-        _hwnd = CreateWindowEx(WS_EX_APPWINDOW, ClassName, "NX-MIX", style, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, 0, 0, hInst, 0);
+        string winTitle = (_updates.InstalledChannel == NxMix.Ipc.ReleaseChannel.Beta || AppVersion.IsBetaBuild)
+            ? "NX-MIX [BETA]"
+            : "NX-MIX";
+        _hwnd = CreateWindowEx(WS_EX_APPWINDOW, ClassName, winTitle, style, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, 0, 0, hInst, 0);
         if (_hwnd == 0) throw new InvalidOperationException("CreateWindowEx fehlgeschlagen: " + Marshal.GetLastWin32Error());
 
         _dpi = GetDpiForWindow(_hwnd);
         if (_dpi == 0) _dpi = 96;
         _scale = _dpi / 96f * _prefs.ScaleFactor;
 
-        // Schatten fuer den rahmenlosen Stil; Rahmenfarbe und Ecken folgen dem Farbmodus
         var margins = new MARGINS { Top = 1 };
         DwmExtendFrameIntoClientArea(_hwnd, in margins);
 
@@ -171,9 +174,8 @@ internal sealed unsafe class MainWindow : IShell
         _root = new UiRoot(_model, this, _prefs, _updates);
         ApplyFrameTheme();
 
-        // Groesse und Lage
-        double wDip = _initial?.Width > 300 ? _initial.Width : Theme.DefaultWindowWidth;
-        double hDip = _initial?.Height > 300 ? _initial.Height : Theme.DefaultWindowHeight;
+        double wDip = _initial.Width > 300 ? _initial.Width : Theme.DefaultWindowWidth;
+        double hDip = _initial.Height > 300 ? _initial.Height : Theme.DefaultWindowHeight;
         _normalW = wDip; _normalH = hDip;
         var mon = MonitorFromWindow(_hwnd, MONITOR_DEFAULTTONEAREST);
         var mi = new MONITORINFO { cbSize = (uint)sizeof(MONITORINFO) };
@@ -183,10 +185,9 @@ internal sealed unsafe class MainWindow : IShell
         SetWindowPos(_hwnd, 0, x, y, wpx, hpx, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
         SetTimer(_hwnd, TimerId, 16, 0);
-        ShowWindow(_hwnd, _initial?.Maximized == true ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
+        ShowWindow(_hwnd, _initial.Maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
         UpdateWindow(_hwnd);
         _lastTick = _clock.Elapsed.TotalSeconds;
-        _model.RefreshDevices();
         _root.StartUpdateCheck();
 
         while (GetMessage(out var msg, 0, 0, 0) > 0)
@@ -197,7 +198,6 @@ internal sealed unsafe class MainWindow : IShell
         return 0;
     }
 
-    // ---- Direct2D ------------------------------------------------------------------------------
     void CreateTarget()
     {
         _g?.Dispose(); _g = null;
@@ -246,7 +246,6 @@ internal sealed unsafe class MainWindow : IShell
         _root.Resize(rc.Width / _scale, rc.Height / _scale);
     }
 
-    // ---- Nachrichten ---------------------------------------------------------------------------
     static bool Ctrl => KeyDown(VK_CONTROL);
     static bool Shift => KeyDown(VK_SHIFT);
     static bool Alt => KeyDown(VK_MENU);
@@ -264,7 +263,6 @@ internal sealed unsafe class MainWindow : IShell
                         int fx = GetSystemMetricsForDpi(SM_CXSIZEFRAME, _dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, _dpi);
                         int fy = GetSystemMetricsForDpi(SM_CYSIZEFRAME, _dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, _dpi);
                         p->rgrc0.Left += fx; p->rgrc0.Right -= fx; p->rgrc0.Top += fy; p->rgrc0.Bottom -= fy;
-                        // Auto-Ausblenden der Taskleiste: einen Pixel frei lassen, damit sie aufklappen kann
                         var mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                         var mi = new MONITORINFO { cbSize = (uint)sizeof(MONITORINFO) };
                         if (GetMonitorInfo(mon, ref mi) && mi.rcWork.Bottom == mi.rcMonitor.Bottom && mi.rcWork.Top == mi.rcMonitor.Top
@@ -314,11 +312,11 @@ internal sealed unsafe class MainWindow : IShell
 
             case WM_SIZE:
                 {
-                    _minimized = wParam == 1; // SIZE_MINIMIZED
+                    _minimized = wParam == 1;
                     if (!_minimized)
                     {
                         ResizeTarget();
-                        if (wParam != 2 && _root != null) // nicht maximiert: Normalgroesse merken
+                        if (wParam != 2 && _root != null)
                         {
                             GetClientRect(hwnd, out var rc);
                             _normalW = rc.Width / _scale; _normalH = rc.Height / _scale;
@@ -424,6 +422,7 @@ internal sealed unsafe class MainWindow : IShell
                 return 0;
 
             case WM_SETTINGCHANGE:
+                _root?.RefreshMotionPreference();
                 if (lParam != 0 && Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
                 {
                     _root?.SystemThemeChanged();
@@ -471,7 +470,6 @@ internal sealed unsafe class MainWindow : IShell
         {
             TitleHit.Drag => HTCAPTION,
             TitleHit.Max => HTMAXBUTTON,
-            TitleHit.None => HTCLIENT,
             _ => HTCLIENT,
         };
     }

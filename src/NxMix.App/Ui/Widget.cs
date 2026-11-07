@@ -65,6 +65,11 @@ internal abstract class Widget
 
     public bool IsHovered => Root?.Hovered == this;
     public bool IsPressed => Root?.Captured == this;
+    protected bool HitOnRelease(in MouseEvent e) => Root?.HitTest(e.X, e.Y) == this;
+
+    Motion _hoverMotion, _pressMotion;
+    protected float HoverAmount(bool active) => _hoverMotion.At(Root, active ? 1 : 0, Motion.Feedback);
+    protected float PressAmount(bool active) => _pressMotion.At(Root, active ? 1 : 0, Motion.Feedback);
 }
 
 /// <summary>Eine Seite der Navigation.</summary>
@@ -84,6 +89,17 @@ internal abstract class Page : Widget
 /// </summary>
 internal abstract class Overlay : Widget
 {
+    Motion _reveal;
+
+    public void BeginReveal(double now) => _reveal.Start(0.25f, 1, now);
+    public void PaintTransition(Renderer g)
+    {
+        float opacity = _reveal.At(Root, 1, Motion.Reveal);
+        if (opacity < 1) g.PushOpacity(Bounds, opacity);
+        Paint(g);
+        if (opacity < 1) g.PopOpacity();
+    }
+
     public override bool AcceptsMouse => true;
     public virtual void OnKeyDown(int vk, bool ctrl, bool shift) { }
     public virtual void OnChar(char c) { }

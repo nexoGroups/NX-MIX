@@ -1,33 +1,24 @@
 using NxMix.Audio;
+using NxMix.Engine;
 
 namespace NxMix.App.Model;
 
-/// <summary>
-/// App-Link: ein Programm (Exe-Name, z. B. "spotify.exe") ist direkt an Engine-Eingaenge gebunden.
-/// FirstChannel = 0-basierter Index des ersten Eingangs, Count 1 (mono) oder 2 (Stereo-Paar: FirstChannel und FirstChannel + 1).
-/// </summary>
+/// <summary>Darstellungsmodell für eine App-Audio-Quelle (ProcessLoopback) in der Oberfläche.</summary>
 internal sealed record AppLink(string ExeName, int FirstChannel, int Count = 2, string? DisplayName = null)
 {
     public int End => FirstChannel + Count;
     public bool Covers(int input) => input >= FirstChannel && input < End;
-    /// <summary>Anzeigename: gespeicherter Name aus der Programmliste, sonst der huebsch gemachte Exe-Name.</summary>
     public string Title => string.IsNullOrWhiteSpace(DisplayName) ? AppLinkRules.PrettyName(ExeName) : DisplayName!;
 }
 
-/// <summary>Alles, was ein Projekt zu App-Links speichert (Links, Hauptschalter, Parkplatz-Ausgang).</summary>
-internal sealed record AppLinkSetup(IReadOnlyList<AppLink> Links, bool Enabled, string? ParkingDeviceId, string? ParkingDeviceName);
-
-/// <summary>Zustand eines App-Links in der Oberflaeche.</summary>
 internal enum LinkUi { Off, Idle, NeedsSetup, Waiting, Linked, Failed, Conflict }
 
 internal readonly record struct LinkView(LinkUi State, string? Message, int ProcessCount);
 
-/// <summary>Ein Programm der Auswahlliste (mehrere Audio-Sitzungen desselben Exe-Namens sind zusammengefasst).</summary>
 internal sealed record AppProgram(string ExeName, string DisplayName, bool IsPlaying, int Instances);
 
 internal static class AppLinkRules
 {
-    /// <summary>"spotify.exe" -> "Spotify".</summary>
     public static string PrettyName(string? exe)
     {
         var n = Path.GetFileNameWithoutExtension(exe ?? "");
@@ -35,8 +26,6 @@ internal static class AppLinkRules
         return char.ToUpperInvariant(n[0]) + n[1..];
     }
 
-    /// <summary>Macht aus Eingaben wie "Spotify", "C:\\...\\chrome.exe" oder " VLC.EXE " einen Exe-Namen ohne Pfad.
-    /// null + Fehlertext bei unbrauchbarer Eingabe.</summary>
     public static string? NormalizeExe(string? raw, out string? error)
     {
         error = null;
@@ -52,7 +41,6 @@ internal static class AppLinkRules
         return s;
     }
 
-    /// <summary>Gruppiert Audio-Sitzungen je Exe-Name; spielende zuerst, dann alphabetisch.</summary>
     public static List<AppProgram> Group(IReadOnlyList<AppSessionInfo> sessions)
     {
         var map = new Dictionary<string, List<AppSessionInfo>>(StringComparer.OrdinalIgnoreCase);
@@ -70,47 +58,128 @@ internal static class AppLinkRules
         }
         return res.OrderByDescending(p => p.IsPlaying).ThenBy(p => p.DisplayName, StringComparer.CurrentCultureIgnoreCase).ToList();
     }
-
-    /// <summary>Bereinigt geladene Links: gueltiger Exe-Name, Bereich passt in die Eingaenge, keine Ueberlappung, kein Programm doppelt.</summary>
-    public static List<AppLink> Sanitize(IEnumerable<AppLink>? links, int inputCount)
-    {
-        var res = new List<AppLink>();
-        if (links == null) return res;
-        foreach (var l in links.OrderBy(x => x.FirstChannel))
-        {
-            var exe = NormalizeExe(l.ExeName, out _);
-            if (exe == null || l.FirstChannel < 0 || l.FirstChannel >= inputCount) continue;
-            int count = Math.Clamp(l.Count, 1, 2);
-            if (l.FirstChannel + count > inputCount) count = inputCount - l.FirstChannel;
-            if (count < 1) continue;
-            if (res.Any(r => r.FirstChannel < l.FirstChannel + count && l.FirstChannel < r.End)) continue;
-            if (res.Any(r => string.Equals(r.ExeName, exe, StringComparison.OrdinalIgnoreCase))) continue;
-            res.Add(new AppLink(exe, l.FirstChannel, count, string.IsNullOrWhiteSpace(l.DisplayName) ? null : l.DisplayName.Trim()));
-        }
-        return res;
-    }
 }
 
 // ================================================================================================
-// Attrappen fuer Screenshots (--demo) und den Selbsttest: erfundene Programme, gibt nichts um und nichts aus.
+// Attrappen für Screenshots (--demo) und den Headless-Selbsttest (--selftest)
 // ================================================================================================
 
-/// <summary>Erfundene Programmliste (Spotify, Chrome, Discord, VLC, ...) nur fuer Screenshots/Selbsttest.</summary>
+internal sealed class DemoCatalog : IDeviceCatalog
+{
+    public IReadOnlyList<AudioDeviceInfo> List() => new[]
+    {
+        new AudioDeviceInfo("asio:RME Fireface USB/in", "RME Fireface USB (ASIO)", DeviceFlow.Capture, 8, 48000, false)
+        {
+            Backend = AudioBackend.Asio, DriverProvider = "ASIO · RME",
+            SupportedRates = new[] { 44100, 48000, 96000, 192000 },
+            SupportedBuffers = new[] { 64, 128, 256, 512 },
+        },
+        new AudioDeviceInfo("asio:RME Fireface USB/out", "RME Fireface USB (ASIO)", DeviceFlow.Render, 8, 48000, false)
+        {
+            Backend = AudioBackend.Asio, DriverProvider = "ASIO · RME",
+            SupportedRates = new[] { 44100, 48000, 96000, 192000 },
+            SupportedBuffers = new[] { 64, 128, 256, 512 },
+        },
+        new AudioDeviceInfo("demo-in-usb", "Focusrite Scarlett 4i4 USB", DeviceFlow.Capture, 4, 48000, true)
+        {
+            Backend = AudioBackend.Windows, DriverProvider = "Focusrite Audio",
+        },
+        new AudioDeviceInfo("demo-out-main", "Active Studio Monitor 8ch USB", DeviceFlow.Render, 8, 48000, true)
+        {
+            Backend = AudioBackend.Windows, DriverProvider = "USB-Audio",
+        },
+        new AudioDeviceInfo("demo-vcable-out", "CABLE Output (VB-Audio Virtual Cable)", DeviceFlow.Capture, 2, 48000, false)
+        {
+            Backend = AudioBackend.Windows, IsVirtualEndpoint = true, DriverProvider = "VB-Audio Software",
+        },
+        new AudioDeviceInfo(DemoProject.ParkingId, DemoProject.ParkingName, DeviceFlow.Render, 2, 48000, false)
+        {
+            Backend = AudioBackend.Windows, IsVirtualEndpoint = true, DriverProvider = "VB-Audio Software",
+        },
+    };
+}
+
+internal sealed class DemoHost : IAudioHost, IAppLinkMonitor
+{
+    private HostState _state;
+    private AudioHostConfig? _cfg;
+    private IBlockProcessor? _proc;
+    private readonly IReadOnlyList<AppLinkStatus> _linkStatuses;
+
+    public event Action<string>? Faulted { add { } remove { } }
+
+    public DemoHost(bool initiallyRunning = false, IReadOnlyList<AppLinkStatus>? linkStatuses = null)
+    {
+        _state = initiallyRunning ? HostState.Running : HostState.Stopped;
+        _linkStatuses = linkStatuses ?? DemoProject.LinkStatuses();
+    }
+
+    public HostState State => _state;
+
+    public void Start(AudioHostConfig config, IBlockProcessor processor)
+    {
+        _cfg = config;
+        _proc = processor;
+        _state = HostState.Running;
+
+        // Ein synthetischer Audio-Block pumpen, damit Pegel-Meter und Spektrum sofort realistische Werte zeigen
+        int inCh = Math.Max(1, processor.InputChannels);
+        int outCh = Math.Max(1, processor.OutputChannels);
+        int frames = 256;
+        var ins = new float[inCh][];
+        var outs = new float[outCh][];
+        for (int i = 0; i < inCh; i++)
+        {
+            ins[i] = new float[frames];
+            float amp = 0.28f * (1f - (i % 5) * 0.14f);
+            double freq = 110.0 * (1 + (i % 6));
+            for (int n = 0; n < frames; n++)
+                ins[i][n] = amp * MathF.Sin((float)(2.0 * Math.PI * freq * n / Math.Max(1, processor.SampleRate)));
+        }
+        for (int o = 0; o < outCh; o++) outs[o] = new float[frames];
+        processor.Process(ins, outs, frames);
+    }
+
+    public void Stop() => _state = HostState.Stopped;
+
+    public HostStats GetStats()
+    {
+        int bf = _cfg?.BlockFrames ?? 256;
+        int sr = _cfg?.SampleRate ?? 48000;
+        double lat = Math.Round(bf * 1000.0 / Math.Max(1, sr), 1);
+        var devs = (_cfg?.Bindings ?? Array.Empty<DeviceBinding>())
+            .GroupBy(b => b.DeviceId)
+            .Select((g, idx) => new DeviceStat(
+                g.Key,
+                g.Key.StartsWith("asio:", StringComparison.OrdinalIgnoreCase) ? "RME Fireface USB (ASIO)" : g.Key,
+                g.Key.StartsWith("asio:", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.52,
+                idx == 0 ? 0.0 : 4.2,
+                0,
+                IsMasterClock: idx == 0))
+            .ToArray();
+        return new HostStats(_state, null, bf, _state == HostState.Running ? 0.068 : 0.0, 0, 0, lat, devs)
+        {
+            MasterClockName = devs.FirstOrDefault(d => d.IsMasterClock)?.Name ?? "Software-Takt",
+        };
+    }
+
+    public IReadOnlyList<AppLinkStatus> GetAppLinks() => _linkStatuses;
+
+    public void Dispose() => _state = HostState.Stopped;
+}
+
 internal sealed class DemoAppCatalog : IAppCatalog
 {
     public IReadOnlyList<AppSessionInfo> List() => new[]
     {
         new AppSessionInfo(4120, "spotify.exe", "Spotify", @"C:\Users\Demo\AppData\Roaming\Spotify\Spotify.exe", true),
         new AppSessionInfo(5532, "chrome.exe", "Google Chrome", @"C:\Program Files\Google\Chrome\Application\chrome.exe", true),
-        new AppSessionInfo(5540, "chrome.exe", "Google Chrome", @"C:\Program Files\Google\Chrome\Application\chrome.exe", false),
         new AppSessionInfo(2210, "Discord.exe", "Discord", @"C:\Users\Demo\AppData\Local\Discord\Discord.exe", false),
         new AppSessionInfo(7788, "vlc.exe", "VLC media player", @"C:\Program Files\VideoLAN\VLC\vlc.exe", false),
         new AppSessionInfo(9014, "firefox.exe", "Firefox", @"C:\Program Files\Mozilla Firefox\firefox.exe", true),
-        new AppSessionInfo(3320, "Teams.exe", "Microsoft Teams", null, false),
     };
 }
 
-/// <summary>Attrappe fuer IAppRouteRestorer: zaehlt nur die Aufrufe.</summary>
 internal sealed class DemoRestorer : IAppRouteRestorer
 {
     readonly bool _supported;
@@ -118,6 +187,6 @@ internal sealed class DemoRestorer : IAppRouteRestorer
     public int Calls;
     public DemoRestorer(bool supported = true, string? reason = null) { _supported = supported; _reason = reason; }
     public bool IsSupported => _supported;
-    public string? UnsupportedReason => _supported ? null : _reason ?? "Diese Windows-Version kann Programm-Ausgaben nicht einzeln umleiten.";
+    public string? UnsupportedReason => _supported ? null : _reason ?? "Diese Windows-Version unterstützt kein ProcessLoopback.";
     public void RestoreAllKnown() => Calls++;
 }

@@ -1,41 +1,44 @@
 using System.Numerics;
 
-namespace NxMix.App.Model;
+namespace NxMix.Ipc;
 
-/// <summary>Fensterung und FFT für die Anzeige. Läuft außerhalb des Audiothreads.</summary>
-internal sealed class SpectrumAnalyzer
+/// <summary>Fensterung und 144-Band-FFT für Pre-/Post-Spektrumanzeige. Läuft außerhalb des Echtzeit-Audiothreads.</summary>
+public sealed class SpectrumAnalyzer
 {
     public const int Points = 144;
-    public const double MinHz = 20;
-    public const float FloorDb = -100;
-    readonly Complex[] _fft, _roots;
-    readonly double[] _window, _power;
-    readonly int[] _reversed;
-    readonly (int First, int Last, double Center)[] _bands = new (int, int, double)[Points];
+    public const double MinHz = 20.0;
+    public const float FloorDb = -100f;
 
-    public static double MaxHz(int rate) => Math.Max(MinHz * 1.01, Math.Min(20000, rate * 0.49));
+    private readonly Complex[] _fft, _roots;
+    private readonly double[] _window, _power;
+    private readonly int[] _reversed;
+    private readonly (int First, int Last, double Center)[] _bands = new (int, int, double)[Points];
+
+    public static double MaxHz(int rate) => Math.Max(MinHz * 1.01, Math.Min(20000.0, rate * 0.49));
     public static double Frequency(double fraction, int rate) => MinHz * Math.Pow(MaxHz(rate) / MinHz, fraction);
 
     public SpectrumAnalyzer(int size, int rate)
     {
+        rate = Math.Max(8000, rate);
         _fft = new Complex[size];
         _roots = new Complex[size / 2];
         _window = new double[size];
         _reversed = new int[size];
         _power = new double[size / 2 + 1];
+
         for (int i = 0; i < size; i++)
         {
-            // Periodisches Hann-Fenster, auf den Spitzenwert eines Sinus normiert.
-            _window[i] = 2.0 / size * (1 - Math.Cos(2 * Math.PI * i / size));
+            _window[i] = 2.0 / size * (1.0 - Math.Cos(2.0 * Math.PI * i / size));
             _reversed[i] = (_reversed[i >> 1] >> 1) | ((i & 1) * (size >> 1));
         }
-        for (int i = 0; i < _roots.Length; i++) _roots[i] = Complex.FromPolarCoordinates(1, -2 * Math.PI * i / size);
+        for (int i = 0; i < _roots.Length; i++)
+            _roots[i] = Complex.FromPolarCoordinates(1.0, -2.0 * Math.PI * i / size);
 
         double binsPerHz = (double)size / rate;
         for (int i = 0; i < Points; i++)
         {
-            double lo = Frequency(Math.Max(0, (i - 0.5) / (Points - 1)), rate) * binsPerHz;
-            double hi = Frequency(Math.Min(1, (i + 0.5) / (Points - 1)), rate) * binsPerHz;
+            double lo = Frequency(Math.Max(0.0, (i - 0.5) / (Points - 1)), rate) * binsPerHz;
+            double hi = Frequency(Math.Min(1.0, (i + 0.5) / (Points - 1)), rate) * binsPerHz;
             _bands[i] = ((int)Math.Ceiling(lo), (int)Math.Floor(hi), Frequency((double)i / (Points - 1), rate) * binsPerHz);
         }
     }
@@ -43,11 +46,12 @@ internal sealed class SpectrumAnalyzer
     public void Analyze(ReadOnlySpan<float> samples, Span<float> levels)
     {
         int n = _fft.Length;
-        for (int i = 0; i < n; i++) _fft[_reversed[i]] = new Complex(samples[i] * _window[i], 0);
+        for (int i = 0; i < n; i++) _fft[_reversed[i]] = new Complex(samples[i] * _window[i], 0.0);
         for (int length = 2; length <= n; length *= 2)
         {
             int half = length / 2, step = n / length;
             for (int start = 0; start < n; start += length)
+            {
                 for (int i = 0; i < half; i++)
                 {
                     var a = _fft[start + i];
@@ -55,6 +59,7 @@ internal sealed class SpectrumAnalyzer
                     _fft[start + i] = a + b;
                     _fft[start + i + half] = a - b;
                 }
+            }
         }
         for (int bin = 0; bin < _power.Length; bin++)
         {
@@ -64,15 +69,19 @@ internal sealed class SpectrumAnalyzer
         for (int i = 0; i < Points; i++)
         {
             var (first, last, center) = _bands[i];
-            double power = 0;
+            double power = 0.0;
             if (first > last)
             {
-                int bin = (int)center;
+                int bin = Math.Clamp((int)center, 0, _power.Length - 2);
                 power = _power[bin] + (_power[bin + 1] - _power[bin]) * (center - bin);
             }
             else
-                for (int bin = first; bin <= last; bin++) power = Math.Max(power, _power[bin]);
-            levels[i] = double.IsFinite(power) ? Math.Max(FloorDb, (float)(10 * Math.Log10(power))) : FloorDb;
+            {
+                int lo = Math.Clamp(first, 0, _power.Length - 1);
+                int hi = Math.Clamp(last, 0, _power.Length - 1);
+                for (int bin = lo; bin <= hi; bin++) power = Math.Max(power, _power[bin]);
+            }
+            levels[i] = double.IsFinite(power) && power > 0 ? Math.Max(FloorDb, (float)(10.0 * Math.Log10(power))) : FloorDb;
         }
     }
 }
