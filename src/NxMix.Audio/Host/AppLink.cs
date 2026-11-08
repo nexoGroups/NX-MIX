@@ -188,7 +188,7 @@ internal sealed class AppLinkEngine
     private string? ValidateParking(IReadOnlyList<string?> renderBindingDeviceIds)
     {
         if (_parkingId == null)
-            return "Kein stilles Parkplatz-Ausgabegerät eingerichtet. Der Ton bleibt auf dem Windows-Ausgang.";
+            return "Kein Parkplatz gewählt. NX-MIX mischt das Signal. Windows kann es zusätzlich direkt ausgeben.";
         try
         {
             IReadOnlyList<AudioDeviceInfo> devices = _deps.RenderDevices ?? new DeviceCatalog().List();
@@ -403,7 +403,8 @@ internal sealed class AppLinkEngine
 
             if (_routingError != null || _routes == null)
             {
-                slot.SetStatus(AppLinkState.Capturing, _routingError, count);
+                slot.SetStatus(_parkingId == null ? AppLinkState.MixedWithoutRedirect : AppLinkState.Capturing,
+                    _routingError, count);
                 continue;
             }
 

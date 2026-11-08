@@ -64,10 +64,9 @@ internal sealed class VirtualIoPage : Page
         _parkingDd.Text = () =>
         {
             if (string.IsNullOrWhiteSpace(_m.ParkingDeviceId))
-                return "Parkplatz wählen (stilles Gerät) …";
+                return "Kein Parkplatz (Windows parallel)";
             return _m.ParkingDeviceName ?? _m.FindDevice(_m.ParkingDeviceId)?.Name ?? _m.ParkingDeviceId;
         };
-        _parkingDd.TextColor = () => string.IsNullOrWhiteSpace(_m.ParkingDeviceId) ? Theme.Orange : Theme.Text;
         _parkingDd.Items = BuildParkingMenu;
 
         m.BindingsChanged += OnModelChanged;
@@ -92,7 +91,7 @@ internal sealed class VirtualIoPage : Page
         var items = new List<MenuItem>
         {
             MenuItem.Header("Stilles Ausgabegerät (nicht Standard-Lautsprecher)"),
-            new("Kein Parkplatz (nur Pegel und Spektrum)", null, () => _m.SetParking(null))
+            new("Kein Parkplatz (Windows-Ausgabe bleibt aktiv)", null, () => _m.SetParking(null))
             {
                 Checked = string.IsNullOrWhiteSpace(_m.ParkingDeviceId),
             },
@@ -518,7 +517,7 @@ internal sealed class VirtualIoPage : Page
         Draw.Card(g, _appCard);
         Draw.CardTitle(g, new RectF(_appCard.X + pad, _appCard.Y + 11, Math.Max(40, _appSw.Bounds.X - (_appCard.X + pad) - 8), Theme.ControlHSmall),
             "App-Capture", _m.Config.AppLinks.Count);
-        g.Text("PARKPLATZ-AUSGABEGERÄT (STILLE UMLEITUNG GEBUNDENER APPS)", _parkingLabelRect, Theme.MicroStrong, Theme.TextSecondary);
+        g.Text("OPTIONALER PARKPLATZ (STILLE UMLEITUNG GEBUNDENER APPS)", _parkingLabelRect, Theme.MicroStrong, Theme.TextSecondary);
 
         g.PushClip(_appListRect);
         if (_m.Config.AppLinks.Count == 0)

@@ -110,7 +110,8 @@ internal sealed class MixCore
             if (app.Invalid) continue;
             app.ReadInto(Inputs, n);
             if (_monitorProcessor != null)
-                _monitorOnly.AsSpan(app.Binding.EngineFirstChannel, app.Binding.Count).Fill(app.State != AppLinkState.Linked);
+                _monitorOnly.AsSpan(app.Binding.EngineFirstChannel, app.Binding.Count)
+                    .Fill(app.State is not (AppLinkState.Linked or AppLinkState.MixedWithoutRedirect));
         }
 
         for (int ch = 0; ch < Inputs.Length; ch++)

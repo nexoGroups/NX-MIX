@@ -74,7 +74,7 @@ public class AppLinkEngineTests : IDisposable
         e.Tick(_lister.Snapshot());
 
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.Capturing, s.State);
+        Assert.Equal(AppLinkState.MixedWithoutRedirect, s.State);
         Assert.Contains("Parkplatz", s.Message);
         Assert.Single(e.Slots[0].Lanes);
         Assert.Empty(_router.Log);

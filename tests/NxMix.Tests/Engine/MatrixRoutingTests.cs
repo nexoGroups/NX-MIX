@@ -193,6 +193,40 @@ public class MatrixRoutingTests
     }
 
     [Fact]
+    public void Input_and_device_meters_follow_faders_and_mute()
+    {
+        var master = new DeviceMasterDsp { Id = Guid.NewGuid(), Name = "Testquelle", IsInput = true };
+        var settings = ThreeByTwo() with
+        {
+            Inputs = new[] { Ch("a") with { DeviceId = master.Id }, Ch("b"), Ch("c") },
+            DeviceMasters = new[] { master },
+        };
+        var engine = new MixerEngine(settings);
+        var source = new[] { Dc(0.5), Dc(0), Dc(0) };
+        var inputPeaks = new float[3];
+        var devicePeaks = new float[1];
+
+        void CheckPeaks(float expected)
+        {
+            var outputs = Run(engine, source);
+            engine.ReadInputPeaks(inputPeaks);
+            engine.ReadDeviceMasterPeaks(devicePeaks);
+            Assert.Equal(expected, inputPeaks[0], 5);
+            Assert.Equal(expected, devicePeaks[0], 5);
+            Assert.Equal(expected, Tail(outputs[0]), 5);
+        }
+
+        CheckPeaks(0.5f);
+        settings = settings with { Inputs = new[] { settings.Inputs[0] with { GainDb = -6.0206 }, settings.Inputs[1], settings.Inputs[2] } };
+        Assert.True(engine.TrySetSettings(settings));
+        CheckPeaks(0.25f);
+        Assert.True(engine.TrySetSettings(settings with { DeviceMasters = new[] { master with { GainDb = -6.0206 } } }));
+        CheckPeaks(0.125f);
+        Assert.True(engine.TrySetSettings(settings with { DeviceMasters = new[] { master with { Mute = true } } }));
+        CheckPeaks(0.0f);
+    }
+
+    [Fact]
     public void Unused_input_returns_to_use_without_stale_state()
     {
         // Eingang 1 mit Filter wird lange nicht benutzt (Matrix aus), dann wieder eingeschaltet

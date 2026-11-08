@@ -1038,6 +1038,7 @@ internal sealed class AppModel
         {
             AppLinkState.Linked => new LinkView(LinkUi.Linked, st.Message, st.ProcessCount),
             AppLinkState.Capturing => new LinkView(LinkUi.Capturing, st.Message, st.ProcessCount),
+            AppLinkState.MixedWithoutRedirect => new LinkView(LinkUi.MixedWithoutRedirect, st.Message, st.ProcessCount),
             AppLinkState.Failed => new LinkView(LinkUi.Failed, st.Message, st.ProcessCount),
             _ => new LinkView(LinkUi.Waiting, st.Message, st.ProcessCount),
         };

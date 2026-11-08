@@ -80,7 +80,7 @@ public interface IDeviceCatalog
 
 public sealed record AppBinding(string ExeName, int EngineFirstChannel, int Count = 2);
 
-public enum AppLinkState { WaitingForApp, Linked, Failed, Capturing }
+public enum AppLinkState { WaitingForApp, Linked, Failed, Capturing, MixedWithoutRedirect }
 
 public sealed record AppLinkStatus(string ExeName, AppLinkState State, int ProcessCount, string? Message, double BufferFill);
 

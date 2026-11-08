@@ -65,6 +65,7 @@ internal sealed class Compiled
     public Section[][] OutSections = Array.Empty<Section[]>();
     public double[] InDelay = Array.Empty<double>();    // Samples
     public double[] OutDelay = Array.Empty<double>();
+    public float[] InGain = Array.Empty<float>();        // Input trim, fader and device master
     public float[] OutGain = Array.Empty<float>();       // OutChannelGain * OutDeviceMaster * GlobalMaster
     public float[] Ceiling = Array.Empty<float>();       // linear
     /// <summary>Zuordnung jedes Eingangs-/Ausgangskanals auf seinen DeviceMaster-Index (-1 = keiner) fuer aggregiertes Device-Metering.</summary>

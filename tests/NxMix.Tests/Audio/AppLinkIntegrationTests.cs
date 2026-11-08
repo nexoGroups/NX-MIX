@@ -289,7 +289,7 @@ public class AppLinkIntegrationTests
     }
 
     [Fact]
-    public void AudioHost_CapturesWithoutParkingDevice_AndLeavesWindowsRouteUnchanged()
+    public void AudioHost_PatchesAppWithoutParkingDevice_AndLeavesWindowsRouteUnchanged()
     {
         var endpoint = new DeviceCatalog().List().FirstOrDefault(d => d.Flow == DeviceFlow.Render &&
             d.Backend == AudioBackend.Windows && !d.IsVirtualEndpoint && d.Channels >= 2 && CanOpenForRender(d));
@@ -305,27 +305,29 @@ public class AppLinkIntegrationTests
         Assert.True(player.Error == null, player.Error);
         int self = Environment.ProcessId;
         string?[] before = ReadRoutes(self);
-        var mixer = new MixerEngine(MixerSettings.Create(48000, 2, 2) with
-        {
-            MatrixDb = new[] { new[] { 0.0, double.NegativeInfinity }, new[] { double.NegativeInfinity, 0.0 } },
-        });
+        var settings = MixerSettings.Create(48000, 4, 12);
+        foreach (var row in settings.MatrixDb) Array.Fill(row, double.NegativeInfinity);
+        settings.MatrixDb[2][6] = 0.0;
+        settings.MatrixDb[3][8] = 0.0;
+        var mixer = new MixerEngine(settings);
         using var host = new AudioHost();
         host.Start(new AudioHostConfig(48000, Array.Empty<DeviceBinding>(),
-            AppBindings: new[] { new AppBinding(exe, 0, 2) }), mixer);
+            AppBindings: new[] { new AppBinding(exe, 2, 2) }), mixer);
         Assert.True(host.State == HostState.Running, host.GetStats().LastError);
-        var inputPeaks = new float[2];
-        var outputPeaks = new float[2];
+        var inputPeaks = new float[4];
+        var outputPeaks = new float[12];
         Assert.True(SpinWait.SpinUntil(() =>
         {
-            if (host.GetAppLinks().Single().State != AppLinkState.Capturing) return false;
+            if (host.GetAppLinks().Single().State != AppLinkState.MixedWithoutRedirect) return false;
             mixer.ReadInputPeaks(inputPeaks);
-            return inputPeaks.Max() > 0.0001;
-        }, TimeSpan.FromSeconds(8)), $"Kein App-Capture-Signal von {endpoint.Name}: {host.GetAppLinks().Single()}");
-        mixer.ReadOutputPeaks(outputPeaks);
+            mixer.ReadOutputPeaks(outputPeaks);
+            return inputPeaks[2] > 0.0001 && inputPeaks[3] > 0.0001 &&
+                outputPeaks[6] > 0.0001 && outputPeaks[8] > 0.0001;
+        }, TimeSpan.FromSeconds(8)), $"Kein Signal auf Out 07/09: {host.GetAppLinks().Single()}");
         Assert.Contains("Parkplatz", host.GetAppLinks().Single().Message);
-        Assert.All(outputPeaks, peak => Assert.Equal(0f, peak));
+        Assert.All(outputPeaks.Where((_, i) => i != 6 && i != 8), peak => Assert.Equal(0f, peak));
         Assert.Equal(before, ReadRoutes(self));
-        _out.WriteLine($"Ohne Parkplatz auf {endpoint.Name}: Eingang {inputPeaks.Max():F6}, Mix-Ausgang {outputPeaks.Max():F6}.");
+        _out.WriteLine($"Ohne Parkplatz auf {endpoint.Name}: In 03 → Out 07 {outputPeaks[6]:F6}, In 04 → Out 09 {outputPeaks[8]:F6}.");
     }
 
     [Fact]

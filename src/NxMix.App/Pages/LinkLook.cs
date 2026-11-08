@@ -10,7 +10,7 @@ internal static class LinkLook
     public static Color4 Color(LinkUi s) => s switch
     {
         LinkUi.Linked => Theme.Green,
-        LinkUi.Waiting or LinkUi.NeedsSetup or LinkUi.AudioBlocked or LinkUi.Capturing => Theme.Orange,
+        LinkUi.Waiting or LinkUi.NeedsSetup or LinkUi.AudioBlocked or LinkUi.Capturing or LinkUi.MixedWithoutRedirect => Theme.Orange,
         LinkUi.Failed or LinkUi.Conflict => Theme.Red,
         LinkUi.Off => Theme.TextTertiary,
         _ => Theme.AccentText,
@@ -20,6 +20,7 @@ internal static class LinkLook
     {
         LinkUi.Linked => "Verbunden",
         LinkUi.Capturing => "Aufnahme · Umleitung offen",
+        LinkUi.MixedWithoutRedirect => "Gemischt · Windows parallel",
         LinkUi.Waiting => "Wartet auf das Programm",
         LinkUi.Failed => "Fehler",
         LinkUi.Conflict => "Konflikt",
@@ -36,6 +37,7 @@ internal static class LinkLook
         {
             LinkUi.Linked => "verbunden" + (v.ProcessCount > 1 ? $" ({v.ProcessCount} Prozesse)" : ""),
             LinkUi.Capturing => "nimmt auf, Ausgabeumleitung offen",
+            LinkUi.MixedWithoutRedirect => "wird gemischt, Windows-Ausgabe bleibt aktiv",
             LinkUi.Waiting => "wartet auf das Programm",
             LinkUi.Failed => "Fehler",
             LinkUi.Conflict => "Konflikt",

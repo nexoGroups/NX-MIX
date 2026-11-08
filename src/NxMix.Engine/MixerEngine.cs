@@ -312,6 +312,7 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
             }
             inGain[i] = (float)(ChannelGain(ch, soloIn, includeTrim: true) * devGain);
         }
+        c.InGain = inGain;
 
         c.Cross = new float[_capOut * _capIn];
         var m = s.MatrixDb;
@@ -527,7 +528,7 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
             }
         }
 
-        // ---- 1. Eingaenge: Rohpegel, Device-Input-Meter, Delay, Filterkette
+        // ---- 1. Eingaenge: Pegel mit Fader-Gain, Delay, Filterkette
         int simdCnt = 0;
         var inDevIdx = plan.InDeviceIndex;
         for (int i = 0; i < scanIn; i++)
@@ -537,9 +538,10 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
             float peak;
             if (src != null && src.Length >= pos + n) peak = Dsp.SanitizeCopy(src, pos, buf, n, Dsp.HugeIn);
             else { Array.Clear(buf, 0, n); peak = 0f; }
-            UpdatePeak(_inPeaks, i, peak);
+            float faderPeak = peak * Math.Abs(plan.InGain[i]);
+            UpdatePeak(_inPeaks, i, faderPeak);
             int dIdx = inDevIdx[i];
-            if (dIdx >= 0) UpdatePeak(_devPeaks, dIdx, peak);
+            if (dIdx >= 0) UpdatePeak(_devPeaks, dIdx, faderPeak);
 
             var rt = _inRt[i];
             rt.Delay.Push(buf, n);

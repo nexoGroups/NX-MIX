@@ -131,7 +131,7 @@ public interface IMixerEngine : IBlockProcessor
     /// sich im laufenden Betrieb bis zur vorallokierten Kapazitaet unterbrechungsfrei aendern.</summary>
     bool TrySetSettings(MixerSettings settings);
     MixerSettings Settings { get; }
-    /// <summary>Spitzenpegel seit dem letzten Lesen (linear 0..), je Eingangskanal.</summary>
+    /// <summary>Spitzenpegel mit Eingangs- und Geräte-Fader seit dem letzten Lesen (linear 0..), je Eingangskanal.</summary>
     void ReadInputPeaks(Span<float> destination);
     /// <summary>Spitzenpegel seit dem letzten Lesen (linear 0..), je Ausgangskanal.</summary>
     void ReadOutputPeaks(Span<float> destination);

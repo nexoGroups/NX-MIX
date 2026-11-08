@@ -11,7 +11,7 @@ internal sealed record AppLink(string ExeName, int FirstChannel, int Count = 2, 
     public string Title => string.IsNullOrWhiteSpace(DisplayName) ? AppLinkRules.PrettyName(ExeName) : DisplayName!;
 }
 
-internal enum LinkUi { Off, Idle, NeedsSetup, AudioBlocked, Waiting, Capturing, Linked, Failed, Conflict }
+internal enum LinkUi { Off, Idle, NeedsSetup, AudioBlocked, Waiting, Capturing, MixedWithoutRedirect, Linked, Failed, Conflict }
 
 internal readonly record struct LinkView(LinkUi State, string? Message, int ProcessCount);
 

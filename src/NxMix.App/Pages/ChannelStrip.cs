@@ -175,7 +175,7 @@ internal sealed class ChannelStrip : Widget
         Readout.Text = Db.Format(c.GainDb);
         Readout.TextColor = !Db.IsOff(c.GainDb) && c.GainDb > 0.05 ? Theme.Yellow : locked && c.GainDb >= c.MaxGainDb - 0.05 ? Theme.Orange : null;
         Meter.CeilingDb = IsInput ? double.NaN : c.CeilingDbfs;
-        Meter.ExtraTooltip = IsInput ? "Eingangspegel" : $"Ausgangspegel · Limiter {Db.Format(c.CeilingDbfs)} dBFS";
+        Meter.ExtraTooltip = IsInput ? "Eingangspegel mit Fader-Gain" : $"Ausgangspegel · Limiter {Db.Format(c.CeilingDbfs)} dBFS";
     }
 
     public bool FeedMeter(float peak, float dt) => Meter.Feed(peak, dt);

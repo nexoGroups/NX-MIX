@@ -64,9 +64,9 @@ $publish = Join-Path $root "artifacts\publish-$resolvedChannel"
 $outPath = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $root $OutputDir }
 
 $driverHash = ''
-$betaWithoutDriver = $resolvedChannel -eq 'beta' -and $cleanVersion -eq '0.3.2-beta.1'
+$betaWithoutDriver = $resolvedChannel -eq 'beta' -and $cleanVersion -in @('0.3.2-beta.1', '0.3.2-beta.2')
 if ($betaWithoutDriver) {
-    Write-Host 'Beta 0.3.2-beta.1 wird ohne WaveRT-Treiber gepackt.'
+    Write-Host "Beta $cleanVersion wird ohne WaveRT-Treiber gepackt."
 }
 elseif (-not [string]::IsNullOrWhiteSpace($NativeDriverMsi)) {
     $driverFile = Get-Item -LiteralPath $NativeDriverMsi
