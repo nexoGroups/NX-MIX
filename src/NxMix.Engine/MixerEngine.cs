@@ -166,10 +166,40 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
         _settings = initial;
     }
 
-    public SpectrumCapture StartSpectrum(bool input, int channel)
+    sealed class OutputTestTone(int output)
+    {
+        public readonly int Output = output;
+        public int Position;
+    }
+
+    OutputTestTone? _outputTestTone;
+
+    public bool TryStartOutputTestTone(int output) =>
+        (uint)output < (uint)_capOut &&
+        Interlocked.CompareExchange(ref _outputTestTone, new OutputTestTone(output), null) == null;
+
+    public void CancelOutputTestTone() => Interlocked.Exchange(ref _outputTestTone, null);
+
+    void AddOutputTestTone(OutputTestTone tone, float[] mix, int count, float peakGain)
+    {
+        const float amplitude = 0.01f; // −40 dBFS maximum before the limiter.
+        int length = _sr / 2;
+        int fade = Math.Max(1, _sr / 50);
+        int end = Math.Min(length, tone.Position + count);
+        float scale = amplitude / Math.Max(1f, peakGain);
+        double phasePerSample = 2 * Math.PI * 440 / _sr;
+        for (int i = 0; tone.Position < end; i++, tone.Position++)
+        {
+            float envelope = Math.Min(1f, Math.Min(tone.Position, length - 1 - tone.Position) / (float)fade);
+            mix[i] += scale * envelope * (float)Math.Sin(tone.Position * phasePerSample);
+        }
+        if (tone.Position == length) Interlocked.CompareExchange(ref _outputTestTone, null, tone);
+    }
+
+    public SpectrumCapture StartSpectrum(bool input, int channel, int windowSize = 0)
     {
         if ((uint)channel >= (uint)(input ? _capIn : _capOut)) throw new ArgumentOutOfRangeException(nameof(channel));
-        var capture = new SpectrumCapture(input, channel, _sr);
+        var capture = new SpectrumCapture(input, channel, _sr, windowSize);
         Volatile.Write(ref _spectrum, capture);
         return capture;
     }
@@ -670,6 +700,9 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
 
         // ---- 4. Ausgaenge: Delay, Kanal-Fader * Device-Master * Global-Master, Brickwall-Limiter, Pegel
         var outDevIdx = plan.OutDeviceIndex;
+        var testTone = Volatile.Read(ref _outputTestTone);
+        if (testTone != null && testTone.Output >= scanOut)
+            Interlocked.CompareExchange(ref _outputTestTone, null, testTone);
         for (int o = 0; o < scanOut; o++)
         {
             var rt = _outRt[o];
@@ -679,6 +712,7 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
             rt.Delay.Read(mix, n, plan.OutDelay[o], _defaultRampLen);
 
             float gt = plan.OutGain[o], gc = rt.GainCur;
+            if (testTone?.Output == o) AddOutputTestTone(testTone, mix, n, Math.Max(gt, gc));
             if (gc == gt || k == 0)
             {
                 if (gt != 1f) Dsp.Scale(mix, 0, n, gt);

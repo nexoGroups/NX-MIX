@@ -172,7 +172,6 @@ internal sealed class TextEditor : Widget
 
     public override void OnMouseDown(in MouseEvent e)
     {
-        if (e.Clicks >= 2) { _anchor = 0; _caret = _text.Length; return; }
         _caret = HitIndex(e.X);
         if (!e.Shift) _anchor = _caret;
         ResetBlink();

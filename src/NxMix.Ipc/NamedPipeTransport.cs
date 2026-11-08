@@ -205,8 +205,14 @@ public sealed class NamedPipeControlServer : IDisposable
                     return new IpcServerEnvelope { RequestId = req.RequestId, IntResult = n };
                 }
 
+                case "playOutputTestTone":
+                {
+                    string? err = await _engine.PlayOutputTestToneAsync(req.GuidArg).ConfigureAwait(false);
+                    return new IpcServerEnvelope { RequestId = req.RequestId, Ok = err == null, Error = err };
+                }
+
                 case "subscribeSpectrum":
-                    await _engine.SubscribeSpectrumAsync(req.IntArg, req.IntArg2).ConfigureAwait(false);
+                    await _engine.SubscribeSpectrumAsync(req.IntArg, req.IntArg2, req.IntArg3).ConfigureAwait(false);
                     return new IpcServerEnvelope { RequestId = req.RequestId };
 
                 case "saveSnapshot":
@@ -557,8 +563,14 @@ public sealed class NamedPipeBackendClient : INxMixBackend
         return r.IntResult;
     }
 
-    public async Task SubscribeSpectrumAsync(int mode, int channelIndex) =>
-        await SendRequestAsync(new IpcRequestEnvelope { Method = "subscribeSpectrum", IntArg = mode, IntArg2 = channelIndex }).ConfigureAwait(false);
+    public async Task<string?> PlayOutputTestToneAsync(Guid channelId)
+    {
+        var response = await SendRequestAsync(new IpcRequestEnvelope { Method = "playOutputTestTone", GuidArg = channelId }).ConfigureAwait(false);
+        return response.Ok ? null : response.Error;
+    }
+
+    public async Task SubscribeSpectrumAsync(int mode, int channelIndex, int windowSize = 0) =>
+        await SendRequestAsync(new IpcRequestEnvelope { Method = "subscribeSpectrum", IntArg = mode, IntArg2 = channelIndex, IntArg3 = windowSize }).ConfigureAwait(false);
 
     public async Task<MixSnapshot> SaveSnapshotAsync(Guid? existingId, string name, string notes, string colorHex, double defaultFadeMs, SnapshotScopeFlags defaultScope)
     {

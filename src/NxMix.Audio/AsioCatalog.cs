@@ -20,6 +20,16 @@ public static class AsioCatalog
 
     public static void ClearCache() => Cache.Clear();
 
+    public static bool CanOpen(string driverName)
+    {
+        try
+        {
+            using var session = AsioBackendRegistry.Current.Open(driverName);
+            return session.Capabilities.InputChannels > 0 || session.Capabilities.OutputChannels > 0;
+        }
+        catch { return false; }
+    }
+
     public static IReadOnlyList<AudioDeviceInfo> List()
     {
         var list = new List<AudioDeviceInfo>();

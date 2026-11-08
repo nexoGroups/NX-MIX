@@ -30,7 +30,7 @@ internal sealed class SnapshotsPage : Page
     // Rechte Karte: Recall, Blende, Scope, Diff / Recall-Safe
     readonly Button _recallBtn = new("Snapshot abrufen", ButtonStyle.Filled, Icon.Play) { Font = Theme.CaptionStrong, Tooltip = "Gewählten Snapshot mit eingestellter Blende und Scope abrufen" };
     readonly Segmented _fadeSeg = new("0 ms", "100", "250", "500", "1 s", "3 s") { Font = Theme.MicroStrong };
-    readonly ValueBox _fadeBox = new() { EditHint = "Doppelklick: Überblendzeit 0..10000 ms eingeben" };
+    readonly ValueBox _fadeBox = new() { EditHint = "Klick: Überblendzeit 0..10000 ms eingeben" };
     readonly Dropdown _scopeDd = new() { Tooltip = "Selektiver Recall-Umfang (welche Parameter-Gruppen abgerufen werden)" };
     readonly Segmented _viewSeg = new("Diff-Vorschau", "Recall-Safe") { Font = Theme.CaptionStrong };
 
@@ -436,17 +436,9 @@ internal sealed class SnapshotsPage : Page
             var picked = _m.Snapshots[_hotSnap];
             _selectedId = picked.Id;
             _fadeMs = picked.DefaultFadeMs;
-            if (e.Clicks >= 2)
-            {
-                _m.RecallSnapshot(picked.Id, _scope, _fadeMs);
-                Root?.Notify.Flash($"Snapshot „{picked.Name}“ abgerufen.");
-            }
-            else
-            {
-                RefreshPreview();
-                Layout();
-                Invalidate();
-            }
+            RefreshPreview();
+            Layout();
+            Invalidate();
             return;
         }
 

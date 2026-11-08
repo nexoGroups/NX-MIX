@@ -40,23 +40,24 @@ internal sealed class ChannelSheet : SheetOverlay
     readonly IconButton _close = new(Icon.Close, "Schließen (Esc)") { IconSize = 16 };
     public readonly NameField Name = new();
 
-    public readonly Slider Gain = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Default = 0, Step = 0.1, WheelStep = 1 };
+    public readonly Slider Gain = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Step = 0.1, WheelStep = 1 };
     public readonly ValueBox GainBox = new();
-    public readonly Slider Trim = new() { Min = -24, Max = 24, Default = 0, Step = 0.1, WheelStep = 0.5 };
+    public readonly Slider Trim = new() { Min = -24, Max = 24, Step = 0.1, WheelStep = 0.5 };
     public readonly ValueBox TrimBox = new();
-    public readonly Slider Pan = new() { Min = -1.0, Max = 1.0, Default = 0, Step = 0.02, WheelStep = 0.05 };
+    public readonly Slider Pan = new() { Min = -1.0, Max = 1.0, Step = 0.02, WheelStep = 0.05 };
     public readonly ValueBox PanBox = new();
     public readonly Segmented LowCut = new("Aus", "60 Hz", "80 Hz", "100 Hz", "120 Hz");
 
     public readonly Switch MuteSw = new(), SoloSw = new(), PhaseSw = new(), PairLinkSw = new(), RecallSafeSw = new();
-    public readonly Slider Delay = new() { Min = 0, Max = 50.0, Default = 0, Step = 0.05, WheelStep = 0.2 };
-    public readonly ValueBox DelayBox = new() { EditHint = "Doppelklick: Laufzeit 0..1000 ms eintippen" };
+    public readonly Slider Delay = new() { Min = 0, Max = 50.0, Step = 0.05, WheelStep = 0.2 };
+    public readonly ValueBox DelayBox = new() { EditHint = "Klick: Laufzeit 0..1000 ms eintippen" };
     public readonly Segmented Lock = new("Aus", "0", "−6", "−12", "−20") { Tooltip = "Gain-Sperre: höchster erlaubter Pegel in dB" };
     public readonly Segmented Ceiling = new("−1", "−3", "−6", "−12") { Tooltip = "Brickwall-Limiter-Grenze des Ausgangs in dBFS" };
 
     readonly Button _openOutDsp = new("In Outputs / DSP öffnen (Crossover, PEQ & REW)", ButtonStyle.Filled, Icon.Dsp);
     public readonly Button LinkBind = new("Programm binden …", ButtonStyle.Tinted, Icon.Link);
     public readonly Button LinkRemove = new("Lösen", ButtonStyle.DestructiveTinted);
+    readonly Button _copy = new("Einstellungen kopieren …", ButtonStyle.Gray);
     readonly Button _left = new("Nach links", ButtonStyle.Gray, Icon.ChevronLeft);
     readonly Button _right = new("Nach rechts", ButtonStyle.Gray, Icon.ChevronRight);
     public readonly Button Delete = new("Kanal löschen", ButtonStyle.DestructiveTinted, Icon.Trash);
@@ -78,7 +79,8 @@ internal sealed class ChannelSheet : SheetOverlay
         else { Add(_openOutDsp); Add(Ceiling); }
         Add(MuteSw); Add(SoloSw); Add(PhaseSw); Add(PairLinkSw); Add(RecallSafeSw);
         Add(Delay); Add(DelayBox); Add(Lock);
-        Add(_left); Add(_right); Add(Delete);
+        Add(_copy); Add(_left); Add(_right); Add(Delete);
+        _copy.Clicked += () => ShowCopyMenu(Root, _m, IsInput, Index, _copy.Bounds);
 
         _prev.Clicked += _ => Go(-1);
         _next.Clicked += _ => Go(+1);
@@ -168,6 +170,29 @@ internal sealed class ChannelSheet : SheetOverlay
 
     int Count => IsInput ? _m.InputCount : _m.OutputCount;
     ChannelDsp Cur => _m.Channel(IsInput, Index);
+
+    public static void ShowCopyMenu(UiRoot? root, AppModel model, bool input, int index, RectF anchor)
+    {
+        int count = input ? model.InputCount : model.OutputCount;
+        if (root == null || index < 0 || index >= count) return;
+        Guid source = model.Channel(input, index).Id;
+        string from = model.DisplayName(input, index);
+        var items = new List<MenuItem> { MenuItem.Header("Einstellungen kopieren nach") };
+        for (int i = 0; i < count; i++)
+        {
+            if (i == index) continue;
+            Guid target = model.Channel(input, i).Id;
+            string to = model.DisplayName(input, i);
+            items.Add(new MenuItem($"{(input ? "IN" : "OUT")} {i + 1:00} · {to}", null, () =>
+                root.Confirm("Kanaleinstellungen kopieren?", $"„{from}“ → „{to}“\nÜbernimmt Pegel, DSP und Spektrum. Die Zielpegel können sich ändern.", "Kopieren", () =>
+                {
+                    if (!model.CopyChannelSettings(input, source, target)) return;
+                    root.Prefs.SaveSpectrum(target, root.Prefs.Spectrum(source));
+                    root.Notify.Flash($"Einstellungen auf „{to}“ kopiert.");
+                })));
+        }
+        PopupMenu.Show(root, anchor, items);
+    }
 
     public static ChannelSheet Show(UiRoot root, AppModel m, bool input, int index, bool eq = false)
     {
@@ -369,6 +394,10 @@ internal sealed class ChannelSheet : SheetOverlay
             _cards.Add(new RectF(x, c4Top, w, y - c4Top));
             y += 10;
         }
+
+        _copy.Enabled = Count > 1;
+        _copy.Bounds = new RectF(x, y, w, Theme.ControlH);
+        y += Theme.ControlH + 8;
 
         // Reihenfolge & Löschen
         float half = (w - 8) / 2;

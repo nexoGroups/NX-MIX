@@ -37,7 +37,8 @@ public interface INxMixBackend : IDisposable
     Task<int> RestoreOrphanedAppRoutesAsync();
 
     // ---- Spektral-Tap (für Outputs / DSP) ----
-    Task SubscribeSpectrumAsync(int mode, int channelIndex);
+    Task<string?> PlayOutputTestToneAsync(Guid channelId);
+    Task SubscribeSpectrumAsync(int mode, int channelIndex, int windowSize = 0);
 
     // ---- Mischpult-Snapshots ----
     Task<MixSnapshot> SaveSnapshotAsync(Guid? existingId, string name, string notes, string colorHex, double defaultFadeMs, SnapshotScopeFlags defaultScope);

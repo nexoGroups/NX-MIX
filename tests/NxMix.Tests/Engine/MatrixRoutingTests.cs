@@ -28,6 +28,39 @@ public class MatrixRoutingTests
         };
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Output_test_tone_is_bounded_and_only_reaches_the_selected_unmuted_channel(bool muted)
+    {
+        var mixer = MixerSettings.Create(Sr, 0, 2);
+        mixer = mixer with { Outputs = new[] { mixer.Outputs[0], mixer.Outputs[1] with { Mute = muted, GainDb = 12 } } };
+        var engine = new MixerEngine(mixer);
+        var buffers = NewBuffers(2, Sr);
+        Assert.True(engine.TryStartOutputTestTone(1));
+        Assert.False(engine.TryStartOutputTestTone(0));
+
+        engine.Process(Array.Empty<float[]>(), buffers, Sr);
+        Assert.All(buffers[0], value => Assert.Equal(0f, value));
+        float peak = buffers[1].Max(MathF.Abs);
+        if (muted) Assert.Equal(0f, peak);
+        else Assert.InRange(peak, 0.009f, 0.01001f);
+        Assert.Equal(0f, buffers[1][0]);
+        Assert.Equal(0f, buffers[1][^1]);
+        Assert.True(engine.TryStartOutputTestTone(0));
+    }
+
+    [Theory]
+    [InlineData(0, 16384)]
+    [InlineData(4096, 4096)]
+    [InlineData(32768, 32768)]
+    [InlineData(123, 16384)]
+    public void Spectrum_capture_uses_the_requested_supported_fft_window(int requested, int expected)
+    {
+        var engine = new MixerEngine(MixerSettings.Create(Sr, 0, 1));
+        Assert.Equal(expected, engine.StartSpectrum(false, 0, requested).WindowSize);
+    }
+
     [Fact]
     public void Matrix_routes_and_sums_correctly()
     {

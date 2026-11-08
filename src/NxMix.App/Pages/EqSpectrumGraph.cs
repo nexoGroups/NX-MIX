@@ -10,9 +10,18 @@ namespace NxMix.App.Pages;
 /// <summary>Live-Spektrum (Pre-DSP orange gestrichelt, Post-DSP türkis) + exakte mathematische Summen-Filterkurve (inkl. REW &amp; Preamp).</summary>
 internal sealed class EqSpectrumGraph : Widget
 {
-    const float SpectrumTop = 12;
+    SpectrumPrefs _options = new();
+    Guid _channelId;
+    int _channelIndex = -1;
+
+    public void SetOptions(SpectrumPrefs options)
+    {
+        if (_options.WindowSize != options.WindowSize || _options.ShowPre != options.ShowPre || _options.ShowPost != options.ShowPost)
+            ResetTrace();
+        _options = options;
+    }
     static readonly int[] s_levelTicks = { 12, 0, -20, -40, -60, -80, -100 };
-    static readonly int[] s_frequencyTicks = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
+    static readonly int[] s_frequencyTicks = { 20, 50, 100, 200, 250, 500, 1000, 2000, 4000, 5000, 10000, 20000 };
 
     readonly float[] _eq = new float[512];
     readonly float[] _before = new float[SpectrumAnalyzer.Points];
@@ -28,9 +37,9 @@ internal sealed class EqSpectrumGraph : Widget
     public static Color4 EqColor => Theme.AccentText;
     public static Color4 BeforeColor => Theme.Orange;
     public static Color4 AfterColor => Theme.Teal;
-    public bool ShowEq { get; set; } = true;
-    public bool ShowBefore { get; set; } = true;
-    public bool ShowAfter { get; set; } = true;
+    bool ShowEq => _options.ShowEq;
+    bool ShowBefore => _options.ShowPre;
+    bool ShowAfter => _options.ShowPost;
 
     public EqSpectrumGraph()
     {
@@ -41,13 +50,25 @@ internal sealed class EqSpectrumGraph : Widget
     public void Stop(AppModel? model = null)
     {
         model?.SubscribeSpectrum(0, -1);
+        ResetTrace();
+    }
+
+    void ResetTrace()
+    {
         _ready = false;
         _lastSeq = -1;
     }
 
     public bool Update(ChannelDsp channel, int rate, bool input, int index, AppModel model, float dt)
     {
-        bool changed = RefreshCurve(channel, rate, input);
+        bool selectionChanged = channel.Id != _channelId || index != _channelIndex;
+        if (selectionChanged || (rate > 0 && rate != _curveRate))
+        {
+            _channelId = channel.Id;
+            _channelIndex = index;
+            ResetTrace();
+        }
+        bool changed = RefreshCurve(channel, rate, input) || selectionChanged;
         if (!ShowBefore && !ShowAfter)
         {
             model.SubscribeSpectrum(0, -1);
@@ -55,7 +76,7 @@ internal sealed class EqSpectrumGraph : Widget
         }
 
         int mode = input ? 1 : 2;
-        model.SubscribeSpectrum(mode, index);
+        model.SubscribeSpectrum(mode, index, _options.WindowSize);
 
         if (!model.HostRunning)
         {
@@ -127,11 +148,16 @@ internal sealed class EqSpectrumGraph : Widget
 
         g.Text("SPEKTRUM · dBFS", new RectF(b.X + 10, b.Y + 6, 132, 18), Theme.MicroStrong, Theme.TextSecondary);
         g.Text("SUMMEN-DSP · dB", new RectF(b.Right - 115, b.Y + 6, 105, 18), Theme.MicroStrong, EqColor, HAlign.Right);
-        foreach (int db in s_levelTicks)
+        (float bottom, float top) = _options.LevelRange switch { 1 => (-80, 0), 2 => (-60, 0), 3 => (-40, 0), _ => (-100, 12) };
+        bool customLevels = _options.CustomLevels is { Min: >= -100, Max: <= 12 } customLevel && customLevel.Min < customLevel.Max;
+        if (customLevels) (bottom, top) = (_options.CustomLevels!.Min, _options.CustomLevels.Max);
+        for (int i = 0; i < s_levelTicks.Length; i++)
         {
-            float y = Y(plot, db, SpectrumAnalyzer.FloorDb, SpectrumTop);
+            float db = customLevels ? MathF.Round(top - i * (top - bottom) / (s_levelTicks.Length - 1)) : s_levelTicks[i];
+            if (db < bottom || db > top) continue;
+            float y = Y(plot, db, bottom, top);
             g.Line(plot.X, y, plot.Right, y, db == 0 ? Theme.BorderStrong : Theme.Separator);
-            g.Text(db.ToString(), new RectF(b.X + 4, y - 8, 37, 16), Theme.Micro, Theme.TextSecondary, HAlign.Right);
+            g.Text($"{db:0}", new RectF(b.X + 4, y - 8, 37, 16), Theme.Micro, Theme.TextSecondary, HAlign.Right);
         }
         foreach (float db in (ReadOnlySpan<float>)[_eqTop, 0, _eqBottom])
         {
@@ -139,40 +165,90 @@ internal sealed class EqSpectrumGraph : Widget
             g.Text(db > 0 ? $"+{db:0}" : $"{db:0}", new RectF(plot.Right + 6, y - 8, 35, 16), Theme.Micro, EqColor);
         }
 
-        double maxHz = SpectrumAnalyzer.MaxHz(_curveRate);
-        double span = Math.Log(maxHz / SpectrumAnalyzer.MinHz);
-        foreach (int hz in s_frequencyTicks)
+        double dataMaxHz = SpectrumAnalyzer.MaxHz(_curveRate);
+        (double lowHz, double highHz) = _options.Range switch
         {
-            if (hz > maxHz) break;
-            float x = plot.X + plot.W * (float)(Math.Log(hz / SpectrumAnalyzer.MinHz) / span);
+            1 => (20, 250), 2 => (100, 4000), 3 => (2000, 20000), _ => (20, 20000),
+        };
+        if (_options.CustomFrequency is { Min: >= 20, Max: <= 20000 } frequency && frequency.Max > frequency.Min)
+            (lowHz, highHz) = (frequency.Min, frequency.Max);
+        highHz = Math.Min(highHz, dataMaxHz);
+        lowHz = lowHz < highHz ? lowHz : SpectrumAnalyzer.MinHz;
+        double span = _options.Linear ? highHz - lowHz : Math.Log(highHz / lowHz);
+        double stepHz = Math.Max(1, Math.Pow(10, Math.Floor(Math.Log10(span / 4))));
+        if (_options.Linear) stepHz *= Math.Max(1, Math.Floor(span / (4 * stepHz)));
+        int tickCount = _options.Linear ? (int)Math.Ceiling(highHz / stepHz) : s_frequencyTicks.Length;
+        float previousLabel = float.NegativeInfinity;
+        for (int i = _options.Linear ? (int)Math.Ceiling(lowHz / stepHz) : 0; i < tickCount; i++)
+        {
+            double hz = _options.Linear ? i * stepHz : s_frequencyTicks[i];
+            if (hz < lowHz || hz > highHz) continue;
+            double offset = _options.Linear ? hz - lowHz : Math.Log(hz / lowHz);
+            float x = plot.X + plot.W * (float)(offset / span);
             g.Line(x, plot.Y, x, plot.Bottom, Theme.Separator);
-            string label = hz >= 1000 ? $"{hz / 1000}k" : hz.ToString();
+            if (x - previousLabel < 34 || x > plot.Right - 25) continue;
+            previousLabel = x;
+            string label = hz >= 1000 ? $"{hz / 1000:0.#}k" : $"{hz:0}";
             g.Text(label, new RectF(x - 16, plot.Bottom + 4, 32, 17), Theme.Micro, Theme.TextSecondary, HAlign.Center);
         }
+        g.Text(highHz >= 1000 ? $"{highHz / 1000:0.#}k" : $"{highHz:0}",
+            new RectF(plot.Right - 16, plot.Bottom + 4, 32, 17), Theme.Micro, Theme.TextSecondary, HAlign.Center);
         g.Text("Hz", new RectF(plot.Right + 16, plot.Bottom + 4, 23, 17), Theme.Micro, Theme.TextSecondary);
 
-        if (_ready && ShowAfter) Trace(g, plot, _after, SpectrumAnalyzer.FloorDb, SpectrumTop, AfterColor, 1.6f);
-        if (_ready && ShowBefore) Trace(g, plot, _before, SpectrumAnalyzer.FloorDb, SpectrumTop, BeforeColor, 1.4f, dashed: true);
-        if (ShowEq) Trace(g, plot, _eq, _eqBottom, _eqTop, EqColor, 2.2f);
+        int displayPoints = _options.EffectiveDisplayPoints;
+        if (_ready && ShowAfter) Trace(_after, displayPoints, bottom, top, AfterColor, 1.6f, _options.Bars);
+        if (_ready && ShowBefore) Trace(_before, displayPoints, bottom, top, BeforeColor, 1.4f, _options.Bars, dashed: true);
+        if (ShowEq) Trace(_eq, _eq.Length, _eqBottom, _eqTop, EqColor, 2.2f, false);
         if (!_ready && (ShowBefore || ShowAfter))
         {
             g.Text("Live-Spektrum aktiv sobald Audio läuft", new RectF(plot.X, plot.Bottom - 24, plot.W, 22),
                 Theme.Caption, Theme.TextSecondary, HAlign.Center);
+        }
+        void Trace(float[] values, int count, float min, float max, Color4 color, float width, bool bars, bool dashed = false)
+        {
+            double logDataSpan = Math.Log(dataMaxHz / SpectrumAnalyzer.MinHz);
+            int last = values.Length - 1;
+            double divisions = bars ? count : count - 1;
+            float step = plot.W / (float)divisions;
+            float previous = plot.Bottom;
+            double leftEdge = DataIndex(0);
+            for (int i = 0; i < count; i++)
+            {
+                double fraction = (i + (bars ? 0.5 : 0)) / divisions;
+                float db = LevelAt(DataIndex(fraction));
+                if (bars)
+                {
+                    double rightEdge = DataIndex((i + 1) / divisions);
+                    for (int band = (int)Math.Ceiling(leftEdge); band < rightEdge; band++)
+                        db = Math.Max(db, values[band]);
+                    if (i == count - 1) db = Math.Max(db, LevelAt(rightEdge));
+                    leftEdge = rightEdge;
+                }
+                float y = Y(plot, db, min, max);
+                float x = plot.X + plot.W * (float)fraction;
+                if (bars)
+                    g.Line(x, plot.Bottom, x, y, color.With(dashed ? 0.55f : 0.75f), Math.Clamp(step * 0.7f, 1f, 6f));
+                else if (i > 0 && (!dashed || i % 4 < 3))
+                    g.Line(x - step, previous, x, y, color, width);
+                previous = y;
+            }
+
+            double DataIndex(double fraction)
+            {
+                double offset = span * fraction;
+                double hz = _options.Linear ? lowHz + offset : lowHz * Math.Exp(offset);
+                return Math.Clamp(Math.Log(hz / SpectrumAnalyzer.MinHz) / logDataSpan * last, 0, last);
+            }
+
+            float LevelAt(double index)
+            {
+                int left = Math.Min((int)index, last - 1);
+                return values[left] + (values[left + 1] - values[left]) * (float)(index - left);
+            }
         }
     }
 
     static float Y(RectF plot, float db, float bottom, float top) =>
         plot.Bottom - plot.H * Math.Clamp((db - bottom) / Math.Max(1f, top - bottom), 0, 1);
 
-    static void Trace(Renderer g, RectF plot, float[] values, float bottom, float top, Color4 color, float width, bool dashed = false)
-    {
-        float step = plot.W / (values.Length - 1);
-        float y = Y(plot, values[0], bottom, top);
-        for (int i = 1; i < values.Length; i++)
-        {
-            float next = Y(plot, values[i], bottom, top);
-            if (!dashed || i % 4 < 3) g.Line(plot.X + (i - 1) * step, y, plot.X + i * step, next, color, width);
-            y = next;
-        }
-    }
 }

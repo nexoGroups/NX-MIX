@@ -18,6 +18,7 @@ internal sealed class VirtualIoPage : Page
 
     readonly Switch _appSw = new() { Tooltip = "Prozessspezifisches App-Audio-Capture aktivieren / deaktivieren" };
     readonly Button _addAppBtn = new("+ Programm …", ButtonStyle.Filled) { Font = Theme.CaptionStrong, Tooltip = "Laufendes Programm oder EXE-Namen als eigenen Mixer-Eingang einbinden" };
+    readonly Toggle _redirectOptions = new("Windows-Ausgabe …", () => Theme.AccentText) { Tooltip = "Optionale Umleitung und Reset anzeigen" };
     readonly Dropdown _parkingDd = new() { Tooltip = "Stilles Ausgabegerät (Parkplatz), auf das gebundene Apps unhörbar umgeleitet werden" };
     readonly Button _restoreBtn = new("Reset", ButtonStyle.Gray, Icon.Refresh) { Font = Theme.CaptionMedium, Tooltip = "Verwaiste Windows-App-Umleitungen sofort auf Standard zurücksetzen" };
 
@@ -41,6 +42,7 @@ internal sealed class VirtualIoPage : Page
         Add(_scanBtn);
         Add(_appSw);
         Add(_addAppBtn);
+        Add(_redirectOptions);
         Add(_parkingDd);
         Add(_restoreBtn);
 
@@ -64,10 +66,11 @@ internal sealed class VirtualIoPage : Page
         _parkingDd.Text = () =>
         {
             if (string.IsNullOrWhiteSpace(_m.ParkingDeviceId))
-                return "Kein Parkplatz (Windows parallel)";
+                return "Windows spielt parallel";
             return _m.ParkingDeviceName ?? _m.FindDevice(_m.ParkingDeviceId)?.Name ?? _m.ParkingDeviceId;
         };
         _parkingDd.Items = BuildParkingMenu;
+        _redirectOptions.Toggled += _ => { Layout(); Invalidate(); };
 
         m.BindingsChanged += OnModelChanged;
         m.StructureChanged += OnModelChanged;
@@ -292,6 +295,9 @@ internal sealed class VirtualIoPage : Page
         _appSw.Bounds = new RectF(_addAppBtn.Bounds.X - 8 - Theme.SwitchW, yR, Theme.SwitchW, ch);
 
         float yPark = yR + ch + 12;
+        _redirectOptions.Bounds = new RectF(_appCard.X + pad, yPark, 155, ch);
+        _parkingDd.Visible = _restoreBtn.Visible = _redirectOptions.Checked;
+        yPark += ch + 6;
         _parkingLabelRect = new RectF(_appCard.X + pad, yPark, _appCard.W - 2 * pad, 16);
         float yDd = yPark + 18;
         float rstW = 78f;
@@ -300,7 +306,7 @@ internal sealed class VirtualIoPage : Page
 
         _appListRect = RectF.FromLTRB(
             _appCard.X + pad,
-            _parkingDd.Bounds.Bottom + 12,
+            (_redirectOptions.Checked ? _parkingDd.Bounds.Bottom : _redirectOptions.Bounds.Bottom) + 12,
             _appCard.Right - pad,
             _appCard.Bottom - pad);
         _appScroll.Update(_appListRect, _m.Config.AppLinks.Count * (AppRowH + 6));
@@ -517,7 +523,7 @@ internal sealed class VirtualIoPage : Page
         Draw.Card(g, _appCard);
         Draw.CardTitle(g, new RectF(_appCard.X + pad, _appCard.Y + 11, Math.Max(40, _appSw.Bounds.X - (_appCard.X + pad) - 8), Theme.ControlHSmall),
             "App-Capture", _m.Config.AppLinks.Count);
-        g.Text("OPTIONALER PARKPLATZ (STILLE UMLEITUNG GEBUNDENER APPS)", _parkingLabelRect, Theme.MicroStrong, Theme.TextSecondary);
+        if (_redirectOptions.Checked) g.Text("OPTIONALE STILLE UMLEITUNG", _parkingLabelRect, Theme.MicroStrong, Theme.TextSecondary);
 
         g.PushClip(_appListRect);
         if (_m.Config.AppLinks.Count == 0)

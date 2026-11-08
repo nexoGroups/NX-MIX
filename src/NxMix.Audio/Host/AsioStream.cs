@@ -30,6 +30,7 @@ internal sealed class AsioStream : StreamBase
     private bool _draining;
     private int _drainLeft;
     private double _load;
+    private long _lastCallback;
 
     public bool IsMaster { get; }
     public string DriverName => _driver;
@@ -163,6 +164,7 @@ internal sealed class AsioStream : StreamBase
     {
         int totalFrames = buffer.Frames;
         if (totalFrames <= 0) return;
+        Volatile.Write(ref _lastCallback, Environment.TickCount64);
 
         if (!_cbEnteredMmcss)
         {
@@ -253,6 +255,7 @@ internal sealed class AsioStream : StreamBase
     private void ProcessAuxCapture(in AsioCaptureBlock e)
     {
         if (Run.IsFaulted || e.Frames <= 0) return;
+        Volatile.Write(ref _lastCallback, Environment.TickCount64);
         int maxFrames = _inStage.Length / Math.Max(1, _inputs.Length);
         int frames = Math.Min(e.Frames, maxFrames);
         for (int c = 0; c < _inputs.Length; c++)
@@ -268,6 +271,7 @@ internal sealed class AsioStream : StreamBase
     private void ProcessAuxDuplex(in AsioFrameBlock buffer)
     {
         if (Run.IsFaulted || buffer.Frames <= 0) return;
+        Volatile.Write(ref _lastCallback, Environment.TickCount64);
         int frames = buffer.Frames;
         if (_inputs.Length > 0)
         {
@@ -313,25 +317,26 @@ internal sealed class AsioStream : StreamBase
         _outRing.Write(_outStage, frames);
     }
 
-    protected override void StartDevice() => _device!.Start();
+    protected override void StartDevice()
+    {
+        Volatile.Write(ref _lastCallback, Environment.TickCount64);
+        _device!.Start();
+    }
 
     protected override void RunLoop()
     {
-        if (IsMaster)
+        while (!Run.StopRequested && !Run.IsFaulted)
         {
-            while (!Run.StopRequested && !Run.IsFaulted)
+            if (Native.WaitForSingleObject(Run.StopEvent, 100) == Native.WaitObject0)
+                break;
+            if (Environment.TickCount64 - Volatile.Read(ref _lastCallback) > 3000)
             {
-                if (Native.WaitForSingleObject(Run.StopEvent, 50) == Native.WaitObject0)
-                    break;
+                Run.Fault(_driver + ": ASIO liefert keine Audio-Blöcke mehr.");
+                break;
             }
-            // Bei geordnetem Stopp kurz auf das 20-ms-Fade-Out des ASIO-Callbacks warten
-            if (Run.StopRequested && !Run.IsFaulted)
-                _masterDrainDone.Wait(400);
         }
-        else
-        {
-            Native.WaitForSingleObject(Run.StopEvent, uint.MaxValue);
-        }
+        if (IsMaster && Run.StopRequested && !Run.IsFaulted)
+            _masterDrainDone.Wait(400);
     }
 
     protected override void CloseDevice()

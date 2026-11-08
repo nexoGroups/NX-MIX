@@ -20,7 +20,7 @@ internal sealed class DeviceUnitCard : Widget
     readonly Switch _exclSw = new() { Tooltip = "WASAPI-Exclusive für dieses Gerät" };
     readonly Toggle _muteBtn = new("M", () => Theme.Red) { Tooltip = "Geräte-Master stummschalten" };
     readonly Toggle _dimBtn = new("DIM", () => Theme.Orange) { Font = Theme.MicroStrong, Tooltip = "Dim (−20 dB)" };
-    readonly Slider _masterSlider = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Default = 0, Step = 0.1, WheelStep = 1 };
+    readonly Slider _masterSlider = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Step = 0.1, WheelStep = 1 };
     readonly ValueBox _masterBox = new();
     readonly Button _expandBtn = new("▸ Kanäle", ButtonStyle.Tinted) { Font = Theme.CaptionStrong };
     readonly Button _removeBtn = new("Entfernen", ButtonStyle.DestructiveTinted, Icon.Trash) { Font = Theme.CaptionMedium };
@@ -110,7 +110,6 @@ internal sealed class DeviceUnitCard : Widget
             {
                 Min = Theme.FaderMinDb,
                 Max = Theme.FaderMaxDb,
-                Default = 0,
                 Step = 0.1,
                 WheelStep = 1,
                 ToNorm = db => Db.IsOff(db) ? 0 : FaderScale.ToT(db),

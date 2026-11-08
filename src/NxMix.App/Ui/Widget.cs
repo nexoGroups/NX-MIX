@@ -8,8 +8,6 @@ internal struct MouseEvent
     /// <summary>0 = links, 1 = rechts, 2 = Mitte.</summary>
     public int Button;
     public bool Ctrl, Shift, Alt;
-    /// <summary>1 = einfacher Klick, 2 = Doppelklick.</summary>
-    public int Clicks;
     /// <summary>Mausrad in Rastern (+ = nach oben/weg vom Nutzer).</summary>
     public float Wheel;
     public readonly bool Fine => Ctrl || Shift;

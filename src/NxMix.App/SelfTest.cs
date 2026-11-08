@@ -194,9 +194,28 @@ internal static class SelfTest
         {
             var root = new UiRoot(m, new NullShell(), new UiPrefs { Theme = ThemeMode.Dark });
             root.Resize(1600, 900);
+            m.UpdateChannel(true, 0, c => c with { GainDb = -6 });
+            var strip = ((MixerPage)root.CurrentPage).InputChannelStrips.First(s => s.Index == 0);
+            root.MouseWheel(strip.Fader.Bounds.CX, strip.Fader.Bounds.CY, 1, false, false, false);
+            Check("Mausrad am Fader erhöht den Kanalpegel um genau 1 dB", m.Channel(true, 0).GainDb == -5);
+            root.MouseWheel(strip.Meter.Bounds.CX, strip.Meter.Bounds.CY, -1, false, false, false);
+            Check("Mausrad am Pegelbalken senkt denselben Kanal um genau 1 dB", m.Channel(true, 0).GainDb == -6);
+            root.MouseWheel(strip.Fader.Bounds.CX, strip.Fader.Bounds.CY, 0.5f, false, false, false);
+            bool unchanged = m.Channel(true, 0).GainDb == -6;
+            root.MouseWheel(strip.Fader.Bounds.CX, strip.Fader.Bounds.CY, 0.5f, false, false, false);
+            Check("Teilraster am Fader ergeben zusammen einen 1-dB-Schritt", unchanged && m.Channel(true, 0).GainDb == -5);
+
             var inSheet = Program.Sheet(root, true, 0);
             Settle(root, 6);
             Check("Eingangs-Kanalblatt öffnet sich", inSheet != null && root.Modal is ChannelSheet);
+            if (inSheet != null)
+            {
+                var value = inSheet.GainBox.Bounds;
+                root.MouseDown(value.CX, value.CY, 0, false, false, false);
+                root.MouseUp(value.CX, value.CY, 0, false, false, false);
+                Check("Ein einfacher Klick öffnet die numerische Pegeleingabe", root.Editor.Active);
+                root.KeyDown(0x1B, false, false, false);
+            }
             Program.RenderRoot(root, 1600, 900, 1f, null);
 
             var outSheet = Program.Sheet(root, false, 0);
@@ -279,13 +298,19 @@ internal static class SelfTest
             Guid busId = DemoProject.MusicBusId;
 
             string? err1 = m.SetOrAddBusRoute(new RoutePort(RouteKind.Input, in0), new RoutePort(RouteKind.Bus, busId, 0), 0.0);
-            string? err2 = m.SetOrAddBusRoute(new RoutePort(RouteKind.Bus, busId, 0), new RoutePort(RouteKind.Output, out0), 0.0);
+            string? err2 = m.SetOrAddBusRoute(new RoutePort(RouteKind.Bus, busId, 0), new RoutePort(RouteKind.Output, out0), -3.0);
 
             Check("Bus-Routing von Eingang 0 über Bus auf Ausgang 0 ohne Fehler angelegt", err1 == null && err2 == null, $"{err1} {err2}");
             Check("Direkter Matrix-Kreuzpunkt (0,0) wurde durch Bus-Route NICHT gelöscht (bleibt 0.0 dB)",
                 Math.Abs(m.Settings.MatrixDb[0][0] - 0.0) < 1e-6, $"MatrixDb[0][0]={m.Settings.MatrixDb[0][0]}");
             Check("ParallelPathWarning erkennt gleichzeitigen Direkt- und Bus-Pfad",
                 m.ParallelWarnings.Any(w => w.InputId == in0 && w.OutputId == out0 && w.BusId == busId));
+
+            m.UpdateChannel(true, 0, c => c with { DelayMs = 2.5 });
+            Check("Patch-Undo stellt den bisherigen Bus-Routenpegel wieder her und behält den Kanal-Delay",
+                m.UndoPatch() && m.FindBusRoute(new RoutePort(RouteKind.Bus, busId, 0), new RoutePort(RouteKind.Output, out0))?.GainDb == 0
+                && m.Settings.MatrixDb[0][0] == 0 && m.Channel(true, 0).DelayMs == 2.5);
+
         }
 
         // ======================================================================================
@@ -318,6 +343,17 @@ internal static class SelfTest
             root.OpenOutputDsp(0);
             var dspPage = (OutputsDspPage)root.Pages[UiRoot.TabOutputsDsp];
             dspPage.ApplyRewPreview(0, preview, applyHeadroomTrim: true);
+            var source = m.Channel(false, 0);
+            var target = m.Channel(false, 1);
+            var graphOptions = new SpectrumPrefs(Range: 1, Bars: true, WindowSize: 32768, DisplayPoints: 24);
+            root.Prefs.SaveSpectrum(source.Id, graphOptions);
+            Check("Spektrumprofil speichert Balkenzahl pro Ausgang", root.Prefs.Spectrum(source.Id) == graphOptions
+                && root.Prefs.Spectrum(source.Id).EffectiveDisplayPoints == 24
+                && root.Prefs.Spectrum(target.Id) == new SpectrumPrefs());
+            Check("Kanalkopie übernimmt REW und behält Zielgerät, Name und Schutzgrenzen",
+                m.CopyChannelSettings(false, source.Id, target.Id) && m.Channel(false, 1) is var copied
+                && copied.Correction == source.Correction && copied.Id == target.Id && copied.DeviceId == target.DeviceId
+                && copied.Name == target.Name && copied.CeilingDbfs == target.CeilingDbfs && copied.MaxGainDb == target.MaxGainDb);
             Settle(root, 6);
             Program.RenderRoot(root, 1600, 900, 1f, null);
 

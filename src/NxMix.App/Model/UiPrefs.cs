@@ -6,6 +6,19 @@ using NxMix.Ipc;
 
 namespace NxMix.App.Model;
 
+internal sealed record SpectrumPrefs(int Range = 0, int LevelRange = 0, bool Linear = false, bool Bars = false,
+    int WindowSize = 0, bool ShowEq = true, bool ShowPre = true, bool ShowPost = true,
+    SpectrumBounds? CustomFrequency = null, SpectrumBounds? CustomLevels = null,
+    int DisplayPoints = SpectrumAnalyzer.Points)
+{
+    public const int MinDisplayPoints = 8;
+
+    [JsonIgnore]
+    public int EffectiveDisplayPoints => Math.Clamp(DisplayPoints, MinDisplayPoints, SpectrumAnalyzer.Points);
+}
+
+internal sealed record SpectrumBounds(int Min, int Max);
+
 internal sealed record WindowGeometry(double Width, double Height, bool Maximized);
 
 /// <summary>
@@ -30,6 +43,18 @@ internal sealed class UiPrefs
     public double WindowWidth { get; set; } = NxMix.App.Ui.Theme.DefaultWindowWidth;
     public double WindowHeight { get; set; } = NxMix.App.Ui.Theme.DefaultWindowHeight;
     public bool WindowMaximized { get; set; }
+
+    public Dictionary<Guid, SpectrumPrefs> ChannelSpectra { get; set; } = new();
+
+    static readonly SpectrumPrefs s_defaultSpectrum = new();
+
+    public SpectrumPrefs Spectrum(Guid id) => ChannelSpectra?.GetValueOrDefault(id) ?? s_defaultSpectrum;
+
+    public void SaveSpectrum(Guid id, SpectrumPrefs settings)
+    {
+        (ChannelSpectra ??= new())[id] = settings;
+        Save();
+    }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }

@@ -63,6 +63,8 @@ public sealed class DaemonEngineController : INxMixBackend
     // Telemetrie & Spektrum (außerhalb des Audiothreads auf 60-Hz-Worker)
     private readonly Timer _telemetryTimer;
     private readonly Timer _statusPollTimer;
+    private bool _audioRequested;
+    private long _nextAsioRetry;
     private readonly float[] _inPeaks = new float[PoolMaxInputs];
     private readonly float[] _outPeaks = new float[PoolMaxOutputs];
     private readonly float[] _busPeaks = new float[PoolMaxBuses];
@@ -71,6 +73,7 @@ public sealed class DaemonEngineController : INxMixBackend
     private readonly float[] _specPostDb = new float[SpectrumAnalyzer.Points];
     private TelemetrySnapshotFrame _lastMeta;
 
+    private readonly object _telemetryGate = new();
     private SpectrumCapture? _specCapture;
     private SpectrumAnalyzer? _specAnalyzer;
     private float[] _specWinBefore = Array.Empty<float>();
@@ -78,6 +81,7 @@ public sealed class DaemonEngineController : INxMixBackend
     private long _specLastFrame;
     private int _specMode; // 0 = Aus, 1 = Input, 2 = Output
     private int _specChannel = -1;
+    private int _specWindowSize;
 
     private bool _disposed;
 
@@ -169,6 +173,7 @@ public sealed class DaemonEngineController : INxMixBackend
         {
             lock (_gate)
             {
+                if (_disposed || h.State != HostState.Faulted) return;
                 _lastError = msg;
                 AppendLog("Error", "AudioHost", $"Stream-Fehler: {msg}");
                 RebuildSnapshotAndNotify(saveLive: false);
@@ -527,6 +532,9 @@ public sealed class DaemonEngineController : INxMixBackend
 
     private void StartAudioInternal(string reason)
     {
+        _audioRequested = true;
+        _nextAsioRetry = Environment.TickCount64 + 5000;
+        (_engine as MixerEngine)?.CancelOutputTestTone();
         if (!CanStartAudio(out string why))
         {
             _lastError = why;
@@ -599,7 +607,7 @@ public sealed class DaemonEngineController : INxMixBackend
 
     private void PumpTelemetry()
     {
-        if (_disposed) return;
+        if (_disposed || !Monitor.TryEnter(_telemetryGate)) return;
         try
         {
             var mix = _mixer;
@@ -651,6 +659,7 @@ public sealed class DaemonEngineController : INxMixBackend
         catch
         {
         }
+        finally { Monitor.Exit(_telemetryGate); }
     }
 
     private void PollSlowStatus()
@@ -662,6 +671,11 @@ public sealed class DaemonEngineController : INxMixBackend
             var prevSnap = _currentSnapshot;
             HostStats st;
             try { st = _host.GetStats(); } catch { return; }
+            if (TryRecoverAsio(st))
+            {
+                RebuildSnapshotAndNotify(saveLive: false);
+                return;
+            }
 
             IReadOnlyList<AppLinkStatus> links = _appLinkStatuses;
             if (_host is IAppLinkMonitor mon)
@@ -673,7 +687,8 @@ public sealed class DaemonEngineController : INxMixBackend
                 || st.Underruns != prevSnap.HostStats.Underruns
                 || st.Overruns != prevSnap.HostStats.Overruns
                 || Math.Abs(st.CpuLoad - prevSnap.HostStats.CpuLoad) > 0.01
-                || st.Devices.Count != prevSnap.HostStats.Devices.Count
+                || !st.Devices.Select(d => (d.DeviceId, d.IsOffline)).SequenceEqual(
+                    prevSnap.HostStats.Devices.Select(d => (d.DeviceId, d.IsOffline)))
                 || links.Count != prevSnap.AppLinkStatuses.Count;
 
             if (!changed)
@@ -696,6 +711,28 @@ public sealed class DaemonEngineController : INxMixBackend
                 RebuildSnapshotAndNotify(saveLive: false);
             }
         }
+    }
+
+    private bool TryRecoverAsio(HostStats stats)
+    {
+        if (!_audioRequested || stats.State == HostState.Starting || Environment.TickCount64 < _nextAsioRetry)
+            return false;
+
+        _nextAsioRetry = Environment.TickCount64 + 5000;
+        var bindings = BuildAudioHostConfig(_config).Bindings.Where(b => AsioCatalog.IsAsio(b.DeviceId));
+        var drivers = bindings.Select(b => AsioCatalog.DriverName(b.DeviceId)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (drivers.Count == 0 || !CanStartAudio(out _)) return false;
+
+        if (stats.State == HostState.Running)
+        {
+            var offline = stats.Devices.Where(d => d.IsOffline && AsioCatalog.IsAsio(d.DeviceId))
+                .Select(d => AsioCatalog.DriverName(d.DeviceId)).Distinct(StringComparer.OrdinalIgnoreCase);
+            if (!offline.Any(driver => drivers.Contains(driver) && AsioCatalog.CanOpen(driver))) return false;
+        }
+        StartAudioInternal("automatische ASIO-Wiederverbindung");
+        if (stats.State == HostState.Running)
+            _nextAsioRetry = Environment.TickCount64 + 30000;
+        return true;
     }
 
     public bool TryReadTelemetry(
@@ -743,6 +780,8 @@ public sealed class DaemonEngineController : INxMixBackend
                 return Task.FromResult<string?>(ex.Message);
             }
 
+            if (!_mixer.Outputs.Select(c => c.Id).SequenceEqual(clean.Outputs.Select(c => c.Id)))
+                (_engine as MixerEngine)?.CancelOutputTestTone();
             if (!_engine.TrySetSettings(EffectiveEngineSettings(clean)))
                 return Task.FromResult<string?>("Einstellungen überschreiten die Pool-Kapazität (128×64×128) oder sind ungültig.");
 
@@ -819,6 +858,7 @@ public sealed class DaemonEngineController : INxMixBackend
         lock (_gate)
         {
             _panicMuted = muted;
+            if (muted) (_engine as MixerEngine)?.CancelOutputTestTone();
             _engine.TrySetSettings(EffectiveEngineSettings(_mixer));
             AppendLog(muted ? "Warn" : "Info", "Engine", muted ? "PANIC-MUTE aktiviert: Alle Ausgänge stummgeschaltet." : "Panic-Mute aufgehoben.");
             RebuildSnapshotAndNotify(saveLive: false);
@@ -845,6 +885,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 || ! prev.Vaios.SequenceEqual(clean.Vaios)
                 || ! prev.AppLinks.SequenceEqual(clean.AppLinks);
 
+            if (streamImpact) (_engine as MixerEngine)?.CancelOutputTestTone();
             _config = clean;
             _mixer = ReconcileMixerWithSystemConfig(_mixer, _config, prev);
 
@@ -858,7 +899,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 _engine = _engineFactory(EffectiveEngineSettings(_mixer));
                 (oldEngine as IDisposable)?.Dispose();
                 if (_specMode != 0 && _specChannel >= 0)
-                    AttachSpectrumLocked(_specMode, _specChannel);
+                    AttachSpectrumLocked(_specMode, _specChannel, _specWindowSize);
                 AppendLog("Info", "Engine", $"Sample-Rate auf {_config.SampleRate} Hz umgestellt.");
                 if ((wasRunning || startWhenReady) && reopenAudioIfNeeded && CanStartAudio(out _))
                     StartAudioInternal("Sample-Rate-Wechsel");
@@ -904,6 +945,8 @@ public sealed class DaemonEngineController : INxMixBackend
     {
         lock (_gate)
         {
+            _audioRequested = false;
+            (_engine as MixerEngine)?.CancelOutputTestTone();
             try { _host.Stop(); } catch (Exception ex) { _lastError = ex.Message; }
             AppendLog("Info", "AudioHost", "Audio-Streaming gestoppt.");
             RebuildSnapshotAndNotify(saveLive: false);
@@ -930,19 +973,50 @@ public sealed class DaemonEngineController : INxMixBackend
         return 1;
     });
 
-    public Task SubscribeSpectrumAsync(int mode, int channelIndex)
+    public Task<string?> PlayOutputTestToneAsync(Guid channelId)
     {
         lock (_gate)
         {
-            AttachSpectrumLocked(mode, channelIndex);
+            string? error = PlayOutputTestToneLocked(channelId);
+            return Task.FromResult(error);
+        }
+    }
+
+    private string? PlayOutputTestToneLocked(Guid channelId)
+    {
+        if (_panicMuted || _host.State != HostState.Running || _engine is not MixerEngine mixer)
+            return "Testton braucht eine laufende Audio-Engine ohne Panik-Stumm.";
+        int index = _mixer.Outputs.ToList().FindIndex(c => c.Id == channelId);
+        if (index < 0) return "Ausgang nicht gefunden.";
+
+        var stats = _host.GetStats();
+        var bindings = BuildAudioHostConfig(_config).Bindings.Where(b => b.Flow == DeviceFlow.Render &&
+            index >= b.EngineFirstChannel && index < b.EngineFirstChannel + b.Count).ToArray();
+        if (bindings.Length != 1 || !stats.Devices.Any(d => !d.IsOffline && SameOutputDevice(d.DeviceId, bindings[0].DeviceId)))
+            return "Für den Testton muss genau ein aktives Ausgabegerät am Kanal hängen.";
+        if (_mixer.Outputs[index].Mute || double.IsNegativeInfinity(_mixer.Outputs[index].GainDb))
+            return "Der Ausgang ist stummgeschaltet.";
+        return mixer.TryStartOutputTestTone(index) ? null : "Ein Testton läuft bereits.";
+    }
+
+    private static bool SameOutputDevice(string a, string b) => a == b ||
+        (AsioCatalog.IsAsio(a) && AsioCatalog.IsAsio(b) &&
+            string.Equals(AsioCatalog.DriverName(a), AsioCatalog.DriverName(b), StringComparison.OrdinalIgnoreCase));
+
+    public Task SubscribeSpectrumAsync(int mode, int channelIndex, int windowSize = 0)
+    {
+        lock (_gate)
+        {
+            AttachSpectrumLocked(mode, channelIndex, windowSize);
             return Task.CompletedTask;
         }
     }
 
-    private void AttachSpectrumLocked(int mode, int channelIndex)
+    private void AttachSpectrumLocked(int mode, int channelIndex, int windowSize)
     {
-        if (_engine is MixerEngine me)
+        lock (_telemetryGate)
         {
+            if (_engine is not MixerEngine me) return;
             if (_specCapture != null)
             {
                 me.StopSpectrum(_specCapture);
@@ -950,24 +1024,22 @@ public sealed class DaemonEngineController : INxMixBackend
             }
             _specMode = mode;
             _specChannel = channelIndex;
+            _specWindowSize = windowSize;
+            Array.Fill(_specPreDb, SpectrumAnalyzer.FloorDb);
+            Array.Fill(_specPostDb, SpectrumAnalyzer.FloorDb);
             if (mode is 1 or 2 && channelIndex >= 0)
             {
                 bool isInput = mode == 1;
                 int max = isInput ? PoolMaxInputs : PoolMaxOutputs;
                 if (channelIndex < max)
                 {
-                    var cap = me.StartSpectrum(isInput, channelIndex);
+                    var cap = me.StartSpectrum(isInput, channelIndex, windowSize);
                     _specWinBefore = new float[cap.WindowSize];
                     _specWinAfter = new float[cap.WindowSize];
                     _specAnalyzer = new SpectrumAnalyzer(cap.WindowSize, cap.SampleRate);
                     _specLastFrame = 0;
                     _specCapture = cap;
                 }
-            }
-            else
-            {
-                Array.Fill(_specPreDb, SpectrumAnalyzer.FloorDb);
-                Array.Fill(_specPostDb, SpectrumAnalyzer.FloorDb);
             }
         }
     }

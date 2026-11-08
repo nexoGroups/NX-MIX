@@ -1,5 +1,7 @@
 using NxMix.Audio;
 using NxMix.Audio.Host;
+using NxMix.Daemon;
+using NxMix.Ipc;
 using NxMix.Engine;
 
 namespace NxMix.Tests.Audio;
@@ -126,6 +128,69 @@ public sealed class AsioMasterClockTests
             LastSession = f();
             return LastSession;
         }
+    }
+
+    [Fact]
+    public async Task Daemon_recovers_asio_after_callbacks_disappear_and_respects_manual_stop()
+    {
+        const string driver = "ReconnectASIO";
+        string directory = Path.Combine(Path.GetTempPath(), "NxMixReconnect_" + Guid.NewGuid().ToString("N"));
+        int connected = 1;
+        var fake = new FakeAsioBackend();
+        fake.Register(driver, () => new FakeAsioSession(driver, 0, 2, 48000, 256, Volatile.Read(ref connected) == 0));
+        AsioBackendRegistry.Current = fake;
+        try
+        {
+            using var daemon = new DaemonEngineController(new DaemonEngineOptions
+            {
+                CustomDataDir = directory,
+                CustomIpcKey = "reconnect_" + Guid.NewGuid().ToString("N"),
+                SkipInitialDeviceScan = true,
+                InitialSystemConfigOverride = new SystemConfig
+                {
+                    SampleRate = 48000,
+                    AutoStartAudioOnBoot = false,
+                    AllowOfflineAuxDevices = false,
+                    CompanionApiEnabled = false,
+                    Devices = new[] { new AudioDeviceNode
+                    {
+                        Backend = AudioBackend.Asio,
+                        EndpointId = AsioCatalog.FormatDeviceId(driver, DeviceFlow.Render),
+                        Flow = DeviceFlow.Render,
+                    } },
+                },
+            });
+            await daemon.StartAudioAsync();
+            Assert.Equal(HostState.Running, daemon.RawHost.State);
+            var first = Assert.IsType<FakeAsioSession>(fake.LastSession);
+            var outputs = daemon.Snapshot.Mixer.Outputs.Select(channel => channel.Id).ToArray();
+            Volatile.Write(ref connected, 0);
+            first.Stop(); // Simulates unplugging without a driver reset notification.
+            Assert.True(await WaitUntil(() => daemon.RawHost.State == HostState.Faulted, 6));
+            Volatile.Write(ref connected, 1);
+            Assert.True(await WaitUntil(() => daemon.RawHost.State == HostState.Running && fake.LastSession is { CallbacksExecuted: > 0 } active
+                && active != first, 8));
+            Assert.Equal(outputs, daemon.Snapshot.Mixer.Outputs.Select(channel => channel.Id));
+            await daemon.StopAudioAsync();
+            await Task.Delay(6000);
+            Assert.Equal(HostState.Stopped, daemon.RawHost.State);
+        }
+        finally
+        {
+            AsioBackendRegistry.ResetToDefault();
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    static async Task<bool> WaitUntil(Func<bool> condition, int seconds)
+    {
+        long until = Environment.TickCount64 + seconds * 1000;
+        while (Environment.TickCount64 < until)
+        {
+            if (condition()) return true;
+            await Task.Delay(40);
+        }
+        return condition();
     }
 
     [Fact]

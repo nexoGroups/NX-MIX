@@ -71,6 +71,7 @@ public sealed record IpcRequestEnvelope
     public bool BoolArg { get; init; }
     public int IntArg { get; init; }
     public int IntArg2 { get; init; }
+    public int IntArg3 { get; init; }
     public double DoubleArg { get; init; }
     public Guid GuidArg { get; init; }
     public Guid? NullableGuidArg { get; init; }

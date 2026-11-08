@@ -312,12 +312,11 @@ internal sealed class Dropdown : Widget
     }
 }
 
-/// <summary>Waagrechter Schieberegler (Apple): Ziehen, Mausrad, Strg/Umschalt = fein, Doppelklick = Vorgabe.</summary>
+/// <summary>Waagrechter Schieberegler (Apple): Ziehen, Mausrad, Strg/Umschalt = fein.</summary>
 internal sealed class Slider : Widget
 {
     public double Min { get; set; }
     public double Max { get; set; } = 1;
-    public double Default { get; set; }
     public double Value { get; private set; }
     /// <summary>Raster beim Ziehen (0 = frei).</summary>
     public double Step { get; set; } = 0.01;
@@ -367,7 +366,6 @@ internal sealed class Slider : Widget
     public override void OnMouseDown(in MouseEvent e)
     {
         if (e.Button != 0 || !Enabled) return;
-        if (e.Clicks >= 2) { Set(Default, false); return; }
         _dragging = true;
         var t = TrackRect;
         float kx = t.X + (float)Math.Clamp(Norm(Value), 0, 1) * t.W;
@@ -421,12 +419,12 @@ internal sealed class Slider : Widget
     }
 }
 
-/// <summary>Zahlenanzeige als Pille; Doppelklick = Wert eintippen.</summary>
+/// <summary>Editierbare Zahlenanzeige.</summary>
 internal sealed class ValueBox : Widget
 {
     public string Text { get; set; } = "";
     public Color4? TextColor { get; set; }
-    public string EditHint { get; set; } = "Doppelklick: Wert eintippen";
+    public string EditHint { get; set; } = "Klick: Wert eintippen";
     public event Action<string>? Typed;
     public bool Editable { get; set; } = true;
 
@@ -435,9 +433,9 @@ internal sealed class ValueBox : Widget
     public override void OnMouseLeave() => Invalidate();
     public override string? TooltipAt(float x, float y) => Editable ? EditHint : Tooltip;
 
-    public override void OnMouseDown(in MouseEvent e)
+    public override void OnMouseUp(in MouseEvent e)
     {
-        if (e.Button == 0 && e.Clicks >= 2 && Editable)
+        if (e.Button == 0 && Editable && HitOnRelease(e))
             Root?.BeginEdit(Bounds.Inflate(2), Text.Replace(Db.Minus, '-'), Theme.Value, s => Typed?.Invoke(s), 10, null, HAlign.Center);
     }
 

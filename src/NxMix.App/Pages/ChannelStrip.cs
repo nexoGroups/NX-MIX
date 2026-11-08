@@ -227,6 +227,9 @@ internal sealed class ChannelStrip : Widget
         foreach (var c in Children) c.Layout();
     }
 
+    public override bool OnMouseWheel(in MouseEvent e) =>
+        Meter.Bounds.Contains(e.X, e.Y) && Fader.OnMouseWheel(e);
+
     public override void Paint(Renderer g)
     {
         var b = Bounds;
@@ -359,6 +362,9 @@ internal sealed class DeviceMasterStrip : Widget
         Fader.Bounds = new RectF(x0, fy, Math.Max(10, Meter.Bounds.X - x0 - 4), fh);
         foreach (var c in Children) c.Layout();
     }
+
+    public override bool OnMouseWheel(in MouseEvent e) =>
+        Meter.Bounds.Contains(e.X, e.Y) && Fader.OnMouseWheel(e);
 
     public override void Paint(Renderer g)
     {

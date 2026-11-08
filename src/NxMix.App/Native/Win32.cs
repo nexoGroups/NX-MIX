@@ -10,8 +10,8 @@ internal static unsafe partial class Win32
         WM_ERASEBKGND = 0x0014, WM_GETMINMAXINFO = 0x0024, WM_NCCALCSIZE = 0x0083, WM_NCHITTEST = 0x0084,
         WM_NCMOUSEMOVE = 0x00A0, WM_NCLBUTTONDOWN = 0x00A1, WM_NCLBUTTONUP = 0x00A2, WM_NCMOUSELEAVE = 0x02A2,
         WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_CHAR = 0x0102, WM_SYSKEYDOWN = 0x0104, WM_TIMER = 0x0113, WM_SYSCOMMAND = 0x0112,
-        WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203,
-        WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205, WM_RBUTTONDBLCLK = 0x0206,
+        WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202,
+        WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205,
         WM_MBUTTONDOWN = 0x0207, WM_MBUTTONUP = 0x0208, WM_MOUSEWHEEL = 0x020A, WM_MOUSEHWHEEL = 0x020E, WM_MOUSELEAVE = 0x02A3,
         WM_DPICHANGED = 0x02E0, WM_SETCURSOR = 0x0020, WM_CAPTURECHANGED = 0x0215, WM_ACTIVATE = 0x0006,
         WM_APP = 0x8000, WM_NCCREATE = 0x0081, WM_CREATE = 0x0001;
@@ -126,7 +126,6 @@ internal static unsafe partial class Win32
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool IsZoomed(nint hwnd);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool IsIconic(nint hwnd);
     [LibraryImport("user32.dll")] public static partial short GetKeyState(int vk);
-    [LibraryImport("user32.dll")] public static partial uint GetDoubleClickTime();
     [LibraryImport("user32.dll")] public static partial nint MonitorFromWindow(nint hwnd, uint flags);
     [LibraryImport("user32.dll", EntryPoint = "GetMonitorInfoW")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool GetMonitorInfo(nint monitor, ref MONITORINFO mi);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool OpenClipboard(nint owner);

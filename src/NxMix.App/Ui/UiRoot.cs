@@ -70,7 +70,7 @@ internal sealed class UiRoot : Widget
 
     public Widget? Hovered { get; private set; }
     public Widget? Captured { get; private set; }
-    int _captureButton, _captureClicks;
+    int _captureButton;
 
     public readonly Sidebar Side;
     public readonly TopBar Top;
@@ -207,7 +207,7 @@ internal sealed class UiRoot : Widget
             if (allPages || p.Visible) p.Layout();
         }
         foreach (var o in _overlays) { o.Bounds = Bounds; o.Layout(); }
-        if (Captured == null) RefreshHover(Ev(_mx, _my, -1, 1, false, false, false));
+        if (Captured == null) RefreshHover(Ev(_mx, _my, -1, false, false, false));
         Dirty = true;
     }
 
@@ -319,8 +319,8 @@ internal sealed class UiRoot : Widget
         UiDeckStore.Save(Model.Decks);
     }
 
-    static MouseEvent Ev(float x, float y, int button, int clicks, bool ctrl, bool shift, bool alt, float wheel = 0) =>
-        new() { X = x, Y = y, Button = button, Clicks = clicks, Ctrl = ctrl, Shift = shift, Alt = alt, Wheel = wheel };
+    static MouseEvent Ev(float x, float y, int button, bool ctrl, bool shift, bool alt, float wheel = 0) =>
+        new() { X = x, Y = y, Button = button, Ctrl = ctrl, Shift = shift, Alt = alt, Wheel = wheel };
 
     public override Widget? HitTest(float x, float y)
     {
@@ -353,7 +353,7 @@ internal sealed class UiRoot : Widget
     public void MouseMove(float x, float y, bool ctrl, bool shift, bool alt)
     {
         _mx = x; _my = y;
-        var e = Ev(x, y, 0, 1, ctrl, shift, alt);
+        var e = Ev(x, y, 0, ctrl, shift, alt);
         if (Captured != null)
         {
             if (Captured.Root != null) Captured.OnMouseMove(e);
@@ -375,11 +375,11 @@ internal sealed class UiRoot : Widget
         if (Captured == null) { _mx = _my = -1; SetHover(null); }
     }
 
-    public void MouseDown(float x, float y, int button, int clicks, bool ctrl, bool shift, bool alt)
+    public void MouseDown(float x, float y, int button, bool ctrl, bool shift, bool alt)
     {
         if (Captured != null) return;
         _mx = x; _my = y;
-        var e = Ev(x, y, button, clicks, ctrl, shift, alt);
+        var e = Ev(x, y, button, ctrl, shift, alt);
         if (Editor.Active && !Editor.Bounds.Contains(x, y)) Editor.Commit();
         var hit = HitTest(x, y);
         SetHover(hit);
@@ -388,7 +388,6 @@ internal sealed class UiRoot : Widget
         {
             Captured = hit;
             _captureButton = button;
-            _captureClicks = clicks;
             Shell.SetCapture(true);
             hit.OnMouseDown(e);
             if (Captured == hit && (hit.Root == null || (Modal != null && hit != Editor && !IsInside(hit, Modal)))) CancelCapture();
@@ -406,7 +405,7 @@ internal sealed class UiRoot : Widget
     {
         if (Captured == null || button != _captureButton) return;
         _mx = x; _my = y;
-        var e = Ev(x, y, button, _captureClicks, ctrl, shift, alt);
+        var e = Ev(x, y, button, ctrl, shift, alt);
         var c = Captured;
         if (c != null)
         {
@@ -422,7 +421,7 @@ internal sealed class UiRoot : Widget
     {
         if (Captured is not { } captured) return;
         Captured = null;
-        if (captured.Root == this) captured.OnMouseUp(Ev(_mx, _my, -1, 1, false, false, false));
+        if (captured.Root == this) captured.OnMouseUp(Ev(_mx, _my, -1, false, false, false));
         SetHover(null);
         Dirty = true;
     }
@@ -437,7 +436,7 @@ internal sealed class UiRoot : Widget
     public void MouseWheel(float x, float y, float notches, bool ctrl, bool shift, bool alt)
     {
         _mx = x; _my = y;
-        var e = Ev(x, y, 0, 1, ctrl, shift, alt, notches);
+        var e = Ev(x, y, 0, ctrl, shift, alt, notches);
         if (Captured != null) return;
         for (var w = HitTest(x, y); w != null; w = w.Parent)
         {
@@ -460,6 +459,9 @@ internal sealed class UiRoot : Widget
             {
                 case >= '1' and <= '8':
                     SwitchPage(vk - '1');
+                    return true;
+                case 'Z' when !shift && CurrentPage is MatrixPage matrix:
+                    matrix.UndoPatch();
                     return true;
                 case 'M':
                     Model.SetPanicMute(!Model.PanicMuted);
@@ -507,7 +509,7 @@ internal sealed class UiRoot : Widget
             ov.OnClosed();
         }
         Dirty = true;
-        RefreshHover(Ev(_mx, _my, -1, 1, false, false, false));
+        RefreshHover(Ev(_mx, _my, -1, false, false, false));
     }
 
     public void BeginEdit(RectF bounds, string text, TextStyle style, Action<string> commit, int maxLen = 40,

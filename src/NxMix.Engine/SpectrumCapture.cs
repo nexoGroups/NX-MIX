@@ -6,12 +6,12 @@ public sealed class SpectrumCapture
     readonly float[] _before, _after;
     long _written;
 
-    internal SpectrumCapture(bool input, int channel, int sampleRate)
+    internal SpectrumCapture(bool input, int channel, int sampleRate, int windowSize = 0)
     {
         Input = input;
         Channel = channel;
         SampleRate = sampleRate;
-        WindowSize = sampleRate <= 48000 ? 8192 : sampleRate <= 96000 ? 16384 : 32768;
+        WindowSize = windowSize is 4096 or 8192 or 16384 or 32768 ? windowSize : sampleRate <= 48000 ? 8192 : sampleRate <= 96000 ? 16384 : 32768;
         _before = new float[WindowSize * 2];
         _after = new float[_before.Length];
     }

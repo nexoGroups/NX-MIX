@@ -29,7 +29,7 @@ internal sealed class MatrixGridWidget : Widget
     int _dr = -1, _dc = -1;
     float _downY;
     double _downDb;
-    bool _moved;
+    bool _moved, _recordedDrag;
     int _dragBar;
     float _barOff;
 
@@ -131,15 +131,15 @@ internal sealed class MatrixGridWidget : Widget
             ? Theme.ProtectedMatrixMaxDb
             : Theme.MatrixMaxDb;
 
-    void SetCellDb(AxisPort r, AxisPort c, double db)
+    void SetCellDb(AxisPort r, AxisPort c, double db, bool recordUndo = true)
     {
         if (IsBlockedCell(r, c)) return;
         if (r.Port.Kind == RouteKind.Input && c.Port.Kind == RouteKind.Output)
         {
-            _m.SetMatrix(r.Index, c.Index, db);
+            _m.SetMatrix(r.Index, c.Index, db, recordUndo);
             return;
         }
-        string? err = _m.SetOrAddBusRoute(r.Port, c.Port, db);
+        string? err = _m.SetOrAddBusRoute(r.Port, c.Port, db, recordUndo);
         if (err != null) Root?.Notify.Flash(err, true);
     }
 
@@ -214,13 +214,17 @@ internal sealed class MatrixGridWidget : Widget
         double perPx = e.Fine ? 0.03 : 0.3;
         double v = Math.Clamp(Math.Round((_downDb + dy * perPx) * 10) / 10, Theme.MatrixMinDb, MaxDbFor(_cols[_dc]));
         if (Math.Abs(v) < 0.2 && !e.Fine) v = 0;
-        SetCellDb(_rows[_dr], _cols[_dc], v);
+        var row = _rows[_dr];
+        var col = _cols[_dc];
+        double before = GetCellDb(row, col);
+        SetCellDb(row, col, v, !_recordedDrag);
+        _recordedDrag |= GetCellDb(row, col) != before;
         Invalidate();
     }
 
     public override void OnMouseDown(in MouseEvent e)
     {
-        _dr = _dc = -1; _moved = false; _dragBar = 0;
+        _dr = _dc = -1; _moved = false; _recordedDrag = false; _dragBar = 0;
         if (e.Button == 0)
         {
             if (NeedV && VBar().Track.Inflate(5).Contains(e.X, e.Y))
@@ -237,18 +241,10 @@ internal sealed class MatrixGridWidget : Widget
 
         if (e.Button == 1)
         {
-            SetCellDb(_rows[r], _cols[c], double.NegativeInfinity);
-            Invalidate();
+            ShowSignalPath(_rows[r], _cols[c], new RectF(e.X, e.Y, 1, 1));
             return;
         }
         if (e.Button != 0) return;
-
-        if (e.Clicks >= 2)
-        {
-            SetCellDb(_rows[r], _cols[c], Math.Min(0.0, MaxDbFor(_cols[c])));
-            Invalidate();
-            return;
-        }
 
         _dr = r; _dc = c;
         _downY = e.Y;
@@ -309,8 +305,63 @@ internal sealed class MatrixGridWidget : Widget
         bool par = rp.Port.Kind == RouteKind.Input && cp.Port.Kind == RouteKind.Output && _parallelPairs.Contains((rp.Port.Id, cp.Port.Id));
         string status = Db.IsOff(db) ? "Getrennt (Klick = 0.0 dB)" : $"{Db.Format(db)} dB (Klick = trennen · Ziehen/Mausrad = Pegel)";
         if (par) status += "\n⚡ Parallelpfad aktiv: Dieser Eingang speist denselben Ausgang zusätzlich über einen Mix-Bus!";
-        return $"{rp.Label}  →  {cp.Label}\n{status}";
+        return $"{rp.Label}  →  {cp.Label}\n{status}\nRechtsklick · Signalweg prüfen";
     }
+
+    void ShowSignalPath(AxisPort source, AxisPort target, RectF anchor)
+    {
+        if (Root is not { } root) return;
+        string Peak(float value) => value > 0.00001f ? $"{20 * Math.Log10(value):0.0} dBFS" : "kein Pegel";
+        var items = new List<MenuItem> { MenuItem.Header($"{source.Label} → {target.Label}") };
+        if (!_m.HostRunning) items.Add(MenuItem.Header("Audio-Engine gestoppt"));
+        if (_m.PanicMuted) items.Add(MenuItem.Header("Panik-Stumm aktiv"));
+        if (Db.IsOff(_m.Settings.MasterGainDb)) items.Add(MenuItem.Header("Master auf −∞"));
+
+        if (source.Port.Kind == RouteKind.Input)
+        {
+            var channel = _m.Channel(true, source.Index);
+            items.Add(MenuItem.Header($"Eingang nach Fader · {Peak(_m.GetInputPeak(source.Index))}"));
+            if (channel.Mute || Db.IsOff(channel.GainDb)) items.Add(MenuItem.Header("Eingang stumm"));
+            if (_m.Settings.Inputs.Any(c => c.Solo) && !channel.Solo) items.Add(MenuItem.Header("Ein anderer Eingang ist auf Solo"));
+            if (_m.LinkAt(source.Index) is { } link) items.Add(MenuItem.Header(LinkLook.Text(_m.ViewOf(link).State)));
+        }
+
+        double db = GetCellDb(source, target);
+        items.Add(MenuItem.Header(Db.IsOff(db) ? "Kreuzpunkt getrennt" : $"Kreuzpunkt · {Db.Format(db)} dB"));
+        if (target.Port.Kind == RouteKind.Output)
+        {
+            var channel = _m.Channel(false, target.Index);
+            items.Add(MenuItem.Header($"Ausgang gesamt · {Peak(_m.GetOutputPeak(target.Index))}"));
+            if (channel.Mute || Db.IsOff(channel.GainDb)) items.Add(MenuItem.Header("Ausgang stumm"));
+            if (_m.Settings.Outputs.Any(c => c.Solo) && !channel.Solo) items.Add(MenuItem.Header("Ein anderer Ausgang ist auf Solo"));
+            string? endpoint = _m.Config.Devices.FirstOrDefault(device => device.Id == channel.DeviceId)?.EndpointId
+                ?? _m.Config.Vaios.FirstOrDefault(slot => slot.Id == channel.DeviceId)?.EndpointOrExe;
+            if (_m.Runtime.HostStats.Devices.Any(d => d.IsOffline && SameDevice(d.DeviceId, endpoint)))
+                items.Add(MenuItem.Header("Ausgabegerät offline"));
+        }
+        for (int i = 0; i < _m.Settings.Buses.Count; i++)
+        {
+            var bus = _m.Settings.Buses[i];
+            if (bus.Id != source.Port.Id && bus.Id != target.Port.Id) continue;
+            items.Add(MenuItem.Header($"Bus „{bus.Name}“ gesamt · {Peak(_m.GetBusPeak(i))}"));
+            if (bus.Mute || Db.IsOff(bus.GainDb)) items.Add(MenuItem.Header($"Bus „{bus.Name}“ stumm"));
+            else if (!bus.Solo && _m.Settings.Buses.Any(b => b.Solo)) items.Add(MenuItem.Header("Ein anderer Bus ist auf Solo"));
+        }
+        if (_parallelPairs.Contains((source.Port.Id, target.Port.Id)))
+            items.Add(MenuItem.Header("Direkt- und Buspfad parallel"));
+        if (!Db.IsOff(db))
+            items.Add(new MenuItem("Kreuzpunkt trennen", null, () =>
+            {
+                int row = _rows.FindIndex(p => p.Port == source.Port);
+                int col = _cols.FindIndex(p => p.Port == target.Port);
+                if (row >= 0 && col >= 0) SetCellDb(_rows[row], _cols[col], double.NegativeInfinity);
+            }));
+        PopupMenu.Show(root, anchor, items);
+    }
+
+    static bool SameDevice(string a, string? b) => a == b ||
+        (b != null && NxMix.Audio.AsioCatalog.IsAsio(a) && NxMix.Audio.AsioCatalog.IsAsio(b) &&
+            NxMix.Audio.AsioCatalog.DriverName(a) == NxMix.Audio.AsioCatalog.DriverName(b));
 
     public override void Paint(Renderer g)
     {
@@ -451,16 +502,38 @@ internal sealed class MatrixPage : Page
         _zoomSeg.SetSelected(1);
         _scopeSeg.Changed += i => { _grid.ScopeFilter = i; _grid.RebuildAxes(); Invalidate(); };
         _zoomSeg.Changed += i => { _grid.ZoomMode = i; _grid.Layout(); Invalidate(); };
-        _diagBtn.Clicked += () => { _m.PatchDiagonal1To1(); Root?.Notify.Flash("1:1 Diagonal-Patch (0.0 dB) gesetzt."); };
-        _stereoBtn.Clicked += () => { _m.PatchStereoPairs(); Root?.Notify.Flash("Stereo-Paare L/R (0.0 dB) gepatcht."); };
+        _diagBtn.Clicked += () => PreviewPatch(stereo: false);
+        _stereoBtn.Clicked += () => PreviewPatch(stereo: true);
         _clearBtn.Clicked += () => Root?.Confirm("Alle direkten Kreuzpunkte trennen?",
-            "Alle direkten In→Out-Verbindungen werden auf −∞ gesetzt. Bus-Routen bleiben erhalten.",
+            $"{_m.Settings.MatrixDb.Sum(r => r.Count(v => !Db.IsOff(v)))} direkte In→Out-Verbindungen werden getrennt. Bus-Routen bleiben erhalten.",
             "Trennen", () => _m.ClearAllDirectMatrix(), danger: true);
         _addBusBtn.Clicked += ShowAddBusMenu;
 
         m.StructureChanged += () => { _grid.RebuildAxes(); Invalidate(); };
         m.ValuesChanged += () => { _grid.RebuildAxes(); Invalidate(); };
         _grid.RebuildAxes();
+    }
+
+    public void UndoPatch()
+    {
+        if (_m.UndoPatch()) Root?.Notify.Flash("Letzte Patch-Änderung rückgängig gemacht.");
+    }
+
+    void PreviewPatch(bool stereo)
+    {
+        int count = stereo ? (_m.OutputCount < 2 ? 0 : _m.InputCount) : Math.Min(_m.InputCount, _m.OutputCount);
+        var rows = Enumerable.Range(0, count)
+            .Select(i => (Input: i, Output: stereo ? i % 2 : i))
+            .Where(pair => _m.Settings.MatrixDb[pair.Input][pair.Output] != 0).ToArray();
+        if (rows.Length == 0) { Root?.Notify.Flash("Keine Patch-Änderungen erforderlich."); return; }
+        string preview = string.Join("\n", rows.Take(5).Select(pair => $"IN {pair.Input + 1:00} → OUT {pair.Output + 1:00}"));
+        if (rows.Length > 5) preview += $"\n… und {rows.Length - 5} weitere";
+        Root?.Confirm(stereo ? "Stereo L/R patchen?" : "1:1 Diagonal patchen?",
+            $"{rows.Length} Kreuzpunkte auf 0 dB setzen. Andere Routen bleiben erhalten.\n\n{preview}", "Patchen", () =>
+            {
+                if (stereo) _m.PatchStereoPairs();
+                else _m.PatchDiagonal1To1();
+            });
     }
 
     void ShowAddBusMenu()

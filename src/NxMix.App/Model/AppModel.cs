@@ -66,7 +66,11 @@ internal sealed class AppModel
         HostError = Runtime.LastError;
 
         _backend.SnapshotUpdated += snap => Post(() => ApplyIncomingSnapshot(snap));
-        _backend.ConnectionChanged += _ => Post(() => HostChanged?.Invoke());
+        _backend.ConnectionChanged += connected => Post(() =>
+        {
+            if (connected && _subSpecMode != 0) QueueSpectrumRequest(_subSpecMode, _subSpecChannel, _subSpecWindowSize);
+            HostChanged?.Invoke();
+        });
     }
 
     // ---- Echtzeit-Telemetrie (Spitzenpegel & Spektrum) ----------------------------------------
@@ -181,6 +185,7 @@ internal sealed class AppModel
         Config = snap.Config;
         if (!holdLocalMixer)
             Settings = Sanitize(snap.Mixer);
+        if (!SameRouting(prevMix, Settings)) _patchUndo.Clear();
         HostError = snap.LastError;
         HostBusy = false;
 
@@ -303,6 +308,7 @@ internal sealed class AppModel
 
     void CommitMixer(MixerSettings next, bool structural = false)
     {
+        if (structural) _patchUndo.Clear();
         Settings = Sanitize(next);
         if (structural) StructureChanged?.Invoke();
         ValuesChanged?.Invoke();
@@ -396,6 +402,30 @@ internal sealed class AppModel
         CommitMixer(input ? Settings with { Inputs = list } : Settings with { Outputs = list });
     }
 
+    public bool CopyChannelSettings(bool input, Guid sourceId, Guid targetId)
+    {
+        if (sourceId == targetId) return false;
+        var list = (input ? Settings.Inputs : Settings.Outputs).ToArray();
+        int sourceIndex = Array.FindIndex(list, channel => channel.Id == sourceId);
+        int targetIndex = Array.FindIndex(list, channel => channel.Id == targetId);
+        if (sourceIndex < 0 || targetIndex < 0) return false;
+
+        var source = list[sourceIndex];
+        var target = list[targetIndex];
+        list[targetIndex] = target with
+        {
+            TrimDb = source.TrimDb,
+            GainDb = Math.Min(source.GainDb, target.MaxGainDb),
+            Pan = source.Pan,
+            InvertPhase = source.InvertPhase,
+            DelayMs = source.DelayMs,
+            Filters = source.Filters.ToArray(),
+            Correction = source.Correction,
+        };
+        CommitMixer(input ? Settings with { Inputs = list } : Settings with { Outputs = list });
+        return true;
+    }
+
     public void UpdateChannelById(bool input, Guid channelId, Func<ChannelDsp, ChannelDsp> f)
     {
         var list = input ? Settings.Inputs : Settings.Outputs;
@@ -430,6 +460,8 @@ internal sealed class AppModel
     }
 
     public void SetMaster(double db) => CommitMixer(Settings with { MasterGainDb = db });
+
+    public void PlayOutputTestTone(Guid channelId) => RunBackend(() => _backend.PlayOutputTestToneAsync(channelId));
 
     public void SetPanicMute(bool muted) => RunBackendVoid(() => _backend.SetPanicMuteAsync(muted));
 
@@ -520,12 +552,43 @@ internal sealed class AppModel
     }
 
     // ---- Matrix & Mix-Busse (OHNE destruktives Löschen direkter Matrix-Routen!) ---------------
-    public void SetMatrix(int i, int o, double db)
+    readonly List<MixerSettings> _patchUndo = new();
+
+    static bool SameRouting(MixerSettings a, MixerSettings b) =>
+        a.Inputs.Select(c => c.Id).SequenceEqual(b.Inputs.Select(c => c.Id)) &&
+        a.Outputs.Select(c => c.Id).SequenceEqual(b.Outputs.Select(c => c.Id)) &&
+        BusesStructureEqual(a.Buses, b.Buses) &&
+        a.MatrixDb.Length == b.MatrixDb.Length &&
+        a.MatrixDb.Zip(b.MatrixDb).All(rows => rows.First.SequenceEqual(rows.Second)) &&
+        a.BusRoutes.SequenceEqual(b.BusRoutes);
+
+    void CommitPatch(MixerSettings next, bool recordUndo = true)
+    {
+        next = Sanitize(next);
+        if (SameRouting(Settings, next)) return;
+        if (recordUndo)
+        {
+            if (_patchUndo.Count == 32) _patchUndo.RemoveAt(0);
+            _patchUndo.Add(Settings);
+        }
+        CommitMixer(next);
+    }
+
+    public bool UndoPatch()
+    {
+        if (_patchUndo.Count == 0) return false;
+        var previous = _patchUndo[^1];
+        _patchUndo.RemoveAt(_patchUndo.Count - 1);
+        CommitMixer(Settings with { MatrixDb = previous.MatrixDb, BusRoutes = previous.BusRoutes });
+        return true;
+    }
+
+    public void SetMatrix(int i, int o, double db, bool recordUndo = true)
     {
         if (i < 0 || i >= InputCount || o < 0 || o >= OutputCount) return;
         var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToArray();
         m[i][o] = db;
-        CommitMixer(Settings with { MatrixDb = m });
+        CommitPatch(Settings with { MatrixDb = m }, recordUndo);
     }
 
     public void PatchDiagonal1To1(int startIn = 0, int startOut = 0, int? count = null, double gainDb = 0.0)
@@ -539,7 +602,7 @@ internal sealed class AppModel
             if (i >= 0 && i < InputCount && o >= 0 && o < OutputCount)
                 m[i][o] = gainDb;
         }
-        CommitMixer(Settings with { MatrixDb = m });
+        CommitPatch(Settings with { MatrixDb = m });
     }
 
     public void PatchStereoPairs(double gainDb = 0.0)
@@ -552,7 +615,7 @@ internal sealed class AppModel
             if (targetOut < OutputCount)
                 m[i][targetOut] = gainDb;
         }
-        CommitMixer(Settings with { MatrixDb = m });
+        CommitPatch(Settings with { MatrixDb = m });
     }
 
     public void ClearAllDirectMatrix()
@@ -563,7 +626,7 @@ internal sealed class AppModel
             m[i] = new double[OutputCount];
             Array.Fill(m[i], double.NegativeInfinity);
         }
-        CommitMixer(Settings with { MatrixDb = m });
+        CommitPatch(Settings with { MatrixDb = m });
     }
 
     public Guid AddBus(int channels = 2, string? name = null)
@@ -602,8 +665,10 @@ internal sealed class AppModel
         Settings.BusRoutes.FirstOrDefault(r => r.Source == source && r.Target == target);
 
     /// <summary>Fügt eine Bus-Route hinzu oder aktualisiert ihren Pegel — OHNE bestehende direkte Matrix-Kreuzpunkte zu löschen!</summary>
-    public string? SetOrAddBusRoute(RoutePort source, RoutePort target, double gainDb = 0.0)
+    public string? SetOrAddBusRoute(RoutePort source, RoutePort target, double gainDb = 0.0, bool recordUndo = true)
     {
+        var old = FindBusRoute(source, target);
+        if (Db.IsOff(gainDb) ? old == null : old?.GainDb == Math.Clamp(gainDb, Theme.MatrixMinDb, Theme.MatrixMaxDb)) return null;
         var list = Settings.BusRoutes.Where(r => !(r.Source == source && r.Target == target)).ToList();
         if (!Db.IsOff(gainDb))
             list.Add(new BusRoute(source, target, Math.Clamp(gainDb, Theme.MatrixMinDb, Theme.MatrixMaxDb)));
@@ -619,7 +684,7 @@ internal sealed class AppModel
         {
             return ex.Message;
         }
-        CommitMixer(candidate);
+        CommitPatch(candidate, recordUndo);
         return null;
     }
 
@@ -628,7 +693,7 @@ internal sealed class AppModel
     public void RemoveBusRoute(BusRoute route)
     {
         var routes = Settings.BusRoutes.Where(r => !(r.Source == route.Source && r.Target == route.Target)).ToArray();
-        CommitMixer(Settings with { BusRoutes = routes });
+        CommitPatch(Settings with { BusRoutes = routes });
     }
 
     // ---- UI-Decks (%APPDATA%\NX-MIX\ui-decks.json — 100 % referenzbasiert, keine Audio-Kopie!) -
@@ -1047,13 +1112,32 @@ internal sealed class AppModel
     // ---- Spektral-Tap (für Outputs / DSP & Kanal-Spektrum) ------------------------------------
     int _subSpecMode;
     int _subSpecChannel = -1;
+    int _subSpecWindowSize;
+    Task _spectrumRequest = Task.CompletedTask;
 
-    public void SubscribeSpectrum(int mode, int channelIndex)
+    public void SubscribeSpectrum(int mode, int channelIndex, int windowSize = 0)
     {
-        if (_subSpecMode == mode && _subSpecChannel == channelIndex) return;
+        if (_subSpecMode == mode && _subSpecChannel == channelIndex && _subSpecWindowSize == windowSize) return;
         _subSpecMode = mode;
         _subSpecChannel = channelIndex;
-        RunBackendVoid(() => _backend.SubscribeSpectrumAsync(mode, channelIndex));
+        _subSpecWindowSize = windowSize;
+        QueueSpectrumRequest(mode, channelIndex, windowSize);
+    }
+
+    void QueueSpectrumRequest(int mode, int channelIndex, int windowSize)
+    {
+        if (RunInline)
+        {
+            _backend.SubscribeSpectrumAsync(mode, channelIndex, windowSize).GetAwaiter().GetResult();
+            return;
+        }
+        var previous = _spectrumRequest;
+        _spectrumRequest = Task.Run(async () =>
+        {
+            await previous.ConfigureAwait(false);
+            try { await _backend.SubscribeSpectrumAsync(mode, channelIndex, windowSize).ConfigureAwait(false); }
+            catch (Exception ex) { Post(() => Toast?.Invoke(ex.Message, true)); }
+        });
     }
 
     // ---- Mischpult-Snapshots (Kategorie 3 — berühren NIEMALS SystemConfig!) -------------------

@@ -3,7 +3,7 @@ using Vortice.Mathematics;
 namespace NxMix.App.Ui;
 
 /// <summary>
-/// Senkrechter Fader mit dB-Skala. Doppelklick = 0 dB, Strg/Umschalt = Feinjustierung, Mausrad = 1 dB (fein 0,1 dB).
+/// Senkrechter Fader mit dB-Skala. Strg/Umschalt = Feinjustierung, Mausrad = 1 dB (fein 0,1 dB).
 /// MaxDb ist die Gain-Sperre: darueber laesst er sich nicht ziehen; der gesperrte Bereich ist orange markiert.
 /// </summary>
 internal sealed class Fader : Widget
@@ -18,6 +18,7 @@ internal sealed class Fader : Widget
     static double Quant(double db) => Math.Round(db * 10.0) / 10.0;
 
     float _dragY0;
+    int _wheelRemainder;
     double _dragT0;
     bool _lastFine, _dragging;
 
@@ -58,7 +59,6 @@ internal sealed class Fader : Widget
     public override void OnMouseDown(in MouseEvent e)
     {
         if (e.Button != 0 || !Enabled) return;
-        if (e.Clicks >= 2) { Apply(Math.Min(0.0, MaxDb)); return; }
         _dragging = true;
         float capY = YOfDb(Value);
         bool onCap = Math.Abs(e.Y - capY) <= CapH / 2f + 1;
@@ -92,20 +92,22 @@ internal sealed class Fader : Widget
     {
         if (!Enabled) return true;
         double step = e.Fine ? 0.1 : 1.0;
-        int notches = Math.Max(1, (int)Math.Abs(Math.Round(e.Wheel)));
-        double dir = Math.Sign(e.Wheel);
-        double v = Db.IsOff(Value) ? Theme.FaderMinDb - 12 : Value;
-        v += dir * step * notches;
-        if (v < Theme.FaderMinDb && dir < 0) v = double.NegativeInfinity;
-        else if (v < Theme.FaderMinDb) v = Theme.FaderMinDb;
+        const int unitsPerNotch = 120;
+        _wheelRemainder += (int)MathF.Round(e.Wheel * unitsPerNotch);
+        int notches = _wheelRemainder / unitsPerNotch;
+        _wheelRemainder %= unitsPerNotch;
+        if (notches == 0 || (Db.IsOff(Value) && notches < 0)) return true;
+
+        double v = Db.IsOff(Value) ? Theme.FaderMinDb + step * (notches - 1) : Value + step * notches;
+        if (v < Theme.FaderMinDb) v = double.NegativeInfinity;
         Apply(Db.IsOff(v) ? v : Quant(v));
         return true;
     }
 
     public override string? TooltipAt(float x, float y)
     {
-        if (MaxDb < ScaleTop - 0.05) return $"Gain-Sperre aktiv: max. {Db.Format(MaxDb)} dB · Doppelklick = {Db.Format(Math.Min(0, MaxDb))} dB";
-        return "Ziehen · Strg/Umschalt = fein · Mausrad · Doppelklick = 0 dB";
+        const string wheel = "Mausrad ±1 dB · Strg/Umschalt ±0,1 dB";
+        return MaxDb < ScaleTop - 0.05 ? $"Gain-Sperre: max. {Db.Format(MaxDb)} dB · {wheel}" : wheel;
     }
 
     // ---- Zeichnen ------------------------------------------------------------------------------

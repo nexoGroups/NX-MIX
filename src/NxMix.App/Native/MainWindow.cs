@@ -146,7 +146,6 @@ internal sealed unsafe class MainWindow : IShell
             var wc = new WNDCLASSEXW
             {
                 cbSize = (uint)sizeof(WNDCLASSEXW),
-                style = 0x0008,
                 lpfnWndProc = &WndProc,
                 hInstance = hInst,
                 hCursor = Cursor(IDC_ARROW),
@@ -375,15 +374,13 @@ internal sealed unsafe class MainWindow : IShell
                 _root?.MouseLeave();
                 return 0;
             case WM_LBUTTONDOWN:
-            case WM_LBUTTONDBLCLK:
-                _root?.MouseDown(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 0, msg == WM_LBUTTONDBLCLK ? 2 : 1, Ctrl, Shift, Alt);
+                _root?.MouseDown(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 0, Ctrl, Shift, Alt);
                 return 0;
             case WM_LBUTTONUP:
                 _root?.MouseUp(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 0, Ctrl, Shift, Alt);
                 return 0;
             case WM_RBUTTONDOWN:
-            case WM_RBUTTONDBLCLK:
-                _root?.MouseDown(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 1, 1, Ctrl, Shift, Alt);
+                _root?.MouseDown(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 1, Ctrl, Shift, Alt);
                 return 0;
             case WM_RBUTTONUP:
                 _root?.MouseUp(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 1, Ctrl, Shift, Alt);

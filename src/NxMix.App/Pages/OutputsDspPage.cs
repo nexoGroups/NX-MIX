@@ -2,6 +2,7 @@ using System.Globalization;
 using NxMix.App.Model;
 using NxMix.App.Ui;
 using NxMix.Engine;
+using NxMix.Ipc;
 using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
@@ -20,6 +21,8 @@ internal sealed class OutputsDspPage : Page
 
     // Kopfleiste
     readonly IconButton _prevOut = new(Icon.ChevronLeft, "Vorheriger Ausgangskanal") { IconSize = 15 };
+    readonly Dropdown _spectrumDd = new() { Text = () => "Spektrum" };
+    readonly Dropdown _channelActions = new() { Text = () => "Kanal …" };
     readonly Dropdown _outDd = new() { Tooltip = "Ausgangskanal für DSP-Bearbeitung wählen" };
     readonly IconButton _nextOut = new(Icon.ChevronRight, "Nächster Ausgangskanal") { IconSize = 15 };
     readonly Toggle _eqToggle = new("Kurve", () => EqSpectrumGraph.EqColor) { Font = Theme.CaptionStrong, Tooltip = "Berechnete Summen-Filterkurve ein-/ausblenden" };
@@ -31,11 +34,11 @@ internal sealed class OutputsDspPage : Page
 
     // Karte 0: Frequenzweiche (HPF / LPF)
     readonly Dropdown _hpfTypeDd = new() { Tooltip = "Hochpass-Charakteristik & Flankensteilheit" };
-    readonly Slider _hpfSlider = new() { Min = 20, Max = 20000, Default = 80, Step = 0, WheelStep = 5 };
-    readonly ValueBox _hpfBox = new() { EditHint = "Doppelklick: HPF-Trennfrequenz in Hz (20..20000)" };
+    readonly Slider _hpfSlider = new() { Min = 20, Max = 20000, Step = 0, WheelStep = 5 };
+    readonly ValueBox _hpfBox = new() { EditHint = "Klick: HPF-Trennfrequenz in Hz (20..20000)" };
     readonly Dropdown _lpfTypeDd = new() { Tooltip = "Tiefpass-Charakteristik & Flankensteilheit" };
-    readonly Slider _lpfSlider = new() { Min = 20, Max = 20000, Default = 2200, Step = 0, WheelStep = 10 };
-    readonly ValueBox _lpfBox = new() { EditHint = "Doppelklick: LPF-Trennfrequenz in Hz (20..20000)" };
+    readonly Slider _lpfSlider = new() { Min = 20, Max = 20000, Step = 0, WheelStep = 10 };
+    readonly ValueBox _lpfBox = new() { EditHint = "Klick: LPF-Trennfrequenz in Hz (20..20000)" };
 
     // Karte 1: Parametrischer Ausgangs-EQ (bis zu 12 Bänder)
     readonly Dropdown _bandDd = new() { Tooltip = "PEQ-Band auswählen" };
@@ -43,23 +46,23 @@ internal sealed class OutputsDspPage : Page
     readonly IconButton _delBandBtn = new(Icon.Trash, "Aktuelles PEQ-Band löschen") { IconSize = 14 };
     readonly Switch _bandSw = new() { Tooltip = "Ausgewähltes PEQ-Band aktivieren / umgehen" };
     readonly Dropdown _peqTypeDd = new() { Tooltip = "Filtertyp des gewählten PEQ-Bandes" };
-    readonly Slider _peqFreqSlider = new() { Min = 20, Max = 20000, Default = 1000, Step = 0, WheelStep = 10 };
-    readonly ValueBox _peqFreqBox = new() { EditHint = "Doppelklick: Frequenz in Hz" };
-    readonly Slider _peqGainSlider = new() { Min = -24, Max = 18, Default = 0, Step = 0.1, WheelStep = 0.5 };
-    readonly ValueBox _peqGainBox = new() { EditHint = "Doppelklick: Anhebung/Absenkung in dB (−24..+18)" };
-    readonly ValueBox _peqQBox = new() { EditHint = "Doppelklick: Güte Q (0.1..20)" };
+    readonly Slider _peqFreqSlider = new() { Min = 20, Max = 20000, Step = 0, WheelStep = 10 };
+    readonly ValueBox _peqFreqBox = new() { EditHint = "Klick: Frequenz in Hz" };
+    readonly Slider _peqGainSlider = new() { Min = -24, Max = 18, Step = 0.1, WheelStep = 0.5 };
+    readonly ValueBox _peqGainBox = new() { EditHint = "Klick: Anhebung/Absenkung in dB (−24..+18)" };
+    readonly ValueBox _peqQBox = new() { EditHint = "Klick: Güte Q (0.1..20)" };
 
     // Karte 2: REW Raum- & Lautsprecherkorrektur
     readonly Button _rewImportBtn = new("Import …", ButtonStyle.Filled, Icon.Import) { Font = Theme.CaptionStrong, Tooltip = "REW Generic-Filterdatei (.txt) mit Vorschau & Headroom-Schutz importieren" };
     readonly IconButton _rewClearBtn = new(Icon.Trash, "Importierte REW-Korrektur entfernen") { IconSize = 14 };
     readonly Switch _rewActiveSw = new() { Tooltip = "Importierte REW-Korrektur aktivieren / Bypass" };
-    readonly Slider _rewPreampSlider = new() { Min = -24, Max = 6, Default = 0, Step = 0.1, WheelStep = 0.5 };
-    readonly ValueBox _rewPreampBox = new() { EditHint = "Doppelklick: REW-Headroom-Vorabsenkung in dB" };
+    readonly Slider _rewPreampSlider = new() { Min = -24, Max = 6, Step = 0.1, WheelStep = 0.5 };
+    readonly ValueBox _rewPreampBox = new() { EditHint = "Klick: REW-Headroom-Vorabsenkung in dB" };
 
     // Karte 3: Laufzeit (Delay) & Lautsprecher-Schutz
     readonly Switch _phaseSw = new() { Tooltip = "Polarität (180° Phasenumkehr) für diesen Ausgang" };
-    readonly Slider _delaySlider = new() { Min = 0, Max = 50, Default = 0, Step = 0.02, WheelStep = 0.1 };
-    readonly ValueBox _delayBox = new() { EditHint = "Doppelklick: Laufzeit 0..1000 ms präzise eingeben" };
+    readonly Slider _delaySlider = new() { Min = 0, Max = 50, Step = 0.02, WheelStep = 0.1 };
+    readonly ValueBox _delayBox = new() { EditHint = "Klick: Laufzeit 0..1000 ms präzise eingeben" };
     readonly Dropdown _ceilDd = new() { Tooltip = "Sicherheits-Brickwall-Limiter-Schwelle (dBFS)" };
     readonly Dropdown _lockDd = new() { Tooltip = "Maximale Ausgangsverstärkung (Hochtöner-Schutz)" };
 
@@ -110,7 +113,7 @@ internal sealed class OutputsDspPage : Page
         _m = m;
         Add(_prevOut); Add(_outDd); Add(_nextOut);
         Add(_eqToggle); Add(_preToggle); Add(_postToggle);
-        Add(_graph);
+        Add(_graph); Add(_spectrumDd); Add(_channelActions);
         Add(_modSeg);
 
         Add(_hpfTypeDd); Add(_hpfSlider); Add(_hpfBox);
@@ -136,9 +139,16 @@ internal sealed class OutputsDspPage : Page
         _eqToggle.SetChecked(true);
         _preToggle.SetChecked(true);
         _postToggle.SetChecked(true);
-        _eqToggle.Toggled += on => { _graph.ShowEq = on; Invalidate(); };
-        _preToggle.Toggled += on => { _graph.ShowBefore = on; Invalidate(); };
-        _postToggle.Toggled += on => { _graph.ShowAfter = on; Invalidate(); };
+        _eqToggle.Toggled += on => ChangeSpectrum(p => p with { ShowEq = on });
+        _preToggle.Toggled += on => ChangeSpectrum(p => p with { ShowPre = on });
+        _postToggle.Toggled += on => ChangeSpectrum(p => p with { ShowPost = on });
+        _spectrumDd.Items = BuildSpectrumMenu;
+        _channelActions.Items = () =>
+        [
+            new("Einstellungen kopieren …", null,
+                () => ChannelSheet.ShowCopyMenu(Root, _m, false, ClampedOutIdx, _channelActions.Bounds), _m.OutputCount > 1),
+            new("Leisen Testton abspielen …", null, ConfirmOutputTest, _m.HostRunning && !_m.PanicMuted),
+        ];
 
         _prevOut.Clicked += _ => SelectOutputChannel(ClampedOutIdx - 1);
         _nextOut.Clicked += _ => SelectOutputChannel(ClampedOutIdx + 1);
@@ -171,6 +181,7 @@ internal sealed class OutputsDspPage : Page
         _peqBandIdx = 0;
         if (Visible)
         {
+            SyncSpectrum();
             _graph.Update(_m.Channel(false, _outIdx), _m.Settings.SampleRate, false, _outIdx, _m, 0f);
             Layout();
             Invalidate();
@@ -195,7 +206,10 @@ internal sealed class OutputsDspPage : Page
     {
         _outIdx = ClampedOutIdx;
         if (_m.OutputCount > 0)
+        {
+            SyncSpectrum();
             _graph.Update(_m.Channel(false, _outIdx), _m.Settings.SampleRate, false, _outIdx, _m, 0f);
+        }
         Layout();
     }
 
@@ -203,8 +217,111 @@ internal sealed class OutputsDspPage : Page
     {
         if (_m.OutputCount == 0) return;
         int idx = ClampedOutIdx;
+        SyncSpectrum();
         if (_graph.Update(_m.Channel(false, idx), _m.Settings.SampleRate, false, idx, _m, dt))
             Invalidate();
+    }
+
+    SpectrumPrefs Spectrum => Root?.Prefs.Spectrum(_m.Channel(false, ClampedOutIdx).Id) ?? new();
+
+    void SyncSpectrum()
+    {
+        var prefs = Spectrum;
+        _graph.SetOptions(prefs);
+        _eqToggle.SetChecked(prefs.ShowEq);
+        _preToggle.SetChecked(prefs.ShowPre);
+        _postToggle.SetChecked(prefs.ShowPost);
+    }
+
+    void ChangeSpectrum(Func<SpectrumPrefs, SpectrumPrefs> edit)
+    {
+        if (Root is not { } root || _m.OutputCount == 0) return;
+        root.Prefs.SaveSpectrum(_m.Channel(false, ClampedOutIdx).Id, edit(Spectrum));
+        SyncSpectrum();
+        Invalidate();
+    }
+
+    List<MenuItem> BuildSpectrumMenu()
+    {
+        var options = Spectrum;
+        MenuItem Option(string title, bool selected, Func<SpectrumPrefs, SpectrumPrefs> edit) =>
+            new(title, null, () => ChangeSpectrum(edit)) { Checked = selected };
+
+        return
+        [
+            MenuItem.Header("Frequenzbereich"),
+            Option("20 Hz – 20 kHz", options.CustomFrequency == null && options.Range == 0, p => p with { Range = 0, CustomFrequency = null }),
+            Option("20 Hz – 250 Hz", options.CustomFrequency == null && options.Range == 1, p => p with { Range = 1, CustomFrequency = null }),
+            Option("100 Hz – 4 kHz", options.CustomFrequency == null && options.Range == 2, p => p with { Range = 2, CustomFrequency = null }),
+            Option("2 kHz – 20 kHz", options.CustomFrequency == null && options.Range == 3, p => p with { Range = 3, CustomFrequency = null }),
+            new MenuItem("Eigener Frequenzbereich …", null, () => EditSpectrumBounds(frequency: true)) { Checked = options.CustomFrequency != null },
+            MenuItem.Header("Pegelbereich (dBFS)"),
+            Option("−100 bis +12", options.CustomLevels == null && options.LevelRange == 0, p => p with { LevelRange = 0, CustomLevels = null }),
+            Option("−80 bis 0", options.CustomLevels == null && options.LevelRange == 1, p => p with { LevelRange = 1, CustomLevels = null }),
+            Option("−60 bis 0", options.CustomLevels == null && options.LevelRange == 2, p => p with { LevelRange = 2, CustomLevels = null }),
+            Option("−40 bis 0", options.CustomLevels == null && options.LevelRange == 3, p => p with { LevelRange = 3, CustomLevels = null }),
+            new MenuItem("Eigener Pegelbereich …", null, () => EditSpectrumBounds(frequency: false)) { Checked = options.CustomLevels != null },
+            MenuItem.Header("Darstellung"),
+            Option("Logarithmische Frequenzachse", !options.Linear, p => p with { Linear = false }),
+            Option("Lineare Frequenzachse", options.Linear, p => p with { Linear = true }),
+            Option("Linien", !options.Bars, p => p with { Bars = false }),
+            Option("Balken", options.Bars, p => p with { Bars = true }),
+            new(options.Bars ? "Anzahl der Balken …" : "Anzahl der Linienpunkte …",
+                options.EffectiveDisplayPoints.ToString(), EditSpectrumPointCount),
+            MenuItem.Header("FFT-Genauigkeit (Samples)"),
+            Option("Automatisch", options.WindowSize == 0, p => p with { WindowSize = 0 }),
+            Option("4 096 · Schnell", options.WindowSize == 4096, p => p with { WindowSize = 4096 }),
+            Option("8 192", options.WindowSize == 8192, p => p with { WindowSize = 8192 }),
+            Option("16 384", options.WindowSize == 16384, p => p with { WindowSize = 16384 }),
+            Option("32 768 · Fein", options.WindowSize == 32768, p => p with { WindowSize = 32768 }),
+            MenuItem.Sep,
+            new("Spektrum zurücksetzen", null, () => ChangeSpectrum(_ => new())),
+        ];
+    }
+
+    void EditSpectrumPointCount()
+    {
+        if (Root is not { } root || _m.OutputCount == 0) return;
+        root.BeginEdit(_spectrumDd.Bounds, Spectrum.EffectiveDisplayPoints.ToString(), Theme.Value, text =>
+        {
+            if (int.TryParse(text, out int count) && count >= SpectrumPrefs.MinDisplayPoints && count <= SpectrumAnalyzer.Points)
+                ChangeSpectrum(p => p with { DisplayPoints = count });
+            else
+                root.Notify.Flash($"Anzahl zwischen {SpectrumPrefs.MinDisplayPoints} und {SpectrumAnalyzer.Points} eingeben.", true);
+        }, maxLen: 3, filter: char.IsAsciiDigit);
+    }
+
+    void EditSpectrumBounds(bool frequency)
+    {
+        if (Root is not { } root || _m.OutputCount == 0) return;
+        var options = Spectrum;
+        var current = frequency ? options.CustomFrequency ?? new SpectrumBounds(20, 20000)
+            : options.CustomLevels ?? new SpectrumBounds(-100, 12);
+        int min = frequency ? 20 : -100;
+        int max = frequency ? 20000 : 12;
+        string unit = frequency ? "Hz" : "dBFS";
+        root.Notify.Flash($"Untergrenze und Obergrenze durch ein Leerzeichen trennen ({unit}).");
+        root.BeginEdit(_spectrumDd.Bounds.Inflate(18, 0), $"{current.Min} {current.Max}", Theme.Value, text =>
+        {
+            var parts = text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 || !int.TryParse(parts[0], out int low) || !int.TryParse(parts[1], out int high)
+                || low < min || high > max || low >= high)
+            {
+                root.Notify.Flash($"Zwei aufsteigende Zahlen zwischen {min} und {max} {unit} eingeben.", true);
+                return;
+            }
+            var bounds = new SpectrumBounds(low, high);
+            ChangeSpectrum(p => frequency ? p with { CustomFrequency = bounds } : p with { CustomLevels = bounds });
+        }, maxLen: 16);
+    }
+
+    void ConfirmOutputTest()
+    {
+        if (_m.OutputCount == 0) return;
+        int index = ClampedOutIdx;
+        Guid channelId = _m.Channel(false, index).Id;
+        Root?.Confirm("Testton abspielen?", $"OUT {index + 1:00} · {_m.DisplayName(false, index)}\n440 Hz · 0,5 Sekunden · maximal −40 dBFS",
+            "Abspielen", () => _m.PlayOutputTestTone(channelId));
     }
 
     List<MenuItem> BuildOutputMenu()
@@ -617,7 +734,9 @@ internal sealed class OutputsDspPage : Page
         _eqToggle.Bounds = new RectF(_preToggle.Bounds.X - 6 - togW, topY, togW, ch);
 
         _prevOut.Bounds = new RectF(area.X, topY, ch, ch);
-        float maxDdW = Math.Max(120f, _eqToggle.Bounds.X - (_prevOut.Bounds.Right + 6) - ch - 12);
+        _spectrumDd.Bounds = new RectF(_eqToggle.Bounds.X - 104, topY, 98, ch);
+        _channelActions.Bounds = new RectF(_spectrumDd.Bounds.X - 98, topY, 92, ch);
+        float maxDdW = Math.Max(48f, _channelActions.Bounds.X - (_prevOut.Bounds.Right + 6) - ch - 12);
         float ddW = Math.Min(320f, maxDdW);
         _outDd.Bounds = new RectF(_prevOut.Bounds.Right + 4, topY, ddW, ch);
         _nextOut.Bounds = new RectF(_outDd.Bounds.Right + 4, topY, ch, ch);
@@ -625,7 +744,8 @@ internal sealed class OutputsDspPage : Page
         bool hasOut = _m.OutputCount > 0;
         _prevOut.Enabled = hasOut && ClampedOutIdx > 0;
         _nextOut.Enabled = hasOut && ClampedOutIdx + 1 < _m.OutputCount;
-        _outDd.Enabled = hasOut;
+        _outDd.Enabled = _spectrumDd.Enabled = hasOut;
+        _channelActions.Enabled = hasOut;
 
         // Spektrum-Graph oben
         float graphY = topY + ch + 8;
