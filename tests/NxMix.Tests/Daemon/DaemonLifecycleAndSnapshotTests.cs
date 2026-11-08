@@ -7,6 +7,7 @@ using System.Text.Json;
 using NxMix.Audio;
 using NxMix.Daemon;
 using NxMix.Daemon.ControlApi;
+using NxMix.Daemon.Persistence;
 using NxMix.Engine;
 using NxMix.Ipc;
 
@@ -140,6 +141,123 @@ public sealed class DaemonLifecycleAndSnapshotTests
         for (int i = 0; i < 100; i++)
             Assert.True(reader.TryRead(rIn, rOut, rBus, rDev, rPre, rPost, out _));
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
+    }
+
+    [Fact]
+    public async Task Virtual_playback_loopback_maps_to_a_stereo_input_and_keeps_the_endpoint_id()
+    {
+        string dir = CreateTempDir();
+        try
+        {
+            var cfg = new SystemConfig
+            {
+                AutoStartAudioOnBoot = false,
+                CompanionApiEnabled = false,
+                Devices = new[] { new AudioDeviceNode { EndpointId = "sim:asio/out", Flow = DeviceFlow.Render } },
+            };
+            using var controller = new DaemonEngineController(new DaemonEngineOptions
+            {
+                CustomDataDir = dir,
+                CustomIpcKey = "vaio_loopback_" + Guid.NewGuid().ToString("N"),
+                DeviceCatalog = new EmptyCatalog(),
+                AppCatalog = new EmptyApps(),
+                AppRouteRestorer = new NoopRestorer(),
+                HostFactory = () => new SimContinuousAudioHost(),
+                InitialSystemConfigOverride = cfg,
+            });
+            await controller.ApplySystemConfigAsync(cfg with
+            {
+                Vaios = new[]
+                {
+                    new VaioSlotConfig { Name = "NX-MIX In 1", EndpointOrExe = "sim:vb/out", Loopback = true },
+                },
+            });
+
+            var saved = new SystemConfigStore(new DaemonPaths(dir)).Load();
+            var loopback = Assert.Single(controller.BuildAudioHostConfig(saved).Bindings, b => b.Loopback);
+            Assert.Equal(DeviceFlow.Capture, loopback.Flow);
+            Assert.Equal("sim:vb/out", loopback.DeviceId);
+            Assert.Equal(2, loopback.Count);
+            Assert.Equal("NX-MIX In 1 L", controller.Snapshot.Mixer.Inputs[0].Name);
+            Assert.Equal("NX-MIX In 1 R", controller.Snapshot.Mixer.Inputs[1].Name);
+            Assert.Equal(0.0, controller.Snapshot.Mixer.MatrixDb[0][0]);
+            Assert.Equal(0.0, controller.Snapshot.Mixer.MatrixDb[1][1]);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Duplicate_app_links_are_migrated_and_old_channel_labels_are_removed()
+    {
+        var oldLink = new AppLinkEntry { ExeName = "Spotify", Count = 2 };
+        var keptLink = new AppLinkEntry { ExeName = "SPOTIFY.EXE", FirstChannel = 2, Count = 2 };
+        var oldConfig = new SystemConfig { AppLinks = new[] { oldLink } };
+        var empty = MixerSettings.Create(48000, 4, 2);
+        empty = empty with { Inputs = empty.Inputs.Select(channel => channel with { Name = "" }).ToArray() };
+        var mixer = DaemonEngineController.ReconcileMixerWithSystemConfig(empty, oldConfig);
+        var inputs = mixer.Inputs.ToArray();
+        inputs[1] = inputs[1] with { Name = "Eigener Kanalname" };
+        mixer = mixer with { Inputs = inputs };
+
+        var clean = SystemConfigStore.Sanitize(new SystemConfig
+        {
+            AppLinks = new[] { keptLink, oldLink },
+            Vaios = new[] { new VaioSlotConfig { Kind = VaioSlotKind.AppCapture, EndpointOrExe = "Spotify.exe" } },
+        });
+        Assert.Equal(keptLink.Id, Assert.Single(clean.AppLinks).Id);
+        Assert.Empty(clean.Vaios);
+
+        var next = DaemonEngineController.ReconcileMixerWithSystemConfig(mixer, clean, oldConfig);
+        Assert.Null(next.Inputs[0].DeviceId);
+        Assert.Empty(next.Inputs[0].Name);
+        Assert.Equal("Eigener Kanalname", next.Inputs[1].Name);
+        Assert.DoesNotContain(next.DeviceMasters, master => master.Id == oldLink.Id);
+        Assert.Equal(keptLink.Id, next.Inputs[2].DeviceId);
+        Assert.Equal(keptLink.Id, next.Inputs[3].DeviceId);
+    }
+
+    [Fact]
+    public async Task App_capture_without_render_output_reports_why_audio_cannot_start()
+    {
+        string dir = CreateTempDir();
+        try
+        {
+            var cfg = new SystemConfig
+            {
+                CompanionApiEnabled = false,
+                ParkingDeviceId = "sim:vb/out",
+                AppLinks = new[] { new AppLinkEntry { ExeName = "Spotify.exe", FirstChannel = 2 } },
+            };
+            using var controller = new DaemonEngineController(new DaemonEngineOptions
+            {
+                CustomDataDir = dir,
+                CustomIpcKey = "app_capture_" + Guid.NewGuid().ToString("N"),
+                DeviceCatalog = new EmptyCatalog(),
+                AppCatalog = new EmptyApps(),
+                AppRouteRestorer = new NoopRestorer(),
+                HostFactory = () => new SimContinuousAudioHost(),
+                InitialSystemConfigOverride = cfg,
+            });
+
+            Assert.Equal(HostState.Stopped, controller.Snapshot.HostStats.State);
+            Assert.Contains("Ausgabegerät", controller.Snapshot.AudioStartBlockedReason);
+
+            await controller.ApplySystemConfigAsync(cfg with
+            {
+                Devices = new[] { new AudioDeviceNode { EndpointId = "sim:asio/out", Flow = DeviceFlow.Render } },
+            });
+            Assert.Null(controller.Snapshot.AudioStartBlockedReason);
+            Assert.Equal(HostState.Running, controller.Snapshot.HostStats.State);
+            Assert.Equal(0.0, controller.Snapshot.Mixer.MatrixDb[2][0]);
+            Assert.Equal(0.0, controller.Snapshot.Mixer.MatrixDb[3][1]);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]

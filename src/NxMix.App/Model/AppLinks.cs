@@ -11,7 +11,7 @@ internal sealed record AppLink(string ExeName, int FirstChannel, int Count = 2, 
     public string Title => string.IsNullOrWhiteSpace(DisplayName) ? AppLinkRules.PrettyName(ExeName) : DisplayName!;
 }
 
-internal enum LinkUi { Off, Idle, NeedsSetup, Waiting, Linked, Failed, Conflict }
+internal enum LinkUi { Off, Idle, NeedsSetup, AudioBlocked, Waiting, Capturing, Linked, Failed, Conflict }
 
 internal readonly record struct LinkView(LinkUi State, string? Message, int ProcessCount);
 
@@ -46,8 +46,9 @@ internal static class AppLinkRules
         var map = new Dictionary<string, List<AppSessionInfo>>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in sessions)
         {
-            if (string.IsNullOrWhiteSpace(s.ExeName)) continue;
-            if (!map.TryGetValue(s.ExeName, out var l)) map[s.ExeName] = l = new List<AppSessionInfo>();
+            string? exe = NormalizeExe(s.ExeName, out _);
+            if (exe == null) continue;
+            if (!map.TryGetValue(exe, out var l)) map[exe] = l = new List<AppSessionInfo>();
             l.Add(s);
         }
         var res = new List<AppProgram>();

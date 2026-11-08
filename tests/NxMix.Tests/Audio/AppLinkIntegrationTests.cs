@@ -3,6 +3,7 @@ using NxMix.Audio;
 using NxMix.Audio.Apps;
 using NxMix.Audio.Host;
 using NxMix.Audio.Interop;
+using NxMix.Engine;
 using Xunit.Abstractions;
 
 namespace NxMix.Tests.Audio;
@@ -42,19 +43,37 @@ public class AppLinkIntegrationTests
             return null;
         }
         var render = new DeviceCatalog().List().Where(d => d.Flow == DeviceFlow.Render).ToList();
-        AudioDeviceInfo? parking = null;
-        foreach (string name in ParkingPreference)
-        {
-            parking = render.FirstOrDefault(d => !d.IsDefault && d.Name.Contains(name, StringComparison.OrdinalIgnoreCase)
-                                                 && !d.Name.Contains("CABLE In 16ch", StringComparison.OrdinalIgnoreCase));
-            if (parking != null) break;
-        }
+        var candidates = ParkingPreference
+            .SelectMany(name => render.Where(d => d.Name.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            .Concat(render.Where(d => d.IsVirtualEndpoint))
+            .Where(d => d.Backend == AudioBackend.Windows && !d.IsDefault &&
+                        !d.Name.Contains("CABLE In 16ch", StringComparison.OrdinalIgnoreCase))
+            .DistinctBy(d => d.Id);
+        AudioDeviceInfo? parking = candidates.FirstOrDefault(CanOpenForRender);
         if (parking == null)
         {
-            skip = "Kein virtuelles Parkplatz-Geraet (VBMatrix In n) vorhanden.";
+            skip = "Kein separates virtuelles Parkplatz-Geraet vorhanden. Windows-Ausgänge: " +
+                string.Join(", ", render.Where(d => d.Backend == AudioBackend.Windows).Select(d => d.Name));
             return null;
         }
         return new Setup(parking, exe, AudioPolicyConfig.PolicyDeviceId(parking.Id));
+    }
+
+    private bool CanOpenForRender(AudioDeviceInfo device)
+    {
+        try
+        {
+            return ComThread.Run(() =>
+            {
+                using var endpoint = WasapiEndpoint.Open(device.Id, false, false, 48000, 480, false);
+                return true;
+            }, 5000);
+        }
+        catch (Exception ex)
+        {
+            _out.WriteLine($"WASAPI-Probe {device.Name}: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>Macht den Testprozess fuer die Windows-Audioverwaltung "bekannt" (Voraussetzung fuer Pro-App-Umleitung) und liest den Ist-Zustand.</summary>
@@ -90,12 +109,16 @@ public class AppLinkIntegrationTests
         private readonly Thread _thread;
         private readonly ManualResetEventSlim _stop = new(false);
         private readonly ManualResetEventSlim _ready = new(false);
+        private readonly string? _endpoint;
+        private readonly bool _testTone;
         public string? OpenedOn;
         public string? Error;
         public string? OpenedName;
 
-        public SilentPlayer()
+        public SilentPlayer(string? endpoint = null, bool testTone = false)
         {
+            _endpoint = endpoint;
+            _testTone = testTone;
             _thread = new Thread(Run) { IsBackground = true, Name = "TestSilence" };
             _thread.SetApartmentState(ApartmentState.MTA);
             _thread.Start();
@@ -107,7 +130,7 @@ public class AppLinkIntegrationTests
             WasapiEndpoint? ep = null;
             try
             {
-                ep = WasapiEndpoint.Open(null, false, false, 48000, 480, false); // Standardgeraet DIESES Prozesses (laut Umleitung)
+                ep = WasapiEndpoint.Open(_endpoint, false, false, 48000, 480, false);
                 OpenedOn = ep.DeviceId;
                 OpenedName = ep.Name;
                 ep.Start();
@@ -123,6 +146,8 @@ public class AppLinkIntegrationTests
             try
             {
                 IAudioRenderClient render = ep.RenderClient!;
+                var tone = new float[ep.BufferFrames];
+                long frame = 0;
                 nint* h = stackalloc nint[1];
                 h[0] = ep.EventHandle;
                 while (!_stop.IsSet)
@@ -132,8 +157,18 @@ public class AppLinkIntegrationTests
                     int avail = (int)(ep.BufferFrames - pad);
                     if (avail <= 0) continue;
                     if (render.GetBuffer((uint)avail, out nint data) < 0) break;
-                    new Span<byte>((void*)data, avail * ep.BlockAlign).Clear(); // exakte Stille
-                    render.ReleaseBuffer((uint)avail, BufferFlags.Silent);
+                    new Span<byte>((void*)data, avail * ep.BlockAlign).Clear();
+                    if (_testTone)
+                    {
+                        for (int i = 0; i < avail; i++)
+                            tone[i] = 0.001f * MathF.Sin(2 * MathF.PI * 440 * (frame++ % ep.SampleRate) / ep.SampleRate);
+                        fixed (float* samples = tone)
+                        {
+                            for (int channel = 0; channel < Math.Min(ep.DeviceChannels, 2); channel++)
+                                PcmConvert.WriteChannel(samples, avail, (byte*)data, ep.BlockAlign, channel, ep.Kind);
+                        }
+                    }
+                    render.ReleaseBuffer((uint)avail, _testTone ? 0 : BufferFlags.Silent);
                 }
             }
             catch
@@ -254,6 +289,109 @@ public class AppLinkIntegrationTests
     }
 
     [Fact]
+    public void AudioHost_CapturesWithoutParkingDevice_AndLeavesWindowsRouteUnchanged()
+    {
+        var endpoint = new DeviceCatalog().List().FirstOrDefault(d => d.Flow == DeviceFlow.Render &&
+            d.Backend == AudioBackend.Windows && !d.IsVirtualEndpoint && d.Channels >= 2 && CanOpenForRender(d));
+        if (endpoint == null || !new AppRouteRestorer().IsSupported)
+        {
+            _out.WriteLine("UEBERSPRUNGEN: Kein nutzbarer physischer WASAPI-Ausgang oder ProcessLoopback.");
+            return;
+        }
+
+        string? exe = Path.GetFileName(Environment.ProcessPath);
+        Assert.False(string.IsNullOrEmpty(exe));
+        using var player = new SilentPlayer(endpoint.Id, testTone: true);
+        Assert.True(player.Error == null, player.Error);
+        int self = Environment.ProcessId;
+        string?[] before = ReadRoutes(self);
+        var mixer = new MixerEngine(MixerSettings.Create(48000, 2, 2) with
+        {
+            MatrixDb = new[] { new[] { 0.0, double.NegativeInfinity }, new[] { double.NegativeInfinity, 0.0 } },
+        });
+        using var host = new AudioHost();
+        host.Start(new AudioHostConfig(48000, Array.Empty<DeviceBinding>(),
+            AppBindings: new[] { new AppBinding(exe, 0, 2) }), mixer);
+        Assert.True(host.State == HostState.Running, host.GetStats().LastError);
+        var inputPeaks = new float[2];
+        var outputPeaks = new float[2];
+        Assert.True(SpinWait.SpinUntil(() =>
+        {
+            if (host.GetAppLinks().Single().State != AppLinkState.Capturing) return false;
+            mixer.ReadInputPeaks(inputPeaks);
+            return inputPeaks.Max() > 0.0001;
+        }, TimeSpan.FromSeconds(8)), $"Kein App-Capture-Signal von {endpoint.Name}: {host.GetAppLinks().Single()}");
+        mixer.ReadOutputPeaks(outputPeaks);
+        Assert.Contains("Parkplatz", host.GetAppLinks().Single().Message);
+        Assert.All(outputPeaks, peak => Assert.Equal(0f, peak));
+        Assert.Equal(before, ReadRoutes(self));
+        _out.WriteLine($"Ohne Parkplatz auf {endpoint.Name}: Eingang {inputPeaks.Max():F6}, Mix-Ausgang {outputPeaks.Max():F6}.");
+    }
+
+    [Fact]
+    public void AudioHost_MetersExistingStreamAndMixesItOnlyAfterItMoves()
+    {
+        Setup? setup = Prepare(out string skip);
+        if (setup == null) { _out.WriteLine("UEBERSPRUNGEN: " + skip); return; }
+        RegisterWithAudio();
+        int self = Environment.ProcessId;
+        var output = new DeviceCatalog().List()
+            .Where(d => d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows && d.Id != setup.Parking.Id)
+            .OrderByDescending(d => d.IsDefault)
+            .FirstOrDefault(CanOpenForRender);
+        Assert.NotNull(output);
+        string?[] before = ReadRoutes(self);
+        string journalPath = AppTestKit.TempJournal();
+        AppRouteJournal.PathOverride = journalPath;
+        try
+        {
+            using var player = new SilentPlayer(output.Id, testTone: true);
+            Assert.True(player.Error == null, player.Error);
+            var mixer = new MixerEngine(MixerSettings.Create(48000, 2, 2) with
+            {
+                MatrixDb = new[] { new[] { 0.0, double.NegativeInfinity }, new[] { double.NegativeInfinity, 0.0 } },
+            });
+            using var host = new AudioHost();
+            host.Start(new AudioHostConfig(48000, Array.Empty<DeviceBinding>(), BlockFrames: 480,
+                AppBindings: new[] { new AppBinding(setup.Exe, 0, 2) }, ParkingDeviceId: setup.Parking.Id), mixer);
+            Assert.True(host.State == HostState.Running, host.GetStats().LastError);
+            var inputPeaks = new float[2];
+            var outputPeaks = new float[2];
+            Assert.True(SpinWait.SpinUntil(() =>
+            {
+                if (host.GetAppLinks().Single().State != AppLinkState.Capturing) return false;
+                mixer.ReadInputPeaks(inputPeaks);
+                return inputPeaks.Max() > 0.0001;
+            }, TimeSpan.FromSeconds(8)),
+                $"Kein Testsignal am Eingang. App-Capture: {host.GetAppLinks().SingleOrDefault()}");
+            mixer.ReadOutputPeaks(outputPeaks);
+            _out.WriteLine($"Laufender WASAPI-Stream auf {player.OpenedName}: Eingang {inputPeaks.Max():F6}, Mix-Ausgang {outputPeaks.Max():F6}.");
+            Assert.All(outputPeaks, peak => Assert.Equal(0f, peak));
+            Assert.All(ReadRoutes(self), route => Assert.Equal(setup.PolicyId, route, ignoreCase: true));
+
+            player.Dispose();
+            using var parkedPlayer = new SilentPlayer(testTone: true);
+            Assert.True(parkedPlayer.Error == null, parkedPlayer.Error);
+            Assert.Equal(setup.Parking.Id, parkedPlayer.OpenedOn, ignoreCase: true);
+            Assert.True(SpinWait.SpinUntil(() =>
+            {
+                if (host.GetAppLinks().Single().State != AppLinkState.Linked) return false;
+                mixer.ReadOutputPeaks(outputPeaks);
+                return outputPeaks.Max() > 0.0001;
+            }, TimeSpan.FromSeconds(8)), $"Kein Mix-Ausgang nach der Umleitung. App-Capture: {host.GetAppLinks().Single()}");
+            _out.WriteLine($"Nach dem Neuöffnen auf {setup.Parking.Name}: Mix-Ausgang {outputPeaks.Max():F6}.");
+            host.Stop();
+            Assert.Equal(before, ReadRoutes(self));
+        }
+        finally
+        {
+            new AppRouteRestorer(journalPath).RestoreAllKnown();
+            AppRouteJournal.PathOverride = null;
+            AppTestKit.Delete(journalPath);
+        }
+    }
+
+    [Fact]
     public void AudioHost_LinksOwnProcess_FeedsEngineInputs_AndRestoresOnStop()
     {
         Setup? setup = Prepare(out string skip);
@@ -266,11 +404,7 @@ public class AppLinkIntegrationTests
         AppRouteJournal.PathOverride = journalPath;
         const int rate = 48000;
         var processor = new SilentCountingProcessor(inputs: 4, outputs: 0, sampleRate: rate); // schreibt nichts aus, misst nur die Eingaenge
-        var config = new AudioHostConfig(rate, new[]
-        {
-            // Takt: Software-Takt (nur Lesen). Eingang 0..1: Loopback des Parkplatzes (nur lesend)
-            new DeviceBinding(setup.Parking.Id, DeviceFlow.Capture, 0, 0, 2, Loopback: true),
-        }, BlockFrames: 480,
+        var config = new AudioHostConfig(rate, Array.Empty<DeviceBinding>(), BlockFrames: 480,
         AppBindings: new[] { new AppBinding(setup.Exe, 2, 2) },
         ParkingDeviceId: setup.Parking.Id);
 
@@ -281,7 +415,7 @@ public class AppLinkIntegrationTests
             host.Start(config, processor);
             Assert.True(host.State == HostState.Running, host.GetStats().LastError);
 
-            // Der Verwalter leitet um (1 Hz) und startet erst danach den Prozess-Loopback
+            // Der Verwalter startet Capture und setzt die Umleitung (1 Hz).
             AppLinkStatus? st = null;
             var sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 8000)
@@ -344,43 +478,4 @@ public class AppLinkIntegrationTests
 
     private static RouteEntry? AppRouteJournalFind(string path, string exe) => new AppRouteJournal(path).Find(exe);
 
-    [Fact]
-    public void AudioHost_WithoutParkingDevice_ReportsFailed_AndRedirectsNothing()
-    {
-        // Braucht nur irgendein virtuelles Geraet fuer die (lesende) Takt-Anbindung
-        var dev = new DeviceCatalog().List().FirstOrDefault(d => d.Flow == DeviceFlow.Render && !d.IsDefault
-            && d.Name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase) && !d.Name.Contains("CABLE In 16ch", StringComparison.OrdinalIgnoreCase));
-        if (dev == null) { _out.WriteLine("UEBERSPRUNGEN: kein virtuelles Geraet."); return; }
-
-        string journalPath = AppTestKit.TempJournal();
-        AppRouteJournal.PathOverride = journalPath;
-        try
-        {
-            const int rate = 48000;
-            var processor = new SilentCountingProcessor(inputs: 6, outputs: 0, sampleRate: rate);
-            var config = new AudioHostConfig(rate, new[] { new DeviceBinding(dev.Id, DeviceFlow.Capture, 0, 0, 2, Loopback: true) },
-                AppBindings: new[] { new AppBinding("spotify.exe", 2, 2), new AppBinding("chrome.exe", 4, 2) }); // ParkingDeviceId fehlt
-            using var host = new AudioHost();
-            host.Start(config, processor);
-            Assert.True(host.State == HostState.Running, host.GetStats().LastError);
-
-            IReadOnlyList<AppLinkStatus> links = host.GetAppLinks();
-            Assert.Equal(2, links.Count);
-            Assert.All(links, l =>
-            {
-                Assert.Equal(AppLinkState.Failed, l.State);
-                Assert.Contains("Parkplatz", l.Message);
-            });
-            Assert.Equal(new[] { "spotify.exe", "chrome.exe" }, links.Select(l => l.ExeName).ToArray());
-            Thread.Sleep(1300);                                              // mindestens ein Verwalter-Takt
-            Assert.Empty(new AppRouteJournal(journalPath).Load());           // nichts umgeleitet
-            Assert.Equal(0.0, processor.InputPeak);
-            host.Stop();
-        }
-        finally
-        {
-            AppRouteJournal.PathOverride = null;
-            AppTestKit.Delete(journalPath);
-        }
-    }
 }

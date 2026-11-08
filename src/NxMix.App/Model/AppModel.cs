@@ -822,16 +822,25 @@ internal sealed class AppModel
     public void RemoveHardwareDevice(Guid nodeId) =>
         ApplySystemConfig(Config with { Devices = Config.Devices.Where(d => d.Id != nodeId).ToArray() });
 
-    public VaioSlotConfig AddVirtualCableSlot(AudioDeviceInfo endpoint, string? customName = null)
+    public VaioSlotConfig AddVirtualCableSlot(AudioDeviceInfo endpoint, string? customName = null, bool loopback = false)
     {
-        int count = Math.Clamp(Math.Max(2, endpoint.Channels), 1, 16);
-        int first = NextFreeEngineChannel(endpoint.Flow);
+        var flow = loopback ? DeviceFlow.Capture : endpoint.Flow;
+        int count = loopback ? Math.Clamp(endpoint.Channels, 1, 2) : Math.Clamp(Math.Max(2, endpoint.Channels), 1, 16);
+        int first = NextFreeEngineChannel(flow);
+        if (loopback && string.IsNullOrWhiteSpace(customName))
+        {
+            int number = 1;
+            while (Config.Vaios.Any(v => string.Equals(v.Name, $"NX-MIX In {number}", StringComparison.OrdinalIgnoreCase)))
+                number++;
+            customName = $"NX-MIX In {number}";
+        }
         var slot = new VaioSlotConfig
         {
             Id = Guid.NewGuid(),
             Name = string.IsNullOrWhiteSpace(customName) ? endpoint.Name : customName.Trim(),
             Kind = VaioSlotKind.ExternalDriverEndpoint,
-            Flow = endpoint.Flow,
+            Flow = flow,
+            Loopback = loopback,
             Channels = count,
             EngineFirstChannel = first,
             EndpointOrExe = endpoint.Id,
@@ -968,10 +977,12 @@ internal sealed class AppModel
         var conflict = LinkConflict(firstChannel, chCount, exe, firstChannel);
         if (conflict != null) return conflict;
 
+        var existing = Config.AppLinks.FirstOrDefault(l => l.FirstChannel == firstChannel &&
+            string.Equals(l.ExeName, exe, StringComparison.OrdinalIgnoreCase));
         var list = Config.AppLinks.Where(l => l.FirstChannel != firstChannel && !string.Equals(l.ExeName, exe, StringComparison.OrdinalIgnoreCase)).ToList();
         list.Add(new AppLinkEntry
         {
-            Id = Guid.NewGuid(),
+            Id = existing?.Id ?? Guid.NewGuid(),
             ExeName = exe,
             DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim(),
             FirstChannel = firstChannel,
@@ -1018,13 +1029,15 @@ internal sealed class AppModel
     {
         if (!Config.AppLinksEnabled) return new LinkView(LinkUi.Off, null, 0);
         if (AppLinksUnsupportedReason() is { } un) return new LinkView(LinkUi.Failed, un, 0);
-        if (string.IsNullOrWhiteSpace(Config.ParkingDeviceId)) return new LinkView(LinkUi.NeedsSetup, "Kein stilles Parkplatz-Ausgabegerät gewählt", 0);
+        if (!HostRunning && (Runtime.AudioStartBlockedReason ?? (HostState == HostState.Faulted ? HostError : null)) is { } reason)
+            return new LinkView(LinkUi.AudioBlocked, reason, 0);
         if (!HostRunning) return new LinkView(LinkUi.Idle, null, 0);
         var st = AppLinkStatuses.FirstOrDefault(s => string.Equals(s.ExeName, link.ExeName, StringComparison.OrdinalIgnoreCase));
         if (st == null) return new LinkView(LinkUi.Waiting, null, 0);
         return st.State switch
         {
             AppLinkState.Linked => new LinkView(LinkUi.Linked, st.Message, st.ProcessCount),
+            AppLinkState.Capturing => new LinkView(LinkUi.Capturing, st.Message, st.ProcessCount),
             AppLinkState.Failed => new LinkView(LinkUi.Failed, st.Message, st.ProcessCount),
             _ => new LinkView(LinkUi.Waiting, st.Message, st.ProcessCount),
         };

@@ -10,7 +10,7 @@ internal static class LinkLook
     public static Color4 Color(LinkUi s) => s switch
     {
         LinkUi.Linked => Theme.Green,
-        LinkUi.Waiting or LinkUi.NeedsSetup => Theme.Orange,
+        LinkUi.Waiting or LinkUi.NeedsSetup or LinkUi.AudioBlocked or LinkUi.Capturing => Theme.Orange,
         LinkUi.Failed or LinkUi.Conflict => Theme.Red,
         LinkUi.Off => Theme.TextTertiary,
         _ => Theme.AccentText,
@@ -19,12 +19,14 @@ internal static class LinkLook
     public static string Text(LinkUi s) => s switch
     {
         LinkUi.Linked => "Verbunden",
+        LinkUi.Capturing => "Aufnahme · Umleitung offen",
         LinkUi.Waiting => "Wartet auf das Programm",
         LinkUi.Failed => "Fehler",
         LinkUi.Conflict => "Konflikt",
         LinkUi.NeedsSetup => "Noch nicht startklar",
+        LinkUi.AudioBlocked => "Audio-Start blockiert",
         LinkUi.Off => "Ausgeschaltet",
-        _ => "Bereit – verbindet beim Audio-Start",
+        _ => "Audio-Engine starten",
     };
 
     public static string Describe(AppLink l, LinkView v)
@@ -33,12 +35,14 @@ internal static class LinkLook
         string state = v.State switch
         {
             LinkUi.Linked => "verbunden" + (v.ProcessCount > 1 ? $" ({v.ProcessCount} Prozesse)" : ""),
+            LinkUi.Capturing => "nimmt auf, Ausgabeumleitung offen",
             LinkUi.Waiting => "wartet auf das Programm",
             LinkUi.Failed => "Fehler",
             LinkUi.Conflict => "Konflikt",
             LinkUi.NeedsSetup => "noch nicht startklar",
+            LinkUi.AudioBlocked => "Audio-Start blockiert",
             LinkUi.Off => "ausgeschaltet",
-            _ => "wird beim Start von Audio verbunden",
+            _ => "wartet auf den Start der Audio-Engine",
         };
         return head + " – " + state + (string.IsNullOrWhiteSpace(v.Message) ? "" : ": " + v.Message);
     }

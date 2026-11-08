@@ -6,7 +6,7 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Tab „Engine“ (Strg+8):
+/// <summary>Tab „Einstellungen“ (Strg+8):
 /// Steuerung des eigenständigen NX-MIX Hintergrunddienstes (NxMix.Daemon), Master-Clock &amp; Puffer-Konfiguration
 /// (mit transparenter Kennzeichnung von kurzen Stream-Reopens), Echtzeit-Telemetrie, Companion-API, Darstellung
 /// sowie „Updates &amp; Release Channel“ (Stable / Beta).</summary>
@@ -25,7 +25,7 @@ internal sealed class EnginePage : Page
     readonly Dropdown _rateDd = new() { Tooltip = "System-Sample-Rate wählen (kurzer Stream-Reopen ~50 ms)" };
     readonly Dropdown _blockDd = new() { Tooltip = "Ziel-Puffergröße in Frames wählen (kurzer Stream-Reopen ~50 ms)" };
     readonly Switch _logonSw = new() { Tooltip = "NX-MIX Hintergrund-Engine automatisch bei Windows-Anmeldung im Tray starten" };
-    readonly Switch _bootAudioSw = new() { Tooltip = "Audio-Verarbeitung beim Start des Hintergrunddienstes sofort aktivieren" };
+    readonly Switch _bootAudioSw = new() { Tooltip = "Audio beim Öffnen von NX-MIX oder beim Dienststart automatisch starten, sobald ein Wiedergabeausgang eingerichtet ist" };
     readonly Switch _offlineAuxSw = new() { Tooltip = "Abgesteckte Zweit-/USB-Geräte beim Start als Offline tolerieren statt abzubrechen" };
     readonly Button _shutdownBtn = new("Hintergrund-Engine vollständig beenden …", ButtonStyle.DestructiveTinted, Icon.Stop)
     {
@@ -73,7 +73,7 @@ internal sealed class EnginePage : Page
     RectF _updVersionRect, _updOfferRect, _updStatusRect;
     readonly List<(string Label, float Y, float H, bool ReopenBadge)> _leftLabels = new();
 
-    public override string Title => "Engine";
+    public override string Title => "Einstellungen";
     public override Icon Icon => Icon.Engine;
     public override string? Subtitle =>
         $"{_m.ConnectionSummary}  ·  {_m.Settings.SampleRate / 1000.0:0.#} kHz / {_m.Config.BlockFrames} Frames  ·  Master: {_m.Stats.MasterClockName ?? "Automatisch"}";

@@ -3,7 +3,7 @@ using NxMix.Audio.Interop;
 namespace NxMix.Audio.Apps;
 
 /// <summary>Eine Gruppe zusammengehoeriger Prozesse derselben Exe (z. B. ein Browser mit all seinen Hilfsprozessen). Root = der Elternprozess,
-/// dessen Eltern NICHT dieselbe Exe ist; ein Prozess-Loopback mit INCLUDE_TARGET_PROCESS_TREE auf Root nimmt die ganze Gruppe auf.</summary>
+/// der keinen Vorfahren derselben Exe hat. ProcessLoopback auf Root nimmt auch Kinder hinter Hilfsprozessen anderer Exe auf.</summary>
 internal sealed record ProcessGroup(int RootPid, IReadOnlyList<int> Members);
 
 internal static class ProcessSelector
@@ -27,13 +27,17 @@ internal static class ProcessSelector
     }
 
     /// <summary>Alle Prozesse mit dem Exe-Namen, gruppiert nach Elternprozess. Eine Gruppe pro Wurzel; Wurzeln aufsteigend nach PID.
-    /// Ein Prozess ist Wurzel, wenn sein Elternprozess nicht (mehr) zur selben Exe gehoert - oder wenn die Eltern-PID inzwischen
-    /// von einem juengeren Prozess wiederverwendet wurde (Startzeit des "Elternprozesses" nach der des Kindes).</summary>
+    /// Ein Prozess ist Wurzel, wenn kein lebender Vorfahr dieselbe Exe hat. Wiederverwendete Eltern-PIDs unterbrechen den Pfad.</summary>
     public static IReadOnlyList<ProcessGroup> FindGroups(IReadOnlyList<ProcInfo> processes, string exeName)
     {
         var same = new Dictionary<int, ProcInfo>();
+        var all = new Dictionary<int, ProcInfo>();
         foreach (ProcInfo p in processes)
-            if (p.Pid > 0 && ExeMatches(p.ExeName, exeName)) same[p.Pid] = p;
+        {
+            if (p.Pid <= 0) continue;
+            all[p.Pid] = p;
+            if (ExeMatches(p.ExeName, exeName)) same[p.Pid] = p;
+        }
         if (same.Count == 0) return Array.Empty<ProcessGroup>();
 
         var rootOf = new Dictionary<int, int>();
@@ -41,17 +45,18 @@ internal static class ProcessSelector
         {
             if (rootOf.TryGetValue(pid, out int cached)) return cached;
             int cur = pid;
+            int root = pid;
             var seen = new HashSet<int> { cur };
             while (true)
             {
-                ProcInfo p = same[cur];
-                bool parentSame = p.ParentPid != cur && same.TryGetValue(p.ParentPid, out ProcInfo parent) && !ParentIsNewer(parent, p);
-                if (!parentSame) break;
-                cur = p.ParentPid;
-                if (!seen.Add(cur)) break; // Schleife (sollte nie vorkommen)
+                ProcInfo p = all[cur];
+                if (!all.TryGetValue(p.ParentPid, out ProcInfo parent) || ParentIsNewer(parent, p) ||
+                    !seen.Add(parent.Pid)) break;
+                cur = parent.Pid;
+                if (same.ContainsKey(cur)) root = cur;
             }
-            rootOf[pid] = cur;
-            return cur;
+            rootOf[pid] = root;
+            return root;
         }
 
         var groups = new SortedDictionary<int, List<int>>();

@@ -690,7 +690,7 @@ internal sealed class UiRoot : Widget
                     if (notes.Length > 0) body += "\n\n" + notes;
 
                     ModalDialog.Show(this, title, body,
-                        new[] { "Später", "Im Engine-Tab öffnen", "Herunterladen" }, 2, -1, i =>
+                        new[] { "Später", "Update-Einstellungen", "Herunterladen" }, 2, -1, i =>
                         {
                             if (i == 1) OpenEngineUpdatesSection();
                             else if (i == 2) u.Download();

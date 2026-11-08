@@ -114,6 +114,7 @@ internal sealed class Sidebar : Widget
     public override string? TooltipAt(float x, float y)
     {
         int i = ItemAt(x, y);
+        if (i == UiRoot.TabEngine) return "Einstellungen · Audio, Ansicht und Updates (Strg+8)";
         if (i >= 0 && i < s_keys.Length) return Expanded ? s_keys[i] : $"{Root!.Pages[i].Title}  ·  {s_keys[i]}";
         if (CollapseRect.Contains(x, y)) return Expanded ? "Seitenleiste einklappen" : "Seitenleiste ausklappen";
         return null;
@@ -372,7 +373,7 @@ internal sealed class TopBar : Widget
             TitleHit.Close => "Oberfläche schließen (Hintergrund-Engine & Audio laufen weiter)",
             TitleHit.PanicMute => "Panic-Mute: alle Ausgänge sofort stummschalten / freigeben (Strg+M)",
             TitleHit.Snapshots => "Snapshots: schnell abrufen, speichern oder verwalten (Strg+7)",
-            TitleHit.Audio => "Hintergrund-Engine, Takt, Latenz & Status (Strg+8)",
+            TitleHit.Audio => "Einstellungen öffnen · Audio, Ansicht und Updates (Strg+8)",
             TitleHit.Update => "Neue Version von NX-MIX verfügbar",
             _ => null,
         };

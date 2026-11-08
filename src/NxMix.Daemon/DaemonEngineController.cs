@@ -277,7 +277,8 @@ public sealed class DaemonEngineController : INxMixBackend
     }
 
     /// <summary>Synchronisiert DeviceMasterDsp-Einträge und Kanal-Zuordnungen aus SystemConfig, ohne bestehende Kanalpegel oder Filter zu verlieren.</summary>
-    public static MixerSettings ReconcileMixerWithSystemConfig(MixerSettings mixer, SystemConfig cfg)
+    public static MixerSettings ReconcileMixerWithSystemConfig(MixerSettings mixer, SystemConfig cfg,
+        SystemConfig? previousConfig = null)
     {
         int needIn = mixer.Inputs.Count;
         int needOut = mixer.Outputs.Count;
@@ -308,6 +309,30 @@ public sealed class DaemonEngineController : INxMixBackend
         // DeviceMasters abgleichen (jedes AudioDeviceNode und jedes VaioSlotConfig hat genau einen DeviceMasterDsp)
         var existingMasters = mixer.DeviceMasters.ToDictionary(m => m.Id);
         var nextMasters = new List<DeviceMasterDsp>();
+
+        var configuredIds = cfg.Devices.Select(d => d.Id).Concat(cfg.Vaios.Select(v => v.Id))
+            .Concat(cfg.AppLinks.Select(a => a.Id)).ToHashSet();
+        var appTitles = cfg.AppLinks.Select(a => a.Title).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var previousApps = (previousConfig?.AppLinks ?? Array.Empty<AppLinkEntry>()).GroupBy(a => a.Id)
+            .ToDictionary(group => group.Key, group => group.First().Title);
+        var detachedAppIds = new HashSet<Guid>();
+        for (int i = 0; i < ins.Count; i++)
+        {
+            var channel = ins[i];
+            if (channel.DeviceId is not Guid id) continue;
+            if (!previousApps.TryGetValue(id, out string? title))
+            {
+                if (configuredIds.Contains(id) || !existingMasters.TryGetValue(id, out var master) ||
+                    !master.IsInput || !appTitles.Contains(master.Name)) continue;
+                title = master.Name;
+            }
+            if (cfg.AppLinks.Any(a => a.Id == id && i >= a.FirstChannel && i < a.EndChannel)) continue;
+
+            string stereoName = $"{title} {(channel.DeviceChannelIndex == 0 ? "L" : "R")}";
+            bool autoNamed = channel.Name == title || channel.Name == stereoName;
+            if (!configuredIds.Contains(id)) detachedAppIds.Add(id);
+            ins[i] = channel with { DeviceId = null, DeviceChannelIndex = i, Name = autoNamed ? "" : channel.Name };
+        }
 
         foreach (var d in cfg.Devices)
         {
@@ -382,7 +407,7 @@ public sealed class DaemonEngineController : INxMixBackend
         // Auch manuell angelegte DeviceMasters behalten, falls keine Kollision:
         foreach (var m in mixer.DeviceMasters)
         {
-            if (nextMasters.All(x => x.Id != m.Id))
+            if (!detachedAppIds.Contains(m.Id) && nextMasters.All(x => x.Id != m.Id))
                 nextMasters.Add(m);
         }
 
@@ -398,6 +423,27 @@ public sealed class DaemonEngineController : INxMixBackend
             }
         }
 
+        if (previousConfig != null && FirstPlaybackOutput(cfg) is { } output)
+        {
+            bool firstOutput = FirstPlaybackOutput(previousConfig) == null;
+            var appInputs = cfg.AppLinks.Where(a => cfg.AppLinksEnabled && a.Enabled &&
+                (firstOutput || !previousConfig.AppLinks.Any(old => old.Id == a.Id && old.Enabled)))
+                .Select(a => (First: a.FirstChannel, Count: a.Count));
+            var virtualInputs = cfg.Vaios.Where(v => v.Loopback && v.Enabled &&
+                (firstOutput || !previousConfig.Vaios.Any(old => old.Id == v.Id && old.Enabled)))
+                .Select(v => (First: v.EngineFirstChannel, Count: v.Channels));
+            foreach (var source in appInputs.Concat(virtualInputs))
+            {
+                for (int channel = 0; channel < source.Count; channel++)
+                {
+                    int input = source.First + channel;
+                    int target = output.First + Math.Min(channel, output.Count - 1);
+                    if ((uint)input >= (uint)ins.Count || (uint)target >= (uint)outs.Count) continue;
+                    if (resizedMatrix[input].All(double.IsNegativeInfinity)) resizedMatrix[input][target] = 0.0;
+                }
+            }
+        }
+
         return mixer with
         {
             SampleRate = cfg.SampleRate,
@@ -406,6 +452,16 @@ public sealed class DaemonEngineController : INxMixBackend
             Outputs = outs,
             MatrixDb = resizedMatrix,
         };
+    }
+
+    private static (int First, int Count)? FirstPlaybackOutput(SystemConfig cfg)
+    {
+        var device = cfg.Devices.FirstOrDefault(d => d.Enabled && d.Flow == DeviceFlow.Render && !d.Loopback &&
+            d.ChannelCount > 0 && !string.IsNullOrWhiteSpace(d.EndpointId));
+        if (device != null) return (device.EngineFirstChannel, device.ChannelCount);
+        var vaio = cfg.Vaios.FirstOrDefault(v => v.Enabled && v.Flow == DeviceFlow.Render && !v.Loopback &&
+            v.Kind == VaioSlotKind.ExternalDriverEndpoint && v.Channels > 0 && !string.IsNullOrWhiteSpace(v.EndpointOrExe));
+        return vaio != null ? (vaio.EngineFirstChannel, vaio.Channels) : null;
     }
 
     public AudioHostConfig BuildAudioHostConfig(SystemConfig cfg)
@@ -432,7 +488,8 @@ public sealed class DaemonEngineController : INxMixBackend
         {
             if (v.Kind == VaioSlotKind.ExternalDriverEndpoint)
             {
-                bindings.Add(new DeviceBinding(v.EndpointOrExe, v.Flow, 0, v.EngineFirstChannel, v.Channels));
+                var flow = v.Loopback ? DeviceFlow.Capture : v.Flow;
+                bindings.Add(new DeviceBinding(v.EndpointOrExe, flow, 0, v.EngineFirstChannel, v.Channels, v.Loopback));
             }
             else if (v.Kind == VaioSlotKind.AppCapture && cfg.AppLinksEnabled)
             {
@@ -527,6 +584,8 @@ public sealed class DaemonEngineController : INxMixBackend
             VaioAvailability = _vaioAvail,
             HostStats = stats,
             LastError = _lastError ?? stats.LastError,
+            AudioStartBlockedReason = stats.State is not (HostState.Running or HostState.Starting) &&
+                !CanStartAudio(out string reason) ? reason : null,
             PanicMuted = _panicMuted,
             ActiveSnapshotId = _activeSnapshotId,
             Snapshots = _snapshots.ListSummaries(),
@@ -621,7 +680,9 @@ public sealed class DaemonEngineController : INxMixBackend
             {
                 for (int i = 0; i < links.Count; i++)
                 {
-                    if (links[i].State != prevSnap.AppLinkStatuses[i].State || links[i].ProcessCount != prevSnap.AppLinkStatuses[i].ProcessCount)
+                    var previous = prevSnap.AppLinkStatuses[i];
+                    if (links[i].State != previous.State || links[i].ProcessCount != previous.ProcessCount ||
+                        links[i].Message != previous.Message)
                     {
                         changed = true;
                         break;
@@ -770,6 +831,7 @@ public sealed class DaemonEngineController : INxMixBackend
         lock (_gate)
         {
             var prev = _config;
+            bool couldStartBefore = CanStartAudio(out _);
             var clean = _configStore.Save(config);
             bool rateChanged = clean.SampleRate != prev.SampleRate;
             bool streamImpact = rateChanged
@@ -784,9 +846,10 @@ public sealed class DaemonEngineController : INxMixBackend
                 || ! prev.AppLinks.SequenceEqual(clean.AppLinks);
 
             _config = clean;
-            _mixer = ReconcileMixerWithSystemConfig(_mixer, _config);
+            _mixer = ReconcileMixerWithSystemConfig(_mixer, _config, prev);
 
             bool wasRunning = _host.State is HostState.Running or HostState.Starting;
+            bool startWhenReady = !wasRunning && clean.AutoStartAudioOnBoot && (!couldStartBefore || !prev.AutoStartAudioOnBoot);
 
             if (rateChanged)
             {
@@ -797,7 +860,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 if (_specMode != 0 && _specChannel >= 0)
                     AttachSpectrumLocked(_specMode, _specChannel);
                 AppendLog("Info", "Engine", $"Sample-Rate auf {_config.SampleRate} Hz umgestellt.");
-                if (wasRunning && reopenAudioIfNeeded && CanStartAudio(out _))
+                if ((wasRunning || startWhenReady) && reopenAudioIfNeeded && CanStartAudio(out _))
                     StartAudioInternal("Sample-Rate-Wechsel");
             }
             else
@@ -809,6 +872,8 @@ public sealed class DaemonEngineController : INxMixBackend
                     if (CanStartAudio(out _))
                         StartAudioInternal("Hardware-/Stream-Konfiguration aktualisiert");
                 }
+                else if (startWhenReady && reopenAudioIfNeeded && CanStartAudio(out _))
+                    StartAudioInternal("Erster Wiedergabeausgang verfügbar");
             }
 
             RebuildSnapshotAndNotify(saveLive: true);
@@ -829,6 +894,7 @@ public sealed class DaemonEngineController : INxMixBackend
     {
         lock (_gate)
         {
+            if (_host.State is HostState.Running or HostState.Starting) return;
             StartAudioInternal("Benutzeranforderung");
             RebuildSnapshotAndNotify(saveLive: false);
         }

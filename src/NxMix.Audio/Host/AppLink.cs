@@ -23,7 +23,7 @@ internal sealed class AppLinkSlot
     public AppBinding Binding { get; }
     public int RingChannels { get; }
 
-    /// <summary>true: dauerhaft unbrauchbar (z. B. Parkplatz-Geraet fehlt); dann wird nie umgeleitet und nichts aufgenommen.</summary>
+    /// <summary>true: ungültiger Link oder ausgefallener Host. Dann wird nichts aufgenommen.</summary>
     public volatile bool Disabled;
 
     /// <summary>true: die Kanalangabe selbst ist ungueltig (existiert nicht / doppelt belegt): der Link wird nie mit der Engine verdrahtet.</summary>
@@ -35,9 +35,9 @@ internal sealed class AppLinkSlot
 
     public void SetStatus(AppLinkState state, string? message, int processCount)
     {
-        Volatile.Write(ref _state, (int)state);
         _message = message;
         Volatile.Write(ref _processCount, processCount);
+        Volatile.Write(ref _state, (int)state);
     }
 
     public AppLinkState State => (AppLinkState)Volatile.Read(ref _state);
@@ -118,8 +118,8 @@ internal sealed class AppLinkDeps
     public IReadOnlyList<AudioDeviceInfo>? RenderDevices;
 }
 
-/// <summary>Verwaltet die App-Links eines Host-Laufs auf einem eigenen Hintergrund-Thread (1 Hz): Prozesse suchen, ERST umleiten, DANN
-/// Prozess-Loopback starten; verschwundene Prozesse -> Spur schliessen. Beim Beenden (und bei Host-Fehlern) werden alle Umleitungen zurueckgesetzt.
+/// <summary>Verwaltet die App-Links eines Host-Laufs auf einem eigenen Hintergrund-Thread (1 Hz): Capture oeffnen und danach die
+/// App-Ausgabe umleiten. Beim Beenden (und bei Host-Fehlern) werden alle Umleitungen zurueckgesetzt.
 ///
 /// Umleitungs-Verhalten (gemessen auf Windows 11 Build 26300): Der Wert gilt je PROGRAMM (Exe) und ueberlebt das Prozessende, daher bleibt die
 /// Umleitung waehrend des Laufs bestehen (ein neu gestarteter Prozess ist von der ersten Sekunde an umgeleitet) und wird erst beim Beenden des
@@ -127,7 +127,6 @@ internal sealed class AppLinkDeps
 internal sealed class AppLinkEngine
 {
     private const int TickMs = 1000;
-    private const int LeakCheckEveryTicks = 3;
 
     private readonly HostRun? _run;
     private readonly AppLinkDeps _deps;
@@ -138,14 +137,10 @@ internal sealed class AppLinkEngine
     private Thread? _thread;
     private AppRouteService? _routes;
     private PolicyAppRouter? _ownRouter;
-    private string? _globalError;
-    private int _tick;
+    private string? _routingError;
     private bool _released;
 
     public AppLinkSlot[] Slots { get; }
-
-    /// <summary>Alle Link-Eintraege gelten als Ausfall, wenn dieser Fehler gesetzt ist (z. B. kein Parkplatz-Geraet).</summary>
-    public string? GlobalError => _globalError;
 
     public AppLinkEngine(HostRun? run, IReadOnlyList<AppBinding> bindings, string? parkingDeviceId, int inputChannels,
         ISet<int> takenInputs, Func<LaneContext> ctx, IReadOnlyList<string?> renderBindingDeviceIds, AppLinkDeps? deps = null)
@@ -158,6 +153,7 @@ internal sealed class AppLinkEngine
 
         var slots = new List<AppLinkSlot>();
         var used = new HashSet<int>(takenInputs);
+        var linkedApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (AppBinding b in bindings)
         {
             var slot = new AppLinkSlot(b);
@@ -171,14 +167,14 @@ internal sealed class AppLinkEngine
             }
             int clash = Enumerable.Range(b.EngineFirstChannel, b.Count).FirstOrDefault(c => used.Contains(c), -1);
             if (clash >= 0) { Fail(slot, $"Engine-Eingang {clash} ist bereits belegt."); continue; }
+            string exe = ProcessSelector.NormalizeExe(b.ExeName);
+            if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) exe += ".exe";
+            if (!linkedApps.Add(exe)) { Fail(slot, "Dieses Programm ist bereits mit einem Eingang verbunden."); continue; }
             for (int c = b.EngineFirstChannel; c < b.EngineFirstChannel + b.Count; c++) used.Add(c);
         }
         Slots = slots.ToArray();
 
-        _globalError = ValidateParking(renderBindingDeviceIds);
-        if (_globalError != null)
-            foreach (AppLinkSlot s in Slots)
-                if (!s.Disabled) Fail(s, _globalError);
+        _routingError = ValidateParking(renderBindingDeviceIds);
     }
 
     private static void Fail(AppLinkSlot slot, string message)
@@ -192,7 +188,7 @@ internal sealed class AppLinkEngine
     private string? ValidateParking(IReadOnlyList<string?> renderBindingDeviceIds)
     {
         if (_parkingId == null)
-            return "Parkplatz-Geraet fehlt (AudioHostConfig.ParkingDeviceId): ohne ein stilles Geraet, auf das das Programm umgeleitet wird, wuerde sein Ton doppelt hoerbar sein.";
+            return "Kein stilles Parkplatz-Ausgabegerät eingerichtet. Der Ton bleibt auf dem Windows-Ausgang.";
         try
         {
             IReadOnlyList<AudioDeviceInfo> devices = _deps.RenderDevices ?? new DeviceCatalog().List();
@@ -217,9 +213,19 @@ internal sealed class AppLinkEngine
                 string? err = ComThread.Run(() =>
                 {
                     using AudioPolicyConfig? c = AudioPolicyConfig.TryCreate(out string? e);
-                    return c == null ? e : null;
+                    if (c == null) return "Pro-App-Umleitung nicht verfuegbar: " + e;
+                    var ctx = _ctx();
+                    try
+                    {
+                        using var parking = WasapiEndpoint.Open(_parkingId, false, false, ctx.EngineRate, ctx.Chunk, false);
+                        return null;
+                    }
+                    catch (Exception ex)
+                    {
+                        return "Parkplatz-Ausgabegeraet kann nicht geoeffnet werden: " + ex.Message;
+                    }
                 }, 20000);
-                if (err != null) return "Pro-App-Umleitung nicht verfuegbar: " + err;
+                if (err != null) return err;
             }
             catch (Exception ex)
             {
@@ -233,7 +239,7 @@ internal sealed class AppLinkEngine
 
     public void StartThread()
     {
-        if (_globalError != null || Slots.All(s => s.Disabled)) return;
+        if (Slots.All(s => s.Disabled)) return;
         _thread = new Thread(Loop, 512 * 1024) { IsBackground = true, Name = "NxMix.AppLinks" };
         _thread.SetApartmentState(ApartmentState.MTA);
         _thread.Start();
@@ -252,10 +258,7 @@ internal sealed class AppLinkEngine
         try
         {
             if (!PrepareRoutes(out string? routeError))
-            {
-                FailAll(routeError ?? "Pro-App-Umleitung nicht verfuegbar.");
-                return;
-            }
+                _routingError ??= routeError ?? "Pro-App-Umleitung nicht verfügbar.";
 
             IProcessLister lister = _deps.Lister ?? new SystemProcessLister();
             while (!_stop.IsSet)
@@ -341,10 +344,8 @@ internal sealed class AppLinkEngine
     /// <summary>Ein Durchlauf: je Link Prozesse suchen, umleiten, Spuren oeffnen/schliessen. Intern oeffentlich fuer Tests.</summary>
     internal void Tick(IReadOnlyList<ProcInfo> procs)
     {
-        if (_routes == null) throw new InvalidOperationException("Verwalter nicht initialisiert.");
-        _tick++;
         List<SessionRef>? sessions = null;
-        bool leakCheck = _tick % LeakCheckEveryTicks == 1;
+        HashSet<int>? activePids = null;
 
         foreach (AppLinkSlot slot in Slots)
         {
@@ -369,25 +370,11 @@ internal sealed class AppLinkEngine
 
             if (groups.Count == 0)
             {
-                slot.SetStatus(AppLinkState.WaitingForApp, null, 0);
+                slot.SetStatus(AppLinkState.WaitingForApp, _routingError, 0);
                 continue;
             }
 
-            // ERST umleiten ...
-            var pids = groups.SelectMany(g => g.Members.OrderBy(p => p == g.RootPid ? 0 : 1)).ToList();
-            RouteResult rr = _routes.EnsureRouted(exe, pids, _parkingPolicyId!, out string? routeMsg);
-            if (rr == RouteResult.NotReady)
-            {
-                slot.SetStatus(AppLinkState.WaitingForApp, routeMsg, count);
-                continue;
-            }
-            if (rr == RouteResult.Failed)
-            {
-                slot.SetStatus(AppLinkState.Failed, routeMsg, count);
-                continue;
-            }
-
-            // ... DANN Capture starten (je Gruppe eine Spur)
+            // Bereits laufende Streams sofort aufnehmen, unabhängig von der Windows-Ausgabezuordnung.
             string? startError = null;
             foreach (ProcessGroup g in groups)
             {
@@ -406,23 +393,36 @@ internal sealed class AppLinkEngine
                 }
             }
 
-            if (keep.Count > 0)
+            if (keep.Count != groups.Count)
             {
-                string? hint = slot.Message;
-                if (leakCheck)
-                {
-                    sessions ??= ReadSessions();
-                    hint = LeakHint(sessions, groups);
-                }
-                slot.SetStatus(AppLinkState.Linked, hint, count);
+                _routes?.Release(exe, procs, out _);
+                slot.SetStatus(keep.Count == 0 ? AppLinkState.Failed : AppLinkState.Capturing,
+                    startError ?? laneError ?? "Prozess-Loopback nicht verfuegbar.", count);
+                continue;
             }
-            else
+
+            if (_routingError != null || _routes == null)
             {
-                slot.SetStatus(AppLinkState.Failed, startError ?? laneError ?? "Prozess-Loopback nicht verfuegbar.", count);
+                slot.SetStatus(AppLinkState.Capturing, _routingError, count);
+                continue;
             }
+
+            sessions ??= ReadSessions();
+            activePids ??= sessions.Where(s => s.State == 1).Select(s => s.ProcessId).ToHashSet();
+            var pids = groups.SelectMany(g => g.Members.OrderBy(p => p == g.RootPid ? 0 : 1))
+                .OrderByDescending(activePids.Contains).ToArray();
+            RouteResult rr = _routes.EnsureRouted(exe, pids, _parkingPolicyId!, out string? routeMsg);
+            if (rr is RouteResult.NotReady or RouteResult.Failed)
+            {
+                slot.SetStatus(AppLinkState.Capturing, routeMsg, count);
+                continue;
+            }
+
+            string? hint = LeakHint(sessions, groups);
+            slot.SetStatus(hint == null ? AppLinkState.Linked : AppLinkState.Capturing, hint, count);
         }
 
-        RetryPending(procs);
+        if (_routes != null) RetryPending(procs);
     }
 
     private List<SessionRef> ReadSessions()
@@ -440,7 +440,7 @@ internal sealed class AppLinkEngine
         {
             if (!members.Contains(s.ProcessId) || s.State != 1) continue;
             if (_parkingId != null && string.Equals(s.DeviceId, _parkingId, StringComparison.OrdinalIgnoreCase)) continue;
-            return $"Programm laeuft: der Ton kommt noch direkt auf '{s.DeviceName}' (fest gewaehltes Geraet oder Stream vor der Umleitung geoeffnet) - Wiedergabe neu starten.";
+            return $"Ton läuft noch direkt auf „{s.DeviceName}“. Wiedergabe in der App neu starten, um sie über NX-MIX auszugeben.";
         }
         return null;
     }
@@ -453,7 +453,7 @@ internal sealed class AppLinkEngine
             foreach (RouteEntry e in _routes!.Journal.Load())
             {
                 if (!e.Pending) continue;
-                if (Slots.Any(s => !s.Disabled && ProcessSelector.NormalizeExe(s.Binding.ExeName) == e.Exe)) continue; // gehoert zu einem aktiven Link
+                if (_routingError == null && Slots.Any(s => !s.Disabled && ProcessSelector.NormalizeExe(s.Binding.ExeName) == e.Exe)) continue;
                 if (ProcessSelector.FindGroups(procs, e.Exe).Count > 0) _routes.Release(e.Exe, procs, out _);
             }
         }

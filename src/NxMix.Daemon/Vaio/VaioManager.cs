@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using NxMix.Audio;
 using NxMix.Ipc;
 
@@ -21,7 +20,7 @@ public sealed class AppLinkVaioProvider : IVaioBackendProvider
             statusMessage = restorer.UnsupportedReason ?? "Windows Pro-App-Umleitung wird auf dieser Windows-Version nicht unterstützt.";
             return false;
         }
-        statusMessage = "Windows ProcessLoopback + Parkplatz-Umleitung betriebsbereit.";
+        statusMessage = "Windows ProcessLoopback verfügbar.";
         return true;
     }
 }
@@ -46,34 +45,19 @@ public sealed class ExternalDriverVaioProvider : IVaioBackendProvider
         catalog.Where(d => d.IsVirtualEndpoint).ToArray();
 }
 
-/// <summary>Prüft ehrlich, ob ein signierter nativer NX-MIX WaveRT-Kernel-Treiber im System vorhanden ist (keine Fake-Simulation).</summary>
-public sealed partial class NxMixKernelDriverStubProvider : IVaioBackendProvider
+/// <summary>Erkennt native Wiedergabeendpunkte über den Windows-Gerätekatalog.</summary>
+public sealed class NxMixWaveRtProvider : IVaioBackendProvider
 {
-    private const string KernelSymbolicLink = @"\\.\NxMixWaveRtControl";
-    private const uint GENERIC_READ = 0x80000000;
-    private const uint FILE_SHARE_READ_WRITE = 0x00000003;
-    private const uint OPEN_EXISTING = 3;
-
-    [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    private static partial nint CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, nint lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, nint hTemplateFile);
-
-    [LibraryImport("kernel32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool CloseHandle(nint hObject);
-
     public VaioSlotKind Kind => VaioSlotKind.NxMixKernelDriver;
 
     public bool IsAvailable(IReadOnlyList<AudioDeviceInfo> catalog, IAppRouteRestorer? restorer, out string statusMessage)
     {
-        nint h = CreateFileW(KernelSymbolicLink, GENERIC_READ, FILE_SHARE_READ_WRITE, 0, OPEN_EXISTING, 0, 0);
-        if (h != 0 && h != -1)
-        {
-            CloseHandle(h);
-            statusMessage = "Nativer NX-MIX WaveRT-Kernel-Treiber aktiv.";
-            return true;
-        }
-        statusMessage = "Kein nativer NX-MIX Kernel-Treiber installiert. Für echte Windows-System-Endpunkte bitte vorhandene Virtual-Cables (z. B. VB-Cable) oder für Einzelprogramme App-Capture verwenden.";
-        return false;
+        int endpoints = catalog.Count(d => d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows &&
+            d.DriverProvider == "NX-MIX WaveRT");
+        statusMessage = endpoints > 0
+            ? $"{endpoints} native NX-MIX-Wiedergabegeräte in Windows verfügbar."
+            : "Eigene NX-MIX-Wiedergabegeräte erscheinen in Windows, sobald der native WaveRT-Treiber installiert ist. App-Capture kann bereits ohne Treiber den Eingangspegel anzeigen.";
+        return endpoints > 0;
     }
 }
 
@@ -81,7 +65,7 @@ public sealed class VaioManager
 {
     private readonly AppLinkVaioProvider _appProvider = new();
     private readonly ExternalDriverVaioProvider _extProvider = new();
-    private readonly NxMixKernelDriverStubProvider _kernelProvider = new();
+    private readonly NxMixWaveRtProvider _kernelProvider = new();
 
     public VaioDriverAvailability Evaluate(IReadOnlyList<AudioDeviceInfo> catalog, IAppRouteRestorer? restorer)
     {

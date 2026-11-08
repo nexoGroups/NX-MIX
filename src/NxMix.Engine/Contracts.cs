@@ -21,6 +21,12 @@ public interface IBlockProcessor
     void Process(float[][] inputs, float[][] outputs, int frames);
 }
 
+/// <summary>Verarbeitet Eingänge wahlweise nur für Pegel und Spektrum, ohne sie auf Busse oder Ausgänge zu mischen.</summary>
+public interface IInputMonitorBlockProcessor : IBlockProcessor
+{
+    void Process(float[][] inputs, float[][] outputs, int frames, ReadOnlySpan<bool> monitorOnly);
+}
+
 public enum FilterType { Peak, LowShelf, HighShelf, HighPass, LowPass, Notch, AllPass, BandPass }
 
 /// <summary>Ein Filter. Order gilt nur fuer HighPass/LowPass (1..8 = Butterworth-Kette, Order 2 mit Q wie angegeben).

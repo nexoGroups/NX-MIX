@@ -15,7 +15,10 @@ param(
     [ValidateSet('auto', 'stable', 'beta')]
     [string]$Channel = 'auto',
 
-    [string]$OutputDir = 'Releases'
+    [string]$OutputDir = 'Releases',
+
+    # Signierter Windows-Installer für den nativen WaveRT-Treiber (x64).
+    [string]$NativeDriverMsi = $env:NXMIX_NATIVE_DRIVER_MSI
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,11 +63,40 @@ $root    = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $publish = Join-Path $root "artifacts\publish-$resolvedChannel"
 $outPath = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $root $OutputDir }
 
-if (Test-Path $publish) { Remove-Item -Recurse -Force $publish }
+$driverHash = ''
+$betaWithoutDriver = $resolvedChannel -eq 'beta' -and $cleanVersion -eq '0.3.2-beta.1'
+if ($betaWithoutDriver) {
+    Write-Host 'Beta 0.3.2-beta.1 wird ohne WaveRT-Treiber gepackt.'
+}
+elseif (-not [string]::IsNullOrWhiteSpace($NativeDriverMsi)) {
+    $driverFile = Get-Item -LiteralPath $NativeDriverMsi
+    if ($driverFile.PSIsContainer -or $driverFile.Extension -ne '.msi') {
+        throw 'NativeDriverMsi muss eine MSI-Datei sein.'
+    }
+    $NativeDriverMsi = $driverFile.FullName
+    $signature = Get-AuthenticodeSignature -LiteralPath $NativeDriverMsi
+    if ($signature.Status -ne 'Valid') {
+        throw "Die Signatur des WaveRT-MSI ist ungültig: $($signature.Status)."
+    }
+    $driverHash = (Get-FileHash -LiteralPath $NativeDriverMsi -Algorithm SHA256).Hash
+} elseif ($resolvedChannel -eq 'beta' -and $cleanVersion -match '^0\.3\.2-') {
+    throw 'Beta 0.3.2 erfordert das signierte WaveRT-Treiber-MSI (-NativeDriverMsi oder NXMIX_NATIVE_DRIVER_MSI).'
+}
+
+if (Test-Path -LiteralPath $publish) {
+    $existingPublish = Get-Item -LiteralPath $publish
+    $artifactRoot = [IO.Path]::GetFullPath((Join-Path $root 'artifacts')) + [IO.Path]::DirectorySeparatorChar
+    if (-not $existingPublish.FullName.StartsWith($artifactRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        ($existingPublish.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        ((Get-Item -LiteralPath $artifactRoot).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Unerwarteter Publish-Pfad: $publish"
+    }
+    Remove-Item -LiteralPath $existingPublish.FullName -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $outPath | Out-Null
 
 Write-Host "==> [1/4] Publish NxMix.App ($cleanVersion, Kanal=$resolvedChannel/$vpkChannel) ..."
-dotnet publish (Join-Path $root 'src\NxMix.App') -c Release -r win-x64 --self-contained -p:Version=$cleanVersion -o $publish
+dotnet publish (Join-Path $root 'src\NxMix.App') -c Release -r win-x64 --self-contained -p:Version=$cleanVersion "-p:NativeDriverMsiSha256=$driverHash" -o $publish
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish (NxMix.App) fehlgeschlagen' }
 
 # Wichtig: NxMix.Daemon NACH NxMix.App publizieren, damit die self-contained runtimeconfig/deps von NxMix.Daemon erhalten bleiben.
@@ -81,6 +113,16 @@ if (-not (Test-Path $daemonExe)) { throw "NxMix.Daemon.exe fehlt im Publish-Verz
 $rtJson = Get-Content -Raw -Path $daemonCfg
 if ($rtJson -notmatch '"includedFrameworks"') {
     throw "NxMix.Daemon.runtimeconfig.json ist nicht self-contained!"
+}
+
+if ($driverHash) {
+    $driverDir = Join-Path $publish 'drivers'
+    New-Item -ItemType Directory -Path $driverDir -Force | Out-Null
+    $bundledMsi = Join-Path $driverDir 'NxMixWaveRt-x64.msi'
+    Copy-Item -LiteralPath $NativeDriverMsi -Destination $bundledMsi
+    if ((Get-FileHash -LiteralPath $bundledMsi -Algorithm SHA256).Hash -ne $driverHash) {
+        throw 'Das WaveRT-MSI wurde während des Paketbaus geändert.'
+    }
 }
 
 # Release Notes ermitteln (docs/release-notes/<version>.md oder strukturierter Fallback)
@@ -125,6 +167,30 @@ vpk --skip-updates pack `
     --icon (Join-Path $root 'src\NxMix.App\Assets\app.ico') `
     --outputDir $outPath
 if ($LASTEXITCODE -ne 0) { throw 'vpk pack fehlgeschlagen' }
+
+if ($driverHash -or $betaWithoutDriver) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $fullPackage = Get-ChildItem -LiteralPath $outPath -File -Filter "*-$cleanVersion-$vpkChannel-full.nupkg" | Select-Object -First 1
+    if (-not $fullPackage) { throw 'Velopack-Vollpaket für WaveRT-Prüfung fehlt.' }
+    $archive = [IO.Compression.ZipFile]::OpenRead($fullPackage.FullName)
+    try {
+        $entry = $archive.Entries | Where-Object { $_.FullName -like '*/drivers/NxMixWaveRt-x64.msi' } | Select-Object -First 1
+        if ($betaWithoutDriver) {
+            if ($entry) { throw 'Diese Beta darf kein WaveRT-MSI enthalten.' }
+        }
+        else {
+            if (-not $entry) { throw 'Das Velopack-Update enthält das WaveRT-MSI nicht.' }
+            $stream = $entry.Open()
+            try {
+                if ((Get-FileHash -InputStream $stream -Algorithm SHA256).Hash -ne $driverHash) {
+                    throw 'Das WaveRT-MSI im Velopack-Update hat einen abweichenden Hash.'
+                }
+            }
+            finally { $stream.Dispose() }
+        }
+    }
+    finally { $archive.Dispose() }
+}
 
 # Kanalgerechte Dateinamen herstellen (NX-MIX-Setup.exe bzw. NX-MIX-Beta-Setup.exe) und Velopack-Asset-Manifest synchronisieren
 Write-Host "==> [4/4] Installer-Artefakte benennen & prüfen ..."

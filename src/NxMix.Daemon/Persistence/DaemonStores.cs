@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Win32;
+using NxMix.Audio;
 using NxMix.Engine;
 using NxMix.Ipc;
 
@@ -95,6 +96,22 @@ public sealed class SystemConfigStore
         int sr = c.SampleRate is 44100 or 48000 or 88200 or 96000 or 176400 or 192000 ? c.SampleRate : 48000;
         int bf = Math.Clamp(c.BlockFrames <= 0 ? 256 : c.BlockFrames, 32, 4096);
         int port = Math.Clamp(c.CompanionApiPort <= 0 ? 19480 : c.CompanionApiPort, 1024, 65535);
+        var vaios = c.Vaios ?? Array.Empty<VaioSlotConfig>();
+        var legacyAppLinks = vaios.Where(v => v.Kind == VaioSlotKind.AppCapture).Select(v => new AppLinkEntry
+        {
+            Id = v.Id, ExeName = v.EndpointOrExe, DisplayName = v.Name,
+            FirstChannel = v.EngineFirstChannel, Count = Math.Clamp(v.Channels, 1, 2), Enabled = v.Enabled,
+        });
+        var appLinks = (c.AppLinks ?? Array.Empty<AppLinkEntry>()).Concat(legacyAppLinks)
+            .Select(link =>
+            {
+                string exe = Path.GetFileName((link.ExeName ?? "").Trim().Trim('"'));
+                if (exe.Length > 0 && !Path.HasExtension(exe)) exe += ".exe";
+                return link with { ExeName = exe };
+            })
+            .Where(link => link.ExeName.Length > 4 && link.ExeName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(link => link.ExeName, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.FirstOrDefault(link => link.Enabled) ?? group.First()).ToArray();
         return c with
         {
             Version = 2,
@@ -102,8 +119,9 @@ public sealed class SystemConfigStore
             BlockFrames = bf,
             CompanionApiPort = port,
             Devices = (c.Devices ?? Array.Empty<AudioDeviceNode>()).ToArray(),
-            Vaios = (c.Vaios ?? Array.Empty<VaioSlotConfig>()).ToArray(),
-            AppLinks = (c.AppLinks ?? Array.Empty<AppLinkEntry>()).ToArray(),
+            Vaios = vaios.Where(v => v.Kind != VaioSlotKind.AppCapture)
+                .Select(v => v.Loopback ? v with { Flow = DeviceFlow.Capture } : v).ToArray(),
+            AppLinks = appLinks,
         };
     }
 

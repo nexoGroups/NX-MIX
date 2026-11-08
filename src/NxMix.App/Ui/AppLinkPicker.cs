@@ -162,7 +162,7 @@ internal sealed class AppLinkPicker : Overlay
         var why = _m.SetLink(_first, _count, exe, display);
         if (why != null) { _actionError = why; Changed(); return; }
         Close();
-        root?.Notify.Flash($"{display ?? AppLinkRules.PrettyName(exe)} ist an {(_count == 2 ? $"Eingang {_first + 1:00} + {_first + 2:00}" : $"Eingang {_first + 1:00}")} gebunden – aktiv ab dem nächsten Audio-Start.");
+        root?.Notify.Flash($"{display ?? AppLinkRules.PrettyName(exe)} ist an {(_count == 2 ? $"Eingang {_first + 1:00} + {_first + 2:00}" : $"Eingang {_first + 1:00}")} gebunden.");
     }
 
     void ClickRow(int i)

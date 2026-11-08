@@ -70,6 +70,8 @@ public sealed record VaioSlotConfig
     public string Name { get; init; } = "VAIO 1";
     public VaioSlotKind Kind { get; init; } = VaioSlotKind.ExternalDriverEndpoint;
     public DeviceFlow Flow { get; init; } = DeviceFlow.Capture;
+    /// <summary>Ein Windows-Wiedergabegerät als Mixer-Eingang lesen.</summary>
+    public bool Loopback { get; init; }
     public int Channels { get; init; } = 2;
     public int EngineFirstChannel { get; init; }
     /// <summary>Bei ExternalDriverEndpoint: MMDevice-ID; bei AppCapture: normalisierter Programmname (z. B. "spotify.exe").</summary>
@@ -271,6 +273,7 @@ public sealed record DaemonRuntimeSnapshot
     public VaioDriverAvailability VaioAvailability { get; init; } = new(false, "Kein nativer NX-MIX Kernel-Treiber installiert.", 0, true, null);
     public HostStats HostStats { get; init; } = new(HostState.Stopped, null, 256, 0, 0, 0, 0, Array.Empty<DeviceStat>());
     public string? LastError { get; init; }
+    public string? AudioStartBlockedReason { get; init; }
     public bool PanicMuted { get; init; }
     public Guid? ActiveSnapshotId { get; init; }
     public IReadOnlyList<MixSnapshotSummary> Snapshots { get; init; } = Array.Empty<MixSnapshotSummary>();

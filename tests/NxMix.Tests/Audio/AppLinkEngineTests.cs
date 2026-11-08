@@ -66,46 +66,50 @@ public class AppLinkEngineTests : IDisposable
     // ---- Fehlkonfigurationen: nichts wird umgeleitet ----------------------------------------------------------
 
     [Fact]
-    public void NoParkingDevice_Fails_Clearly_AndRoutesNothing()
+    public void NoParkingDevice_CapturesWithoutChangingWindowsRoutes()
     {
         _router.AddProcess(100, "spotify.exe");
         _lister.Processes.Add(P(100, 4, "spotify.exe"));
         var e = Make(new[] { new AppBinding("spotify.exe", 2) }, parking: null);
+        e.Tick(_lister.Snapshot());
 
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.Failed, s.State);
+        Assert.Equal(AppLinkState.Capturing, s.State);
         Assert.Contains("Parkplatz", s.Message);
-        e.StartThread();                 // startet gar nicht erst
+        Assert.Single(e.Slots[0].Lanes);
         Assert.Empty(_router.Log);
         Assert.Empty(new AppRouteJournal(_journalPath).Load());
-        e.Shutdown();
+        e.ReleaseAll();
         Assert.Empty(_router.Log);
     }
 
     [Fact]
-    public void ParkingIsDefaultDevice_Fails()
+    public void ParkingIsDefaultDevice_DoesNotRoute()
     {
         var e = Make(new[] { new AppBinding("spotify.exe", 2) }, parking: DefaultId);
+        e.Tick(_lister.Snapshot());
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.Failed, s.State);
+        Assert.Equal(AppLinkState.WaitingForApp, s.State);
         Assert.Contains("Standard", s.Message);
     }
 
     [Fact]
-    public void ParkingDoesNotExist_Fails()
+    public void ParkingDoesNotExist_DoesNotRoute()
     {
         var e = Make(new[] { new AppBinding("spotify.exe", 2) }, parking: "{0.0.0.00000000}.{ffffffff-0000-0000-0000-000000000000}");
+        e.Tick(_lister.Snapshot());
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.Failed, s.State);
+        Assert.Equal(AppLinkState.WaitingForApp, s.State);
         Assert.Contains("nicht gefunden", s.Message);
     }
 
     [Fact]
-    public void ParkingIsAlsoEngineOutput_Fails()
+    public void ParkingIsAlsoEngineOutput_DoesNotRoute()
     {
         var e = Make(new[] { new AppBinding("spotify.exe", 2) }, renderIds: new List<string?> { ParkingId.ToUpperInvariant() });
+        e.Tick(_lister.Snapshot());
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.Failed, s.State);
+        Assert.Equal(AppLinkState.WaitingForApp, s.State);
         Assert.Contains("Ausgang", s.Message);
     }
 
@@ -132,7 +136,7 @@ public class AppLinkEngineTests : IDisposable
     // ---- Ablauf ---------------------------------------------------------------------------------------------
 
     [Fact]
-    public void Lifecycle_WaitForApp_RouteFirst_ThenCapture_CloseWhenGone_ReleaseAtEnd()
+    public void Lifecycle_WaitForApp_CaptureFirst_ThenRoute_CloseWhenGone_ReleaseAtEnd()
     {
         var e = Make(new[] { new AppBinding("Spotify.exe", 2) });
 
@@ -145,7 +149,7 @@ public class AppLinkEngineTests : IDisposable
         _router.AddProcess(100, "spotify.exe");
         e.Tick(_lister.Snapshot());
 
-        Assert.Equal(new[] { "route", "lane:100" }, _events); // ERST umleiten, DANN Capture; nur EINE Spur fuer den Prozessbaum
+        Assert.Equal(new[] { "lane:100", "route" }, _events);
         AppLinkStatus s = Only(e);
         Assert.Equal(AppLinkState.Linked, s.State);
         Assert.Equal(3, s.ProcessCount);
@@ -153,7 +157,7 @@ public class AppLinkEngineTests : IDisposable
         Assert.Single(e.Slots[0].Lanes);
 
         e.Tick(_lister.Snapshot());                              // stabil: nichts doppelt
-        Assert.Equal(new[] { "route", "lane:100" }, _events);
+        Assert.Equal(new[] { "lane:100", "route" }, _events);
 
         // Spotify wird beendet: Spur zu, Umleitung bleibt (gilt je Programm und kann ohne laufenden Prozess nicht entfernt werden)
         _lister.Processes.Clear();
@@ -171,7 +175,7 @@ public class AppLinkEngineTests : IDisposable
         e.Tick(_lister.Snapshot());
         Assert.Equal(AppLinkState.Linked, Only(e).State);
         Assert.Equal(sets, _router.Log.Count);
-        Assert.Equal(new[] { "route", "lane:100", "lane:900" }, _events);
+        Assert.Equal(new[] { "lane:100", "route", "lane:900" }, _events);
 
         // Ende: Spuren zu, Umleitung zurueck, Journal leer
         e.ReleaseAll();
@@ -182,16 +186,16 @@ public class AppLinkEngineTests : IDisposable
     }
 
     [Fact]
-    public void ProcessWithoutAudioYet_StaysWaiting_ThenLinks()
+    public void ProcessWithoutAudioYet_OpensCapture_ThenLinksWhenRoutable()
     {
         _lister.Processes.Add(P(100, 50, "spotify.exe"));        // Windows kennt die PID noch nicht
         var e = Make(new[] { new AppBinding("spotify.exe", 2) });
         e.Tick(_lister.Snapshot());
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.WaitingForApp, s.State);
+        Assert.Equal(AppLinkState.Capturing, s.State);
         Assert.Equal(1, s.ProcessCount);
         Assert.NotNull(s.Message);
-        Assert.Empty(_events);
+        Assert.Equal(new[] { "lane:100" }, _events);
 
         _router.AddProcess(100, "spotify.exe");
         e.Tick(_lister.Snapshot());
@@ -225,6 +229,7 @@ public class AppLinkEngineTests : IDisposable
         AppLinkStatus s = Only(e);
         Assert.Equal(AppLinkState.Failed, s.State);
         Assert.Contains("Testfehler", s.Message);
+        Assert.Empty(_router.Log);
 
         _failLane = null;
         e.Tick(_lister.Snapshot());
@@ -232,20 +237,20 @@ public class AppLinkEngineTests : IDisposable
     }
 
     [Fact]
-    public void WindowsIgnoresRedirect_NoCaptureIsStarted()
+    public void WindowsIgnoresRedirect_CaptureContinuesAndStatusShowsIncompleteRouting()
     {
         _lister.Processes.Add(P(100, 50, "spotify.exe"));
         _router.AddProcess(100, "spotify.exe");
         _router.IgnoreSet = true;
         var e = Make(new[] { new AppBinding("spotify.exe", 2) });
         e.Tick(_lister.Snapshot());
-        Assert.Equal(AppLinkState.Failed, Only(e).State);
-        Assert.Empty(e.Slots[0].Lanes);
-        Assert.DoesNotContain(_events, x => x.StartsWith("lane"));
+        Assert.Equal(AppLinkState.Capturing, Only(e).State);
+        Assert.Single(e.Slots[0].Lanes);
+        Assert.Equal("lane:100", _events[0]);
     }
 
     [Fact]
-    public void StreamStillAudibleElsewhere_IsReportedInMessage_ButStaysLinked()
+    public void StreamStillAudibleElsewhere_IsCapturedAndReportedUntilItMoves()
     {
         _lister.Processes.Add(P(100, 50, "spotify.exe"));
         _router.AddProcess(100, "spotify.exe");
@@ -253,11 +258,12 @@ public class AppLinkEngineTests : IDisposable
         var e = Make(new[] { new AppBinding("spotify.exe", 2) });
         e.Tick(_lister.Snapshot());
         AppLinkStatus s = Only(e);
-        Assert.Equal(AppLinkState.Linked, s.State);
+        Assert.Equal(AppLinkState.Capturing, s.State);
         Assert.Contains("Lautsprecher (Realtek)", s.Message);
 
         _sessions = new List<SessionRef> { new(100, 1, ParkingId, "VBMatrix In 5") }; // jetzt auf dem Parkplatz
-        e.Tick(_lister.Snapshot()); e.Tick(_lister.Snapshot()); e.Tick(_lister.Snapshot()); // naechste Pruefung
+        e.Tick(_lister.Snapshot());
+        Assert.Equal(AppLinkState.Linked, Only(e).State);
         Assert.Null(Only(e).Message);
     }
 

@@ -28,7 +28,7 @@ public sealed class AppCatalog : IAppCatalog
 
         foreach (SessionRef s in SessionEnumeration.Enumerate())
         {
-            if (s.ProcessId == self || s.ProcessId <= 4) continue;
+            if (s.ProcessId == self || s.ProcessId <= 4 || s.State == 2) continue;
             if (!pathCache.TryGetValue(s.ProcessId, out string? path))
                 pathCache[s.ProcessId] = path = SystemProcessLister.ImagePathOf(s.ProcessId);
             string exe = path != null ? System.IO.Path.GetFileName(path) : NameFromProcess(s.ProcessId);

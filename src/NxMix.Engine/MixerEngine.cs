@@ -18,7 +18,7 @@ namespace NxMix.Engine;
 /// Im gepoolten Modus (CreatePooled, Standard 128 In x 64 Bus x 128 Out) koennen Kanaele, Geraete und Busse
 /// im laufenden Betrieb bis zur Kapazitaetsgrenze ohne Stream-Neustart hinzugefuegt oder geaendert werden.
 /// </summary>
-public sealed class MixerEngine : IMixerEngine
+public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
 {
     /// <summary>Laengere Bloecke werden intern in Teilbloecke dieser Groesse zerlegt.</summary>
     public const int MaxChunk = 2048;
@@ -434,6 +434,9 @@ public sealed class MixerEngine : IMixerEngine
 
     /// <summary>Nur vom Audio-Thread rufen. inputs[InputChannels][>=frames], outputs[OutputChannels][>=frames].</summary>
     public void Process(float[][] inputs, float[][] outputs, int frames)
+        => Process(inputs, outputs, frames, ReadOnlySpan<bool>.Empty);
+
+    public void Process(float[][] inputs, float[][] outputs, int frames, ReadOnlySpan<bool> monitorOnly)
     {
         if (frames <= 0) return;
         var latest = Volatile.Read(ref _latest);
@@ -443,7 +446,7 @@ public sealed class MixerEngine : IMixerEngine
         while (pos < frames)
         {
             int n = Math.Min(MaxChunk, frames - pos);
-            ProcessChunk(inputs, outputs, pos, n);
+            ProcessChunk(inputs, outputs, pos, n, monitorOnly);
             pos += n;
         }
     }
@@ -480,7 +483,7 @@ public sealed class MixerEngine : IMixerEngine
         rt.Sections = ns;
     }
 
-    void ProcessChunk(float[][] inputs, float[][] outputs, int pos, int n)
+    void ProcessChunk(float[][] inputs, float[][] outputs, int pos, int n, ReadOnlySpan<bool> monitorOnly)
     {
         var plan = _cur;
         int capIn = _capIn, capOut = _capOut, capBus = _capBus;
@@ -557,6 +560,8 @@ public sealed class MixerEngine : IMixerEngine
         }
         RunSimdGroups(_inRt, _inBuf, simdCnt, n);
         if (spectrumInput >= 0 && spectrumInput < scanIn) spectrum!.After(_inBuf[spectrumInput].AsSpan(0, n));
+        for (int i = 0; i < Math.Min(monitorOnly.Length, scanIn); i++)
+            if (monitorOnly[i]) Array.Clear(_inBuf[i], 0, n);
 
         // ---- 2a. Mix-Busse: topologische Summierung + Bus-Gain/Mute/Solo + echtes Bus-Metering
         if (hasBusWork)

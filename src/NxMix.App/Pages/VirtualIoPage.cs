@@ -13,7 +13,7 @@ internal sealed class VirtualIoPage : Page
 {
     readonly AppModel _m;
 
-    readonly Button _addCableBtn = new("+ Kabel …", ButtonStyle.Filled) { Font = Theme.CaptionStrong, Tooltip = "Erkannten virtuellen Windows-Audio-Endpunkt als VAIO-Slot einbinden" };
+    readonly Button _addCableBtn = new("+ Kabel …", ButtonStyle.Filled) { Font = Theme.CaptionStrong, Tooltip = "Virtuelles Windows-Wiedergabegerät als NX-MIX-Eingang einbinden oder einen VAIO-Slot hinzufügen" };
     readonly IconButton _scanBtn = new(Icon.Refresh, "Audio-Endpunkte und laufende Programme neu einlesen") { IconSize = 15 };
 
     readonly Switch _appSw = new() { Tooltip = "Prozessspezifisches App-Audio-Capture aktivieren / deaktivieren" };
@@ -27,6 +27,7 @@ internal sealed class VirtualIoPage : Page
 
     int _hotCable = -1, _hotCableAction = -1; // 0=Gain, 1=Mute, 2=Enable, 3=Delete
     int _hotApp = -1, _hotAppAction = -1;     // 0=Edit, 1=Remove
+    bool _loadingAppMenu;
 
     public override string Title => "Virtual I/O";
     public override Icon Icon => Icon.Vaio;
@@ -91,7 +92,7 @@ internal sealed class VirtualIoPage : Page
         var items = new List<MenuItem>
         {
             MenuItem.Header("Stilles Ausgabegerät (nicht Standard-Lautsprecher)"),
-            new("Kein Parkplatz (App-Capture pausiert)", null, () => _m.SetParking(null))
+            new("Kein Parkplatz (nur Pegel und Spektrum)", null, () => _m.SetParking(null))
             {
                 Checked = string.IsNullOrWhiteSpace(_m.ParkingDeviceId),
             },
@@ -117,6 +118,7 @@ internal sealed class VirtualIoPage : Page
                 items.Add(new MenuItem(d.Name, tag, () => _m.SetParking(d.Id, d.Name))
                 {
                     Checked = string.Equals(_m.ParkingDeviceId, d.Id, StringComparison.OrdinalIgnoreCase),
+                    Enabled = !_m.Config.Vaios.Any(v => v.Loopback && SameEndpoint(v.EndpointOrExe, d.Id)),
                 });
             }
         }
@@ -126,12 +128,29 @@ internal sealed class VirtualIoPage : Page
     void ShowAddCableMenu()
     {
         if (Root is not { } root) return;
-        var items = new List<MenuItem>
-        {
-            MenuItem.Header("Erkannte virtuelle Windows-Audio-Endpunkte"),
-        };
-
+        var items = new List<MenuItem>();
         var virtuals = _m.VirtualEndpointDevices;
+        var playback = virtuals.Where(d => d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows &&
+            d.DriverProvider == "NX-MIX WaveRT").ToList();
+        if (playback.Count > 0)
+        {
+            items.Add(MenuItem.Header("Windows-Wiedergabe an NX-MIX In senden"));
+            foreach (var endpoint in playback)
+            {
+                bool reserved = SameEndpoint(_m.ParkingDeviceId, endpoint.Id);
+                bool bound = EndpointIsBound(endpoint.Id);
+                items.Add(new MenuItem(endpoint.Name,
+                    reserved ? "App-Parkplatz" : bound ? "bereits eingebunden" : "als Mixer-Eingang",
+                    () =>
+                    {
+                        var slot = _m.AddVirtualCableSlot(endpoint, loopback: true);
+                        root.Notify.Flash($"Wähle „{endpoint.Name}“ in Windows oder in deiner App. In NX-MIX landet der Ton auf „{slot.Name}“.");
+                    }, enabled: !reserved && !bound) { Icon = Icon.Loopback });
+            }
+            items.Add(MenuItem.Sep);
+        }
+
+        items.Add(MenuItem.Header("Weitere virtuelle Ein- und Ausgänge"));
         if (virtuals.Count == 0)
         {
             items.Add(MenuItem.Header("Kein virtueller Audiotreiber (z. B. VB-CABLE / VAC) installiert"));
@@ -141,7 +160,7 @@ internal sealed class VirtualIoPage : Page
             foreach (var ep in virtuals)
             {
                 var e = ep;
-                bool alreadyBound = _m.Config.Vaios.Any(v => string.Equals(v.EndpointOrExe, e.Id, StringComparison.OrdinalIgnoreCase));
+                bool alreadyBound = EndpointIsBound(e.Id);
                 string flowLabel = e.Flow == DeviceFlow.Capture ? "VAIO In" : "VAIO Out";
                 items.Add(new MenuItem(
                     e.Name,
@@ -164,8 +183,7 @@ internal sealed class VirtualIoPage : Page
             foreach (var ep in others.Take(8))
             {
                 var e = ep;
-                bool alreadyBound = _m.Config.Vaios.Any(v => string.Equals(v.EndpointOrExe, e.Id, StringComparison.OrdinalIgnoreCase))
-                    || _m.Config.Devices.Any(d => string.Equals(d.EndpointId, e.Id, StringComparison.OrdinalIgnoreCase));
+                bool alreadyBound = EndpointIsBound(e.Id);
                 items.Add(new MenuItem(
                     e.Name,
                     e.Flow == DeviceFlow.Capture ? "Eingang" : "Ausgang",
@@ -177,15 +195,31 @@ internal sealed class VirtualIoPage : Page
         PopupMenu.Show(root, _addCableBtn.Bounds, items, 320);
     }
 
+    bool EndpointIsBound(string id) => _m.Config.Vaios.Any(v => SameEndpoint(v.EndpointOrExe, id))
+        || _m.Config.Devices.Any(d => SameEndpoint(d.EndpointId, id));
+
+    static bool SameEndpoint(string? left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
     void ShowAddAppMenu()
     {
-        if (Root is not { } root) return;
+        if (_loadingAppMenu || Root is not { } root) return;
+        _loadingAppMenu = true;
+        _m.LoadAppPrograms((programs, error) =>
+        {
+            _loadingAppMenu = false;
+            if (!ReferenceEquals(Root, root) || !Visible) return;
+            if (error != null) root.Notify.Flash(error, true);
+            ShowAppProgramMenu(root, programs);
+        });
+    }
+
+    void ShowAppProgramMenu(UiRoot root, List<AppProgram> programs)
+    {
         var items = new List<MenuItem>
         {
             MenuItem.Header("Aktive Programme mit Audio-Sitzung"),
         };
 
-        var programs = AppLinkRules.Group(_m.ActiveAppSessions);
         if (programs.Count == 0)
         {
             items.Add(MenuItem.Header("Derzeit keine aktive Audio-Sitzung erkannt"));
@@ -427,7 +461,7 @@ internal sealed class VirtualIoPage : Page
         {
             Draw.Empty(g, _cableListRect, _cableListRect.Y + 12, Icon.Vaio,
                 "Kein virtuelles Kabel aktiv",
-                "Installierte Treiber wie VB-CABLE oder Virtual Audio Cable erscheinen unter „+ Kabel …“ als latenzarme Mehrkanal-VAIOs.");
+                "Eigene NX-MIX-Eingänge erscheinen hier, sobald der native Audiotreiber verfügbar ist.");
         }
         else
         {
@@ -451,7 +485,9 @@ internal sealed class VirtualIoPage : Page
                 float tx = r.X + 16 + chipW;
                 float tw = Math.Max(30, acts.Gain.X - tx - 8);
                 g.Text(slot.Name, new RectF(tx, r.Y + 6, tw, 20), Theme.BodyMedium, slot.Enabled ? Theme.Text : Theme.TextTertiary);
-                g.Text($"{slot.Channels}ch · Engine {slot.EngineFirstChannel + 1}..{slot.EngineFirstChannel + slot.Channels}",
+                string channels = $"{slot.Channels}ch · Engine {slot.EngineFirstChannel + 1}..{slot.EngineFirstChannel + slot.Channels}";
+                string detail = slot.Loopback ? $"Windows: {_m.FindDevice(slot.EndpointOrExe)?.Name ?? "Gerät offline"} · {channels}" : channels;
+                g.Text(detail,
                     new RectF(r.X + 10, r.Bottom - 20, Math.Max(40, acts.Gain.X - r.X - 16), 16), Theme.Caption, Theme.TextSecondary);
 
                 double gainDb = dm?.GainDb ?? 0.0;
@@ -474,7 +510,7 @@ internal sealed class VirtualIoPage : Page
             vaio.NativeKernelDriverInstalled ? "Treiber aktiv" : "Kein Kernel-Treiber",
             vaio.NativeKernelDriverInstalled ? Theme.Green : Theme.TextSecondary,
             dot: true, Theme.MicroStrong, alignRight: true);
-        g.Text(vaio.NativeDriverMessage + " Virtuelle Kabel & ProcessLoopback arbeiten stabil im User-Mode ohne Testsigning.",
+        g.Text(vaio.NativeDriverMessage,
             new RectF(_kernelBox.X + 12, _kernelBox.Y + 30, _kernelBox.W - 24, _kernelBox.H - 36),
             Theme.Caption, Theme.TextSecondary, HAlign.Left, VAlign.Top, false, true);
 
@@ -513,12 +549,15 @@ internal sealed class VirtualIoPage : Page
 
                 var acts = AppActionRects(r);
                 float tx = tile.Right + 10;
-                float statusW = Draw.Chip(g, acts.Edit.X - 8, r.CY, LinkLook.Text(view.State), col, dot: true, Theme.MicroStrong, alignRight: true);
+                bool hasDetail = !string.IsNullOrWhiteSpace(view.Message);
+                float statusY = hasDetail ? r.Y + 15 : r.CY;
+                float statusW = Draw.Chip(g, acts.Edit.X - 8, statusY, LinkLook.Text(view.State), col, dot: true, Theme.MicroStrong, alignRight: true);
                 float tw = Math.Max(30, acts.Edit.X - 14 - statusW - tx);
 
                 g.Text(link.Title, new RectF(tx, r.Y + 6, tw, 19), Theme.BodyMedium, Theme.Text);
-                g.Text($"{entry.ExeName}  ·  {LinkLook.Target(link)}",
-                    new RectF(tx, r.Bottom - 20, tw, 16), Theme.Caption, Theme.TextSecondary);
+                string subtitle = hasDetail ? $"{LinkLook.Target(link)}  ·  {view.Message}" : $"{entry.ExeName}  ·  {LinkLook.Target(link)}";
+                float subtitleWidth = hasDetail ? acts.Edit.X - 8 - tx : tw;
+                g.Text(subtitle, new RectF(tx, r.Bottom - 20, Math.Max(30, subtitleWidth), 16), Theme.Caption, Theme.TextSecondary);
 
                 Draw.ButtonLook(g, acts.Edit, "Ändern", ButtonStyle.Gray, true, hot && _hotAppAction == 0, font: Theme.MicroStrong);
                 Draw.ButtonLook(g, acts.Del, "Lösen", ButtonStyle.DestructiveTinted, true, hot && _hotAppAction == 1, font: Theme.MicroStrong);

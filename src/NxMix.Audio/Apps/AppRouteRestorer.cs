@@ -66,8 +66,6 @@ public sealed class AppRouteRestorer : IAppRouteRestorer
 
     private static (bool Ok, string? Reason) CheckRuntime()
     {
-        using AudioPolicyConfig? policy = AudioPolicyConfig.TryCreate(out string? policyError);
-        if (policy == null) return (false, "Pro-App-Umleitung (IAudioPolicyConfig) nicht verfuegbar: " + policyError);
         if (!ProcessLoopbackEndpoint.ProbeSupported(out string? loopbackError))
             return (false, loopbackError);
         return (true, null);

@@ -13,12 +13,14 @@ internal sealed class MixCore
     private const double FadeOutSeconds = 0.020;
 
     private readonly IBlockProcessor _processor;
+    private readonly IInputMonitorBlockProcessor? _monitorProcessor;
     private readonly int _rate;
     private readonly CaptureStream[] _captures;
     private readonly RenderStream[] _renders;
     private readonly AppLinkSlot[] _apps;
     private readonly AsioStream[] _asios;
     private readonly bool[] _inputBound;
+    private readonly bool[] _monitorOnly;
     private readonly float[] _gains;
 
     private float _gain;
@@ -36,6 +38,7 @@ internal sealed class MixCore
         _asios = asios ?? Array.Empty<AsioStream>();
         _apps = apps ?? Array.Empty<AppLinkSlot>();
         _processor = processor;
+        _monitorProcessor = _apps.Length > 0 ? processor as IInputMonitorBlockProcessor : null;
         _rate = rate;
         _captures = captures;
         _renders = renders;
@@ -44,6 +47,7 @@ internal sealed class MixCore
         Outputs = new float[processor.OutputChannels][];
         for (int i = 0; i < Outputs.Length; i++) Outputs[i] = new float[chunk];
         _inputBound = new bool[Inputs.Length];
+        _monitorOnly = _monitorProcessor != null ? new bool[Inputs.Length] : Array.Empty<bool>();
         _gains = new float[chunk];
         _gain = 0f;
         _gainTarget = 1f;
@@ -101,14 +105,21 @@ internal sealed class MixCore
 
         AppLinkSlot[] apps = _apps;
         for (int i = 0; i < apps.Length; i++)
-            if (!apps[i].Invalid) apps[i].ReadInto(Inputs, n);
+        {
+            var app = apps[i];
+            if (app.Invalid) continue;
+            app.ReadInto(Inputs, n);
+            if (_monitorProcessor != null)
+                _monitorOnly.AsSpan(app.Binding.EngineFirstChannel, app.Binding.Count).Fill(app.State != AppLinkState.Linked);
+        }
 
         for (int ch = 0; ch < Inputs.Length; ch++)
             if (!_inputBound[ch]) Array.Clear(Inputs[ch], 0, n);
         for (int ch = 0; ch < Outputs.Length; ch++)
             Array.Clear(Outputs[ch], 0, n);
 
-        _processor.Process(Inputs, Outputs, n);
+        if (_monitorProcessor != null) _monitorProcessor.Process(Inputs, Outputs, n, _monitorOnly);
+        else _processor.Process(Inputs, Outputs, n);
 
         ApplyGain(n);
         DistributeToRings(n);

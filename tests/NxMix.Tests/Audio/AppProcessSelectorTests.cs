@@ -50,6 +50,15 @@ public class AppProcessSelectorTests
     }
 
     [Fact]
+    public void SameExecutableBehindHelperProcess_IsCapturedOnlyByItsAncestor()
+    {
+        var list = new[] { P(100, 50, "app.exe"), P(101, 100, "helper.exe"), P(102, 101, "app.exe") };
+        var group = Assert.Single(ProcessSelector.FindGroups(list, "app.exe"));
+        Assert.Equal(100, group.RootPid);
+        Assert.Equal(new[] { 100, 102 }, group.Members);
+    }
+
+    [Fact]
     public void ReusedParentPid_WithNewerStartTime_StartsNewGroup()
     {
         DateTime t0 = new(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);

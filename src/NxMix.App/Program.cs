@@ -103,7 +103,10 @@ internal static class Program
     {
         try
         {
+            bool launchedByInstaller = false;
             VelopackApp.Build()
+                .OnFirstRun(_ => launchedByInstaller = true)
+                .OnRestarted(_ => launchedByInstaller = true)
                 .OnBeforeUpdateFastCallback(_ => StopDaemonForInstaller(removeAutostart: false))
                 .OnBeforeUninstallFastCallback(_ => StopDaemonForInstaller(removeAutostart: true))
                 .Run();
@@ -113,6 +116,7 @@ internal static class Program
             if (o.Shot != null) return RunShot(o);
             if (o.SelfTest != null) return SelfTest.Run(o.SelfTest);
             if (o.UpdateTest != null) return RunUpdateTest(o.UpdateTest, o.Channel);
+            if (launchedByInstaller) NativeDriverSetup.InstallIfNeeded();
             return RunWindow(o);
         }
         catch (Exception ex)
@@ -270,6 +274,9 @@ internal static class Program
 
             var model = new AppModel(client);
             var win = new MainWindow(model, prefs.Window, o.ExitAfterMs, prefs, new VelopackUpdateBackend());
+            if (model.IsConnected && model.Config.AutoStartAudioOnBoot && !model.HostRunning &&
+                model.Runtime.AudioStartBlockedReason == null)
+                model.StartAudio();
             return win.Run();
         }
         finally
