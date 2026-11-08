@@ -2,10 +2,10 @@ using System.Numerics;
 
 namespace NxMix.Ipc;
 
-/// <summary>Fensterung und 144-Band-FFT für Pre-/Post-Spektrumanzeige. Läuft außerhalb des Echtzeit-Audiothreads.</summary>
+/// <summary>Fensterung und 256-Band-FFT für Pre-/Post-Spektrumanzeige. Läuft außerhalb des Echtzeit-Audiothreads.</summary>
 public sealed class SpectrumAnalyzer
 {
-    public const int Points = 144;
+    public const int Points = 256;
     public const double MinHz = 20.0;
     public const float FloorDb = -100f;
 

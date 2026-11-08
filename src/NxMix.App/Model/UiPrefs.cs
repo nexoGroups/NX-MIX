@@ -9,7 +9,7 @@ namespace NxMix.App.Model;
 internal sealed record SpectrumPrefs(int Range = 0, int LevelRange = 0, bool Linear = false, bool Bars = false,
     int WindowSize = 0, bool ShowEq = true, bool ShowPre = true, bool ShowPost = true,
     SpectrumBounds? CustomFrequency = null, SpectrumBounds? CustomLevels = null,
-    int DisplayPoints = SpectrumAnalyzer.Points)
+    int DisplayPoints = 144)
 {
     public const int MinDisplayPoints = 8;
 

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +12,8 @@ using NxMix.Engine;
 using NxMix.Ipc;
 using Velopack;
 using Velopack.Locators;
+using Velopack.Logging;
+using Velopack.Sources;
 
 namespace NxMix.Tests.Updates;
 
@@ -107,6 +111,49 @@ public sealed class ReleaseChannelAndUpdateTests : IDisposable
         return (lastPath, lastSha256, lastSize);
     }
 
+    private sealed class FailingFeed(DirectoryInfo directory, HttpStatusCode status, int failures) : SimpleFileSource(directory)
+    {
+        public int Requests { get; private set; }
+
+        public override Task<VelopackAssetFeed> GetReleaseFeed(IVelopackLogger logger, string? appId, string channel,
+            Guid? stagingId = null, VelopackAsset? latestLocalRelease = null)
+        {
+            if (++Requests <= failures)
+                throw new HttpRequestException("Simulated feed failure", null, status);
+            return base.GetReleaseFeed(logger, appId, channel, stagingId, latestLocalRelease);
+        }
+    }
+
+    [Fact]
+    public async Task Stable_check_retries_a_gateway_timeout_and_offers_the_update()
+    {
+        string path = Path.Combine(_tempRoot, "retry");
+        WriteFakeReleaseFeed(path, ReleaseChannelInfo.StableVelopackChannel, ("2.0.0", "", [1]));
+        var feed = new FailingFeed(new DirectoryInfo(path), HttpStatusCode.GatewayTimeout, failures: 1);
+        var backend = new VelopackUpdateBackend(customStableSource: feed,
+            locator: CreateInstalledLocator("1.9.0", ReleaseChannelInfo.StableVelopackChannel, out _));
+
+        var update = await backend.CheckAsync(ReleaseChannel.Stable);
+
+        Assert.Equal("2.0.0", update?.Version);
+        Assert.Equal(2, feed.Requests);
+    }
+
+    [Fact]
+    public async Task Beta_check_does_not_report_up_to_date_when_only_stable_was_checked()
+    {
+        string path = Path.Combine(_tempRoot, "partial-check");
+        WriteFakeReleaseFeed(path, ReleaseChannelInfo.StableVelopackChannel, ("2.0.0", "", [1]));
+        var betaFeed = new FailingFeed(new DirectoryInfo(path), HttpStatusCode.NotFound, failures: 1);
+        var backend = new VelopackUpdateBackend(stablePathOverride: path, customBetaSource: betaFeed,
+            locator: CreateInstalledLocator("2.0.0", ReleaseChannelInfo.StableVelopackChannel, out _));
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => backend.CheckAsync(ReleaseChannel.Beta));
+
+        Assert.Equal(HttpStatusCode.NotFound, error.StatusCode);
+        Assert.Equal(1, betaFeed.Requests);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // QA 1 & QA 2: Stable erkennt ausschließlich freigegebene Stable-Updates; Beta erkennt Beta-Updates
     // ---------------------------------------------------------------------------------------------
@@ -120,7 +167,8 @@ public sealed class ReleaseChannelAndUpdateTests : IDisposable
 
         WriteFakeReleaseFeed(feedDir, ReleaseChannelInfo.BetaVelopackChannel,
             ("2.1.0-beta.1", "Beta 1", Encoding.UTF8.GetBytes("beta-1-payload")),
-            ("2.1.0-beta.2", "Beta 2 mit neuem Spektrum", Encoding.UTF8.GetBytes("beta-2-payload")));
+            ("2.1.0-beta.2", "Beta 2", Encoding.UTF8.GetBytes("beta-2-payload")),
+            ("2.1.0-beta.2.1", "Beta 2.1 mit neuem Spektrum", Encoding.UTF8.GetBytes("beta-2.1-payload")));
 
         // Fall A: Stable 1.9.0 installiert -> Stable-Kanal darf NIEMALS 2.1.0-beta.1 akzeptieren;
         // bei reinem Stable-Feed mit 2.0.0 wird exakt 2.0.0 angeboten.
@@ -149,10 +197,10 @@ public sealed class ReleaseChannelAndUpdateTests : IDisposable
         var rejectedOffer = await pollutedBackend.CheckAsync(ReleaseChannel.Stable);
         Assert.Null(rejectedOffer);
 
-        // Fall B: Beta-Kanal erkennt 2.1.0-beta.2 sauber als Prerelease-Update
+        // Fall B: Beta-Kanal erkennt 2.1.0-beta.2.1 sauber als Prerelease-Update
         var betaOffer = await backend.CheckAsync(ReleaseChannel.Beta);
         Assert.NotNull(betaOffer);
-        Assert.Equal("2.1.0-beta.2", betaOffer!.Version);
+        Assert.Equal("2.1.0-beta.2.1", betaOffer!.Version);
         Assert.True(betaOffer.IsPrerelease);
         Assert.Equal(ReleaseChannel.Beta, betaOffer.SourceChannel);
     }
@@ -214,6 +262,8 @@ public sealed class ReleaseChannelAndUpdateTests : IDisposable
     {
         Assert.True(ReleaseChannelInfo.CompareVersions("2.0.0", "2.1.0-beta.1") < 0);
         Assert.True(ReleaseChannelInfo.CompareVersions("2.1.0-beta.1", "2.1.0-beta.2") < 0);
+        Assert.True(ReleaseChannelInfo.IsValidVersionForChannel("0.3.2-beta.4.1", ReleaseChannel.Beta));
+        Assert.True(ReleaseChannelInfo.CompareVersions("0.3.2-beta.4", "0.3.2-beta.4.1") < 0);
         Assert.True(ReleaseChannelInfo.CompareVersions("2.1.0-beta.2", "2.1.0-rc.1") < 0);
         Assert.True(ReleaseChannelInfo.CompareVersions("2.1.0-rc.1", "2.1.0") < 0);
         Assert.Equal(0, ReleaseChannelInfo.CompareVersions("v2.0.0+abc123", "2.0.0"));

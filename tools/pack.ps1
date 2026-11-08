@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 $cleanVersion = $Version.Trim().TrimStart('v', 'V')
 
 $stablePattern = '^\d+\.\d+\.\d+$'
-$betaPattern   = '^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)?$'
+$betaPattern   = '^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)*$'
 
 $resolvedChannel = $Channel.ToLowerInvariant()
 if ($resolvedChannel -eq 'auto') {
@@ -64,7 +64,7 @@ $publish = Join-Path $root "artifacts\publish-$resolvedChannel"
 $outPath = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $root $OutputDir }
 
 $driverHash = ''
-$betaWithoutDriver = $resolvedChannel -eq 'beta' -and $cleanVersion -in @('0.3.2-beta.1', '0.3.2-beta.2', '0.3.2-beta.4')
+$betaWithoutDriver = $resolvedChannel -eq 'beta' -and $cleanVersion -in @('0.3.2-beta.1', '0.3.2-beta.2', '0.3.2-beta.4', '0.3.2-beta.4.1')
 if ($betaWithoutDriver) {
     Write-Host "Beta $cleanVersion wird ohne WaveRT-Treiber gepackt."
 }

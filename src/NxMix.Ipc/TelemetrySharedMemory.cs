@@ -8,12 +8,13 @@ namespace NxMix.Ipc;
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public unsafe struct TelemetrySharedBlock
 {
+    public const uint LayoutVersion = 2;
     public const uint MagicValue = 0x584D584E; // 'NXMX'
     public const int MaxInputs = 128;
     public const int MaxOutputs = 128;
     public const int MaxBuses = 64;
     public const int MaxDeviceMasters = 64;
-    public const int SpectrumPoints = 144;
+    public const int SpectrumPoints = SpectrumAnalyzer.Points;
 
     public uint Magic;
     public uint Version;
@@ -81,7 +82,7 @@ public static class IpcNames
         $"NxMix.Control.v1.{SanitizeKey(customKey ?? CurrentUserToken())}";
 
     public static string TelemetryMapName(string? customKey = null) =>
-        $@"Local\NxMix.Telemetry.v1.{SanitizeKey(customKey ?? CurrentUserToken())}";
+        $@"Local\NxMix.Telemetry.v{TelemetrySharedBlock.LayoutVersion}.{SanitizeKey(customKey ?? CurrentUserToken())}";
 
     public static string DaemonMutexName(string? customKey = null) =>
         $@"Local\NxMix.Daemon.SingleInstance.v1.{SanitizeKey(customKey ?? CurrentUserToken())}";
@@ -129,7 +130,7 @@ public sealed unsafe class TelemetrySharedMemoryWriter : IDisposable
             block->SpectrumPostDb[i] = -100f;
         }
         block->Magic = TelemetrySharedBlock.MagicValue;
-        block->Version = 1;
+        block->Version = TelemetrySharedBlock.LayoutVersion;
         block->DaemonPid = Environment.ProcessId;
         Volatile.Write(ref block->Seq, 0u);
     }
@@ -262,7 +263,7 @@ public sealed unsafe class TelemetrySharedMemoryReader : IDisposable
                 Thread.SpinWait(8);
                 continue;
             }
-            if (src->Magic != TelemetrySharedBlock.MagicValue) return false;
+            if (src->Magic != TelemetrySharedBlock.MagicValue || src->Version != TelemetrySharedBlock.LayoutVersion) return false;
 
             TelemetrySharedBlock copy = *src;
             Thread.MemoryBarrier();

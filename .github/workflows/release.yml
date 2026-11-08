@@ -50,7 +50,7 @@ jobs:
 
           $version = $raw.Trim().TrimStart('v', 'V')
           $stableRegex = '^\d+\.\d+\.\d+$'
-          $betaRegex   = '^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)?$'
+          $betaRegex   = '^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)*$'
 
           if ($version -match $stableRegex) {
             $channel      = 'stable'

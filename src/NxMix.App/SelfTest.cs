@@ -345,10 +345,10 @@ internal static class SelfTest
             dspPage.ApplyRewPreview(0, preview, applyHeadroomTrim: true);
             var source = m.Channel(false, 0);
             var target = m.Channel(false, 1);
-            var graphOptions = new SpectrumPrefs(Range: 1, Bars: true, WindowSize: 32768, DisplayPoints: 24);
+            var graphOptions = new SpectrumPrefs(Range: 1, Bars: true, WindowSize: 32768, DisplayPoints: 256);
             root.Prefs.SaveSpectrum(source.Id, graphOptions);
             Check("Spektrumprofil speichert Balkenzahl pro Ausgang", root.Prefs.Spectrum(source.Id) == graphOptions
-                && root.Prefs.Spectrum(source.Id).EffectiveDisplayPoints == 24
+                && root.Prefs.Spectrum(source.Id).EffectiveDisplayPoints == 256
                 && root.Prefs.Spectrum(target.Id) == new SpectrumPrefs());
             Check("Kanalkopie übernimmt REW und behält Zielgerät, Name und Schutzgrenzen",
                 m.CopyChannelSettings(false, source.Id, target.Id) && m.Channel(false, 1) is var copied

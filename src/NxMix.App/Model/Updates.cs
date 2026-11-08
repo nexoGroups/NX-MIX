@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -23,7 +24,7 @@ public static class ReleaseChannelInfo
     public const string BetaSetupExeName = "NX-MIX-Beta-Setup.exe";
 
     private static readonly Regex s_stableTagRegex = new(@"^\d+\.\d+\.\d+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
-    private static readonly Regex s_betaTagRegex = new(@"^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex s_betaTagRegex = new(@"^\d+\.\d+\.\d+-(beta|rc|alpha)(\.\d+)*$", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     public static string ToVelopackChannel(ReleaseChannel channel) =>
         channel == ReleaseChannel.Beta ? BetaVelopackChannel : StableVelopackChannel;
@@ -193,7 +194,7 @@ internal sealed class VelopackUpdateBackend : IUpdateBackend
         {
             // Im Stable-Kanal nur freigegebene Releases prüfen; Downgrade nur erlauben, wenn aktuell eine Beta läuft!
             var stableMgr = CreateManager(ReleaseChannel.Stable, allowDowngrade: currentlyOnBeta);
-            var info = await stableMgr.CheckForUpdatesAsync().ConfigureAwait(false);
+            var info = await CheckWithRetryAsync(stableMgr, ct).ConfigureAwait(false);
             if (info == null) return null;
 
             var target = info.TargetFullRelease;
@@ -218,11 +219,11 @@ internal sealed class VelopackUpdateBackend : IUpdateBackend
             try
             {
                 var betaMgr = CreateManager(ReleaseChannel.Beta, allowDowngrade: false);
-                var betaInfo = await betaMgr.CheckForUpdatesAsync().ConfigureAwait(false);
+                var betaInfo = await CheckWithRetryAsync(betaMgr, ct).ConfigureAwait(false);
                 if (betaInfo != null && ReleaseChannelInfo.CompareVersions(betaInfo.TargetFullRelease.Version.ToString(), curVer) > 0)
                     betaOffer = BuildOffer(betaMgr, betaInfo, ReleaseChannel.Beta, curVer);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 betaErr = ex;
             }
@@ -232,7 +233,7 @@ internal sealed class VelopackUpdateBackend : IUpdateBackend
             try
             {
                 var stableMgr = CreateManager(ReleaseChannel.Stable, allowDowngrade: false);
-                var stableInfo = await stableMgr.CheckForUpdatesAsync().ConfigureAwait(false);
+                var stableInfo = await CheckWithRetryAsync(stableMgr, ct).ConfigureAwait(false);
                 if (stableInfo != null &&
                     !ReleaseChannelInfo.IsPrereleaseVersion(stableInfo.TargetFullRelease.Version.ToString()) &&
                     ReleaseChannelInfo.CompareVersions(stableInfo.TargetFullRelease.Version.ToString(), curVer) > 0)
@@ -240,7 +241,7 @@ internal sealed class VelopackUpdateBackend : IUpdateBackend
                     stableOffer = BuildOffer(stableMgr, stableInfo, ReleaseChannel.Stable, curVer);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 stableErr = ex;
             }
@@ -254,13 +255,34 @@ internal sealed class VelopackUpdateBackend : IUpdateBackend
             if (betaOffer != null) return betaOffer;
             if (stableOffer != null) return stableOffer;
 
-            // Falls der Beta-Feed einen echten Netzwerk-/Integritätsfehler meldete und auch Stable fehlschlug, Fehler sichtbar machen:
-            if (betaErr != null && stableErr != null)
-                throw betaErr;
+            // Ohne Angebot kann ein fehlgeschlagener Feed-Check nicht als „aktuell“ gelten.
+            if ((betaErr ?? stableErr) is { } checkError)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(checkError);
 
             return null;
         }
     }
+
+    private static async Task<UpdateInfo?> CheckWithRetryAsync(UpdateManager manager, CancellationToken ct)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var update = await manager.CheckForUpdatesAsync().ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                return update;
+            }
+            catch (HttpRequestException ex) when (attempt < 2 && IsTemporaryGatewayError(ex.StatusCode))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(attempt + 1), ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    internal static bool IsTemporaryGatewayError(HttpStatusCode? status) =>
+        status is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
 
     private static UpdateOffer BuildOffer(UpdateManager mgr, UpdateInfo info, ReleaseChannel sourceChannel, string currentVersion)
     {
@@ -599,6 +621,8 @@ internal sealed class AppUpdater
     {
         if (ex is HttpRequestException hre)
         {
+            if (VelopackUpdateBackend.IsTemporaryGatewayError(hre.StatusCode))
+                return $"GitHub ist vorübergehend nicht erreichbar (HTTP {(int)hre.StatusCode!.Value}). Bitte später erneut prüfen.";
             return hre.StatusCode.HasValue
                 ? $"GitHub-Server antwortete mit HTTP {(int)hre.StatusCode.Value}. Bitte Verbindung oder Release-Feed prüfen."
                 : "Keine Verbindung zu GitHub möglich. Bitte Internetverbindung prüfen.";

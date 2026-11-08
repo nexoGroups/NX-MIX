@@ -115,8 +115,8 @@ public sealed class DaemonLifecycleAndSnapshotTests
         float[] outP = { 0.25f, 0.8f };
         float[] busP = { 0.42f };
         float[] devP = { 0.8f, 0.5f };
-        float[] pre = Enumerable.Range(0, 144).Select(i => -80f + i * 0.25f).ToArray();
-        float[] post = Enumerable.Range(0, 144).Select(i => -70f + i * 0.25f).ToArray();
+        float[] pre = Enumerable.Range(0, SpectrumAnalyzer.Points).Select(i => -80f + i * 0.25f).ToArray();
+        float[] post = Enumerable.Range(0, SpectrumAnalyzer.Points).Select(i => -70f + i * 0.25f).ToArray();
         var meta = new TelemetrySnapshotFrame(1234, HostState.Running, 256, 48000, false, 0.07, 5.33, 0, 0, 2, 2, 1);
 
         writer.Publish(inP, outP, busP, devP, in meta, pre, post);
@@ -125,8 +125,8 @@ public sealed class DaemonLifecycleAndSnapshotTests
         float[] rOut = new float[2];
         float[] rBus = new float[1];
         float[] rDev = new float[2];
-        float[] rPre = new float[144];
-        float[] rPost = new float[144];
+        float[] rPre = new float[SpectrumAnalyzer.Points];
+        float[] rPost = new float[SpectrumAnalyzer.Points];
 
         Assert.True(reader.TryRead(rIn, rOut, rBus, rDev, rPre, rPost, out var rMeta));
         Assert.Equal(HostState.Running, rMeta.HostState);
@@ -135,7 +135,9 @@ public sealed class DaemonLifecycleAndSnapshotTests
         Assert.Equal(0.75f, rIn[2], 5);
         Assert.Equal(0.42f, rBus[0], 5);
         Assert.Equal(0.8f, rDev[0], 5);
-        Assert.Equal(post[100], rPost[100], 4);
+        Assert.Equal(256, rPre.Length);
+        Assert.Equal(pre[^1], rPre[^1], 4);
+        Assert.Equal(post[^1], rPost[^1], 4);
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 100; i++)
