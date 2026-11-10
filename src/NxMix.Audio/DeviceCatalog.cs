@@ -85,6 +85,7 @@ public sealed class DeviceCatalog : IDeviceCatalog
                         Backend = AudioBackend.Windows,
                         IsVirtualEndpoint = isVirtual,
                         DriverProvider = provider,
+                        IsVbCable = DeviceNames.IsVbCable(device, name, flow, provider),
                         NativeOutputPort = nxMix && flow == DeviceFlow.Capture ? DeviceNames.ReadNxMixOutputPort(device, name) : 0,
                     });
                 }

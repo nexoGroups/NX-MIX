@@ -60,6 +60,15 @@ internal static unsafe class DeviceNames
         return 0;
     }
 
+    public static bool IsVbCable(IMMDevice device, string friendlyName, DeviceFlow flow, string provider)
+    {
+        if (provider != "VB-Audio") return false;
+        string expected = flow == DeviceFlow.Capture ? "CABLE Output" : "CABLE Input";
+        return string.Equals(ReadStringProperty(device, DeviceDesc), expected, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(friendlyName, expected, StringComparison.OrdinalIgnoreCase) ||
+            friendlyName.StartsWith(expected + " (", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool ContainsAny(string haystack, params string[] needles)
     {
         for (int i = 0; i < needles.Length; i++)

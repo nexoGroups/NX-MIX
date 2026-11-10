@@ -677,7 +677,12 @@ public sealed class DaemonEngineController : INxMixBackend
             else if (v.Kind == VaioSlotKind.ExternalDriverEndpoint)
             {
                 var flow = v.Loopback ? DeviceFlow.Capture : v.Flow;
-                bindings.Add(new DeviceBinding(v.EndpointOrExe, flow, 0, v.EngineFirstChannel, v.Channels, v.Loopback));
+                bool vbCableCapture = !v.Loopback && flow == DeviceFlow.Capture &&
+                    _discoveredDevices.Any(d => d.IsVbCable && string.Equals(d.Id, v.EndpointOrExe, StringComparison.OrdinalIgnoreCase));
+                bindings.Add(new DeviceBinding(v.EndpointOrExe, flow, 0, v.EngineFirstChannel, v.Channels, v.Loopback)
+                {
+                    Exclusive = vbCableCapture ? false : null,
+                });
             }
             else if (v.Kind == VaioSlotKind.AppCapture && cfg.AppLinksEnabled)
             {

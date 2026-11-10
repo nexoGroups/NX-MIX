@@ -60,6 +60,33 @@ internal static class SelfTest
     {
         Check("Schriftart Inter wird aus dem App-Verzeichnis geladen", Renderer.FontName == "Inter", Renderer.FontName);
 
+        using (var cableSession = Program.CreateHeadlessSession(demo: true, hostRunning: false))
+        {
+            var model = cableSession.Model;
+            var capture = model.DiscoveredDevices.Single(d => d.IsVbCable && d.Flow == DeviceFlow.Capture);
+            var playback = model.DiscoveredDevices.Single(d => d.IsVbCable && d.Flow == DeviceFlow.Render);
+            model.ApplySystemConfig(model.Config with { Vaios = [], DefaultWasapiExclusive = true });
+            model.ConfigureVbCableInput();
+            model.ConfigureVbCableInput();
+            var slot = model.Config.Vaios.Single();
+            var binding = cableSession.Controller.BuildAudioHostConfig(model.Config).Bindings.Single(b => b.DeviceId == capture.Id);
+            Check("VB-CABLE wird einmal als direkte WASAPI-Aufnahme im Shared-Modus eingebunden",
+                slot.EndpointOrExe == capture.Id && !slot.Loopback &&
+                binding.Flow == DeviceFlow.Capture && !binding.Loopback && binding.Exclusive == false);
+            model.RemoveVaioSlot(slot.Id);
+            model.ConfigureVbCableInput();
+            Check("Ein entfernter VB-CABLE-Eingang wird nicht erneut angelegt", model.Config.Vaios.Count == 0);
+
+            model.ApplySystemConfig(model.Config with { VbCableInputConfigured = false });
+            var old = model.AddVirtualCableSlot(playback, "Mein Kabel", loopback: true);
+            var originalChannel = model.Settings.Inputs[old.EngineFirstChannel].Id;
+            model.ConfigureVbCableInput();
+            var migrated = model.Config.Vaios.Single();
+            Check("VB-CABLE-Loopback wechselt unter derselben Kanal-ID auf CABLE Output",
+                migrated.Id == old.Id && migrated.EndpointOrExe == capture.Id && !migrated.Loopback &&
+                model.Settings.Inputs[migrated.EngineFirstChannel].Id == originalChannel);
+        }
+
         // ======================================================================================
         // 1. Leerer Konsolenstart: Alle 8 Seiten rendern sauber im Leerzustand
         // ======================================================================================

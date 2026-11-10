@@ -1086,12 +1086,63 @@ internal sealed class AppModel
     public void RemoveHardwareDevice(Guid nodeId) =>
         ApplySystemConfig(Config with { Devices = Config.Devices.Where(d => d.Id != nodeId).ToArray() });
 
+    public void ConfigureVbCableInput()
+    {
+        if (Config.VbCableInputConfigured) return;
+        var captures = DiscoveredDevices.Where(d => d.IsVbCable && d.Flow == DeviceFlow.Capture && d.Channels > 0).Take(2).ToArray();
+        if (captures.Length != 1) return;
+        var capture = captures[0];
+        var next = Config with { VbCableInputConfigured = true };
+        bool SameId(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        if (Config.Devices.Any(d => SameId(d.EndpointId, capture.Id)) ||
+            Config.Vaios.Any(v => SameId(v.EndpointOrExe, capture.Id)))
+        {
+            ApplySystemConfig(next, reopenAudioIfNeeded: false);
+            return;
+        }
+
+        var playbackIds = DiscoveredDevices.Where(d => d.IsVbCable && d.Flow == DeviceFlow.Render)
+            .Select(d => d.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var loopbackSlots = Config.Vaios.Where(v => v.Loopback && playbackIds.Contains(v.EndpointOrExe)).ToArray();
+        var loopbackDevices = Config.Devices.Where(d => d.Loopback && playbackIds.Contains(d.EndpointId)).ToArray();
+        // Bei mehreren oder größeren Altzuordnungen bleibt die Kanalbelegung erhalten.
+        if (loopbackSlots.Length + loopbackDevices.Length > 1) return;
+        if (loopbackSlots is [var slot])
+        {
+            if (slot.Channels > capture.Channels) return;
+            next = next with { Vaios = Config.Vaios.Select(v => v.Id == slot.Id
+                ? v with { EndpointOrExe = capture.Id, Flow = DeviceFlow.Capture, Loopback = false }
+                : v).ToArray() };
+        }
+        else if (loopbackDevices is [var device])
+        {
+            if (device.DeviceFirstChannel + device.ChannelCount > capture.Channels) return;
+            next = next with { Devices = Config.Devices.Select(d => d.Id == device.Id
+                ? d with { EndpointId = capture.Id, FriendlyName = capture.Name, Flow = DeviceFlow.Capture, Loopback = false, ExclusiveOverride = false }
+                : d).ToArray() };
+        }
+        else
+        {
+            var input = CreateVirtualCableSlot(capture, "VB-CABLE", loopback: false);
+            if (input.EngineFirstChannel + input.Channels > DaemonEngineController.PoolMaxInputs) return;
+            next = next with { Vaios = Config.Vaios.Append(input).ToArray() };
+        }
+        ApplySystemConfig(next);
+    }
+
     public VaioSlotConfig AddVirtualCableSlot(AudioDeviceInfo endpoint, string? customName = null, bool loopback = false)
+    {
+        var slot = CreateVirtualCableSlot(endpoint, customName, loopback);
+        ApplySystemConfig(Config with { Vaios = Config.Vaios.Append(slot).ToArray() });
+        return slot;
+    }
+
+    private VaioSlotConfig CreateVirtualCableSlot(AudioDeviceInfo endpoint, string? customName, bool loopback)
     {
         bool native = endpoint.IsNxMixEndpoint && (loopback || endpoint.NativeOutputPort > 0);
         var flow = loopback ? DeviceFlow.Capture : native ? DeviceFlow.Render : endpoint.Flow;
         int count = native ? AudioDeviceInfo.NxMixMaxChannels :
-            loopback ? Math.Clamp(endpoint.Channels, 1, 2) : Math.Clamp(Math.Max(2, endpoint.Channels), 1, 16);
+            loopback ? Math.Clamp(endpoint.Channels, 1, 2) : Math.Clamp(Math.Max(endpoint.IsVbCable ? 1 : 2, endpoint.Channels), 1, 16);
         int first = NextFreeEngineChannel(flow, count);
         if (loopback && !native && string.IsNullOrWhiteSpace(customName))
         {
@@ -1100,7 +1151,7 @@ internal sealed class AppModel
                 number++;
             customName = $"NX-MIX In {number}";
         }
-        var slot = new VaioSlotConfig
+        return new VaioSlotConfig
         {
             Id = Guid.NewGuid(),
             Name = string.IsNullOrWhiteSpace(customName) ? endpoint.Name : customName.Trim(),
@@ -1112,8 +1163,6 @@ internal sealed class AppModel
             EndpointOrExe = endpoint.Id,
             Enabled = true,
         };
-        ApplySystemConfig(Config with { Vaios = Config.Vaios.Append(slot).ToArray() });
-        return slot;
     }
 
     public void UpdateVaioSlot(Guid slotId, Func<VaioSlotConfig, VaioSlotConfig> f)
@@ -1131,8 +1180,17 @@ internal sealed class AppModel
     public void ShowAsioControlPanel(string endpointId) =>
         RunBackend(() => _backend.ShowAsioControlPanelAsync(endpointId));
 
-    public void RefreshDevices() =>
-        RunBackendVoid(() => _backend.RefreshDevicesAsync());
+    public void RefreshDevices(bool configureVbCable = false) =>
+        RunBackendVoid(async () =>
+        {
+            await _backend.RefreshDevicesAsync().ConfigureAwait(false);
+            if (configureVbCable)
+                Post(() =>
+                {
+                    ApplyIncomingSnapshot(_backend.Snapshot);
+                    ConfigureVbCableInput();
+                });
+        });
 
     public void StartAudio()
     {

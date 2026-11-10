@@ -1,4 +1,5 @@
 using NxMix.App.Model;
+using NxMix.App.Native;
 using NxMix.App.Ui;
 using NxMix.Audio;
 using NxMix.Ipc;
@@ -49,7 +50,7 @@ internal sealed class VirtualIoPage : Page
         _addCableBtn.Clicked += ShowAddCableMenu;
         _scanBtn.Clicked += _ =>
         {
-            _m.RefreshDevices();
+            _m.RefreshDevices(configureVbCable: VbCableSetup.AutoSetupEnabled);
             Root?.Notify.Flash("Virtuelle Endpunkte und Audioprogramme aktualisiert.");
         };
 
@@ -132,6 +133,24 @@ internal sealed class VirtualIoPage : Page
         if (Root is not { } root) return;
         var items = new List<MenuItem>();
         var virtuals = _m.VirtualEndpointDevices;
+        if (VbCableSetup.IsBundled)
+        {
+            items.Add(MenuItem.Header("VB-CABLE von VB-Audio · Donationware"));
+            if (!virtuals.Any(d => d.IsVbCable && d.Flow == DeviceFlow.Capture))
+            {
+                items.Add(new MenuItem("VB-CABLE installieren …", null, () =>
+                {
+                    if (VbCableSetup.InstallIfNeeded(automatic: false))
+                        _m.RefreshDevices(configureVbCable: true);
+                }));
+            }
+            items.Add(new MenuItem("Herstellerseite und Spende öffnen", null, () =>
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(VbCableSetup.ProductUrl) { UseShellExecute = true }); }
+                catch { root.Notify.Flash("Herstellerseite konnte nicht geöffnet werden.", true); }
+            }));
+            items.Add(MenuItem.Sep);
+        }
         var playback = virtuals.Where(d => d.Flow == DeviceFlow.Render && d.IsNxMixEndpoint).ToList();
         if (playback.Count > 0)
         {

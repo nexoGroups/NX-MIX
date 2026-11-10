@@ -91,11 +91,11 @@ internal sealed class DemoCatalog : IDeviceCatalog
         },
         new AudioDeviceInfo("demo-vcable-out", "CABLE Output (VB-Audio Virtual Cable)", DeviceFlow.Capture, 2, 48000, false)
         {
-            Backend = AudioBackend.Windows, IsVirtualEndpoint = true, DriverProvider = "VB-Audio Software",
+            Backend = AudioBackend.Windows, IsVirtualEndpoint = true, DriverProvider = "VB-Audio Software", IsVbCable = true,
         },
         new AudioDeviceInfo(DemoProject.ParkingId, DemoProject.ParkingName, DeviceFlow.Render, 2, 48000, false)
         {
-            Backend = AudioBackend.Windows, IsVirtualEndpoint = true, DriverProvider = "VB-Audio Software",
+            Backend = AudioBackend.Windows, IsVirtualEndpoint = true, DriverProvider = "VB-Audio Software", IsVbCable = true,
         },
     };
 }

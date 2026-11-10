@@ -234,6 +234,8 @@ internal static class Program
 
         try
         {
+            bool useVbCable = customKey == null && o.ExitAfterMs <= 0 && VbCableSetup.AutoSetupEnabled;
+            bool refreshAfterSetup = useVbCable && VbCableSetup.InstallIfNeeded();
             var prefs = UiPrefs.Load();
 
             var client = new NamedPipeBackendClient(customKey, async ct =>
@@ -271,8 +273,15 @@ internal static class Program
 
             // Kurz auf den ersten Laufzeit-Snapshot warten, damit das Fenster direkt vollständig gefüllt öffnet
             client.ConnectAsync(TimeSpan.FromSeconds(4)).GetAwaiter().GetResult();
+            if (refreshAfterSetup && client.IsConnected)
+            {
+                try { client.RefreshDevicesAsync().GetAwaiter().GetResult(); }
+                catch { /* Der reguläre Start bleibt auch bei einer unterbrochenen Geräteabfrage möglich. */ }
+            }
 
             var model = new AppModel(client);
+            if (useVbCable && model.IsConnected)
+                model.ConfigureVbCableInput();
             var win = new MainWindow(model, prefs.Window, o.ExitAfterMs, prefs, new VelopackUpdateBackend());
             if (model.IsConnected && model.Config.AutoStartAudioOnBoot && !model.HostRunning &&
                 model.Runtime.AudioStartBlockedReason == null)

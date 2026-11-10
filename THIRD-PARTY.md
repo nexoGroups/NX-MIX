@@ -1,6 +1,6 @@
 # Fremdkomponenten von NX-MIX
 
-Die Projektlizenz von NX-MIX ([LICENSE.txt](LICENSE.txt)) gilt ausschließlich für den eigenen Programmcode und eigene Inhalte. Sie schränkt die eigenständigen Rechte an den folgenden Komponenten nicht ein. Alle Komponenten liegen als getrennte Dateien im Programmordner und dürfen nach ihrer jeweiligen Lizenz verwendet, ausgetauscht und weitergegeben werden.
+Die Projektlizenz von NX-MIX ([LICENSE.txt](LICENSE.txt)) gilt ausschließlich für den eigenen Programmcode und eigene Inhalte. Sie schränkt die eigenständigen Rechte an den folgenden Komponenten nicht ein. Die Komponenten dürfen nach ihrer jeweiligen Lizenz verwendet, ausgetauscht und weitergegeben werden.
 
 | Komponente | Version | Lizenz und Quelle |
 | --- | --- | --- |
@@ -12,3 +12,4 @@ Die Projektlizenz von NX-MIX ([LICENSE.txt](LICENSE.txt)) gilt ausschließlich f
 | NAudio.Asio, NAudio.Core | 3.3.0 | MIT; [naudio/NAudio](https://github.com/naudio/NAudio). Native ASIO-Treiberanbindung. |
 | System.Numerics.Tensors | 9.0.0 | MIT; [dotnet/runtime](https://github.com/dotnet/runtime). Abhängigkeit von NAudio.Core. |
 | Schrift Inter | 4.1 | SIL Open Font License 1.1; [rsms/inter](https://github.com/rsms/inter). Der Lizenztext liegt neben den Schriftdateien als `Fonts/Inter-LICENSE.txt`. |
+| VB-CABLE von VB-Audio | Pack 46 | Donationware. Das Beta-Paket enthält das unveränderte Herstellerarchiv. [Herstellerseite und freiwillige Unterstützung](https://vb-audio.com/Cable/). |

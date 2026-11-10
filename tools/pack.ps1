@@ -83,6 +83,32 @@ elseif (-not [string]::IsNullOrWhiteSpace($NativeDriverMsi)) {
     throw 'Beta 0.3.2 erfordert das signierte WaveRT-Treiber-MSI (-NativeDriverMsi oder NXMIX_NATIVE_DRIVER_MSI).'
 }
 
+$vbCableHash = ''
+if ($resolvedChannel -eq 'beta' -and !$driverHash -and !$betaWithoutDriver) {
+    $vbCableUrl = 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip'
+    $vbCableHash = 'BC44E8974191A5A2427D6C979E2DAB08DBB09925F3F435DFA2F0BA3E45B6EB90'
+    $vendorDir = Join-Path $root 'artifacts\vendor'
+    New-Item -ItemType Directory -Force -Path $vendorDir | Out-Null
+    $vbCable = Join-Path $vendorDir 'VBCABLE_Driver_Pack46.zip'
+    if (!(Test-Path -LiteralPath $vbCable)) {
+        $download = Join-Path $vendorDir ("vb-cable-$([Guid]::NewGuid().ToString('N')).download")
+        try {
+            Invoke-WebRequest -Uri $vbCableUrl -OutFile $download -TimeoutSec 90
+            if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $vbCableHash) {
+                throw 'Das VB-CABLE-Herstellerpaket hat einen unerwarteten SHA-256-Hash.'
+            }
+            Move-Item -LiteralPath $download -Destination $vbCable -Force
+        }
+        finally {
+            if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download -Force }
+        }
+    }
+    if ((Get-FileHash -LiteralPath $vbCable -Algorithm SHA256).Hash -ne $vbCableHash) {
+        throw "VB-CABLE-Cache stimmt nicht mit dem Herstellerpaket überein: $vbCable"
+    }
+    Write-Host "Beta $cleanVersion enthält das unveränderte VB-CABLE-Herstellerpaket."
+}
+
 if (Test-Path -LiteralPath $publish) {
     $existingPublish = Get-Item -LiteralPath $publish
     $artifactRoot = [IO.Path]::GetFullPath((Join-Path $root 'artifacts')) + [IO.Path]::DirectorySeparatorChar
@@ -96,7 +122,7 @@ if (Test-Path -LiteralPath $publish) {
 New-Item -ItemType Directory -Force -Path $outPath | Out-Null
 
 Write-Host "==> [1/4] Publish NxMix.App ($cleanVersion, Kanal=$resolvedChannel/$vpkChannel) ..."
-dotnet publish (Join-Path $root 'src\NxMix.App') -c Release -r win-x64 --self-contained -p:Version=$cleanVersion "-p:NativeDriverMsiSha256=$driverHash" -o $publish
+dotnet publish (Join-Path $root 'src\NxMix.App') -c Release -r win-x64 --self-contained -p:Version=$cleanVersion "-p:NativeDriverMsiSha256=$driverHash" "-p:VbCableSha256=$vbCableHash" -o $publish
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish (NxMix.App) fehlgeschlagen' }
 
 # Wichtig: NxMix.Daemon NACH NxMix.App publizieren, damit die self-contained runtimeconfig/deps von NxMix.Daemon erhalten bleiben.
@@ -123,6 +149,11 @@ if ($driverHash) {
     if ((Get-FileHash -LiteralPath $bundledMsi -Algorithm SHA256).Hash -ne $driverHash) {
         throw 'Das WaveRT-MSI wurde während des Paketbaus geändert.'
     }
+}
+if ($vbCableHash) {
+    $driverDir = Join-Path $publish 'drivers'
+    New-Item -ItemType Directory -Path $driverDir -Force | Out-Null
+    Copy-Item -LiteralPath $vbCable -Destination (Join-Path $driverDir 'VBCABLE_Driver_Pack46.zip')
 }
 
 # Release Notes ermitteln (docs/release-notes/<version>.md oder strukturierter Fallback)
@@ -168,16 +199,28 @@ vpk --skip-updates pack `
     --outputDir $outPath
 if ($LASTEXITCODE -ne 0) { throw 'vpk pack fehlgeschlagen' }
 
-if ($driverHash -or $betaWithoutDriver) {
+if ($driverHash -or $betaWithoutDriver -or $vbCableHash) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $fullPackage = Get-ChildItem -LiteralPath $outPath -File -Filter "*-$cleanVersion-$vpkChannel-full.nupkg" | Select-Object -First 1
-    if (-not $fullPackage) { throw 'Velopack-Vollpaket für WaveRT-Prüfung fehlt.' }
+    if (-not $fullPackage) { throw 'Velopack-Vollpaket für Treiberprüfung fehlt.' }
     $archive = [IO.Compression.ZipFile]::OpenRead($fullPackage.FullName)
     try {
         $entry = $archive.Entries | Where-Object { $_.FullName -like '*/drivers/NxMixWaveRt-x64.msi' } | Select-Object -First 1
-        if ($betaWithoutDriver) {
+        if ($betaWithoutDriver -or $vbCableHash) {
             if ($entry) { throw 'Diese Beta darf kein WaveRT-MSI enthalten.' }
         }
+        $cableEntry = $archive.Entries | Where-Object { $_.FullName -like '*/drivers/VBCABLE_Driver_Pack46.zip' } | Select-Object -First 1
+        if ($vbCableHash) {
+            if (!$cableEntry) { throw 'Das Velopack-Update enthält VB-CABLE nicht.' }
+            $stream = $cableEntry.Open()
+            try {
+                if ((Get-FileHash -InputStream $stream -Algorithm SHA256).Hash -ne $vbCableHash) {
+                    throw 'VB-CABLE im Velopack-Update hat einen abweichenden Hash.'
+                }
+            }
+            finally { $stream.Dispose() }
+        }
+        elseif ($cableEntry) { throw 'Dieses Paket darf VB-CABLE nicht enthalten.' }
         else {
             if (-not $entry) { throw 'Das Velopack-Update enthält das WaveRT-MSI nicht.' }
             $stream = $entry.Open()

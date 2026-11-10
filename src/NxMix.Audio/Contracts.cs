@@ -16,6 +16,7 @@ public sealed record AudioDeviceInfo(string Id, string Name, DeviceFlow Flow, in
     public bool IsVirtualEndpoint { get; init; }
     /// <summary>Erkannter Treiber-/Hardware-Anbieter oder Enumerator (z. B. "ASIO", "VB-Audio", "USB-Audio", "HDAUDIO").</summary>
     public string? DriverProvider { get; init; }
+    public bool IsVbCable { get; init; }
     public int NativeOutputPort { get; init; }
 
     public const string NxMixDriverProvider = "NX-MIX WaveRT";

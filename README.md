@@ -48,6 +48,14 @@ Die kostenlose Nutzung ist an die [Projektlizenz](LICENSE.txt) gebunden: erlaubt
 - **Loopback:** abgreifen, was ein Wiedergabegerät gerade abspielt.
 - Samplerate von 44,1 bis 192 kHz, Blockgröße von 128 bis 1024 Samples, wahlweise Exklusiv-Modus.
 
+### VB-CABLE in der Beta
+
+Das Beta-Setup und Beta-Updates enthalten das unveränderte VB-CABLE-Paket von VB-Audio. Beim ersten Start der installierten Beta öffnet sich das Hersteller-Setup, falls VB-CABLE fehlt. Bestätige die Windows-Administratorabfrage, schließe die Treiberinstallation ab und starte Windows neu.
+
+Wähle für das gewünschte Programm **CABLE Input** als Windows-Ausgabegerät. NX-MIX liest **CABLE Output** direkt als Aufnahmegerät und richtet dafür unter **Virtual I/O** einmalig den Eingang **VB-CABLE** ein. Verbinde den Eingang in der Matrix mit deinen gewünschten Ausgängen.
+
+VB-CABLE ist Donationware. Hersteller, Download und freiwillige Unterstützung findest du bei [VB-Audio](https://vb-audio.com/Cable/).
+
 ### App-Links
 
 - Ein Programm (z. B. Spotify oder ein Browser) direkt an einen Eingangs-Fader binden. Sein Ton läuft dann nur noch über NX-MIX.

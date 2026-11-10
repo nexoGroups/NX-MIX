@@ -113,6 +113,7 @@ public sealed record SystemConfig
     public bool LaunchDaemonAtWindowsLogon { get; init; }
     public bool AllowOfflineAuxDevices { get; init; } = true;
     public bool AppLinksEnabled { get; init; } = true;
+    public bool VbCableInputConfigured { get; init; }
     public string? ParkingDeviceId { get; init; }
     public string? ParkingDeviceName { get; init; }
     public bool CompanionApiEnabled { get; init; } = true;

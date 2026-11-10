@@ -26,6 +26,9 @@
   <ItemGroup Condition="'$(NativeDriverMsiSha256)' != ''">
     <AssemblyMetadata Include="NxMixNativeDriverMsiSha256" Value="$(NativeDriverMsiSha256)" />
   </ItemGroup>
+  <ItemGroup Condition="'$(VbCableSha256)' != ''">
+    <AssemblyMetadata Include="NxMixVbCableSha256" Value="$(VbCableSha256)" />
+  </ItemGroup>
   <ItemGroup>
     <None Include="Fonts\Inter-*.ttf;Fonts\Inter-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Licenses\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
