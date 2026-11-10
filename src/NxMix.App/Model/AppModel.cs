@@ -24,6 +24,7 @@ internal sealed class AppModel
     readonly float[] _inPeaks = new float[DaemonEngineController.PoolMaxInputs];
     readonly float[] _outPeaks = new float[DaemonEngineController.PoolMaxOutputs];
     readonly float[] _busPeaks = new float[DaemonEngineController.PoolMaxBuses];
+    readonly float[] _busChannelPeaks = new float[DaemonEngineController.PoolMaxBuses];
     readonly float[] _devPeaks = new float[TelemetrySharedBlock.MaxDeviceMasters];
     readonly float[] _specPreDb = new float[SpectrumAnalyzer.Points];
     readonly float[] _specPostDb = new float[SpectrumAnalyzer.Points];
@@ -85,6 +86,18 @@ internal sealed class AppModel
 
     public float GetInputPeak(int idx) => (uint)idx < (uint)_inPeaks.Length ? _inPeaks[idx] : 0f;
     public float GetOutputPeak(int idx) => (uint)idx < (uint)_outPeaks.Length ? _outPeaks[idx] : 0f;
+    public ReadOnlySpan<float> GetBusChannelPeaks(Guid id)
+    {
+        int offset = 0;
+        foreach (var bus in Settings.Buses)
+        {
+            if (bus.Id == id)
+                return offset + bus.Channels <= _busChannelPeaks.Length ? _busChannelPeaks.AsSpan(offset, bus.Channels) : default;
+            offset += bus.Channels;
+        }
+        return default;
+    }
+
     public float GetBusPeak(int idx) => (uint)idx < (uint)_busPeaks.Length ? _busPeaks[idx] : 0f;
     public float GetDeviceMasterPeak(Guid deviceId)
     {
@@ -146,6 +159,13 @@ internal sealed class AppModel
     public AudioDeviceInfo? FindDevice(string endpointId) =>
         Runtime.DiscoveredDevices.FirstOrDefault(d => string.Equals(d.Id, endpointId, StringComparison.OrdinalIgnoreCase));
 
+    public int ActiveVaioChannels(VaioSlotConfig slot) => slot.Kind == VaioSlotKind.NxMixKernelDriver
+        ? Math.Min(slot.Channels, FindDevice(slot.EndpointOrExe)?.NxMixActiveChannels ?? 2)
+        : slot.Channels;
+
+    public bool IsChannelVisible(ChannelDsp channel) => !channel.IsVacant &&
+        !Config.Vaios.Any(v => v.Id == channel.DeviceId && channel.DeviceChannelIndex >= ActiveVaioChannels(v));
+
     // ---- Synchronisation vom Backend ----------------------------------------------------------
     readonly object _mixerCommitGate = new();
     bool _mixerInFlight;
@@ -173,6 +193,7 @@ internal sealed class AppModel
     {
         var prevMix = Settings;
         var prevCfg = Config;
+        var prevDevices = Runtime.DiscoveredDevices;
         bool snapListChanged = Runtime.Snapshots.Count != snap.Snapshots.Count
             || Runtime.ActiveSnapshotId != snap.ActiveSnapshotId
             || !Runtime.Snapshots.SequenceEqual(snap.Snapshots);
@@ -189,14 +210,16 @@ internal sealed class AppModel
         HostError = snap.LastError;
         HostBusy = false;
 
-        bool structure = prevMix.Inputs.Count != Settings.Inputs.Count
-            || prevMix.Outputs.Count != Settings.Outputs.Count
+        bool structure = !prevMix.Inputs.Select(c => (c.Id, c.DeviceId)).SequenceEqual(Settings.Inputs.Select(c => (c.Id, c.DeviceId)))
+            || !prevMix.Outputs.Select(c => (c.Id, c.DeviceId)).SequenceEqual(Settings.Outputs.Select(c => (c.Id, c.DeviceId)))
             || !BusesStructureEqual(prevMix.Buses, Settings.Buses)
             || prevMix.DeviceMasters.Count != Settings.DeviceMasters.Count
             || prevMix.SampleRate != Settings.SampleRate
             || !DevicesStructureEqual(prevCfg.Devices, Config.Devices)
             || prevCfg.Vaios.Count != Config.Vaios.Count
-            || prevCfg.AppLinks.Count != Config.AppLinks.Count;
+            || prevCfg.AppLinks.Count != Config.AppLinks.Count
+            || !prevDevices.Where(d => d.IsNxMixEndpoint).Select(d => (d.Id, d.NxMixActiveChannels))
+                .SequenceEqual(snap.DiscoveredDevices.Where(d => d.IsNxMixEndpoint).Select(d => (d.Id, d.NxMixActiveChannels)));
 
         if (structure) StructureChanged?.Invoke();
         ValuesChanged?.Invoke();
@@ -301,9 +324,8 @@ internal sealed class AppModel
                 m[i][j] = v;
             }
         }
-        double master = double.IsNaN(s.MasterGainDb) ? 0 : Math.Clamp(s.MasterGainDb, -120.0, Theme.MasterMaxDb);
         int sr = s.SampleRate > 0 ? s.SampleRate : DefaultSampleRate;
-        return s with { SampleRate = sr, DeviceMasters = dms, Inputs = ins, Outputs = outs, MatrixDb = m, MasterGainDb = master };
+        return (s with { SampleRate = sr, DeviceMasters = dms, Inputs = ins, Outputs = outs, MatrixDb = m }).FoldLegacyMasterIntoOutputs();
     }
 
     void CommitMixer(MixerSettings next, bool structural = false)
@@ -450,6 +472,19 @@ internal sealed class AppModel
     public DeviceMasterDsp? GetDeviceMaster(Guid deviceId) =>
         Settings.DeviceMasters.FirstOrDefault(d => d.Id == deviceId);
 
+    public void RenameDeviceFader(Guid id, string name)
+    {
+        name = name.Trim();
+        if (Config.Devices.Any(d => d.Id == id))
+            ApplySystemConfig(Config with { Devices = Config.Devices.Select(d => d.Id == id ? d with { CustomTitle = name } : d).ToArray() }, reopenAudioIfNeeded: false);
+        else if (Config.Vaios.Any(v => v.Id == id))
+            ApplySystemConfig(Config with { Vaios = Config.Vaios.Select(v => v.Id == id ? v with { Name = name } : v).ToArray() }, reopenAudioIfNeeded: false);
+        else if (Config.AppLinks.Any(a => a.Id == id))
+            ApplySystemConfig(Config with { AppLinks = Config.AppLinks.Select(a => a.Id == id ? a with { DisplayName = name } : a).ToArray() }, reopenAudioIfNeeded: false);
+        else
+            UpdateDeviceMaster(id, d => d with { Name = name });
+    }
+
     public void UpdateDeviceMaster(Guid deviceId, Func<DeviceMasterDsp, DeviceMasterDsp> f, string fallbackName = "", bool isInput = false)
     {
         var dms = Settings.DeviceMasters.ToList();
@@ -458,8 +493,6 @@ internal sealed class AppModel
         else dms.Add(f(new DeviceMasterDsp { Id = deviceId, Name = fallbackName, IsInput = isInput }));
         CommitMixer(Settings with { DeviceMasters = dms });
     }
-
-    public void SetMaster(double db) => CommitMixer(Settings with { MasterGainDb = db });
 
     public void PlayOutputTestTone(Guid channelId) => RunBackend(() => _backend.PlayOutputTestToneAsync(channelId));
 
@@ -499,11 +532,11 @@ internal sealed class AppModel
 
     public bool CanMoveChannel(bool input, int idx, int dir)
     {
-        int count = input ? InputCount : OutputCount;
+        var channels = input ? Settings.Inputs : Settings.Outputs;
         int to = idx + dir;
-        if (idx < 0 || idx >= count || to < 0 || to >= count) return false;
-        if (input && (LinkAt(idx) != null || LinkAt(to) != null)) return false;
-        return true;
+        if (idx < 0 || idx >= channels.Count || to < 0 || to >= channels.Count) return false;
+        return channels[idx].DeviceId == null && channels[to].DeviceId == null &&
+            !channels[idx].IsVacant && !channels[to].IsVacant;
     }
 
     public void MoveChannel(bool input, int idx, int dir)
@@ -524,18 +557,38 @@ internal sealed class AppModel
         var outs = Settings.Outputs.ToList();
         var target = input ? ins : outs;
         if (idx < 0 || idx >= target.Count) return;
-        var removedId = target[idx].Id;
-        target.RemoveAt(idx);
+        var channel = target[idx];
+        if (channel.DeviceId is Guid id)
+        {
+            if (Config.AppLinks.FirstOrDefault(a => a.Id == id) is { } app) { RemoveLink(app.FirstChannel); return; }
+            if (Config.Devices.Any(d => d.Id == id)) { RemoveHardwareDevice(id); return; }
+            if (Config.Vaios.Any(v => v.Id == id)) { RemoveVaioSlot(id); return; }
+        }
+
+        bool keepSlot = target.Skip(idx + 1).Any(c => c.DeviceId != null);
+        if (keepSlot) target[idx] = new ChannelDsp { DeviceChannelIndex = idx, AutoCreatedForDevice = true };
+        else target.RemoveAt(idx);
         var m = Settings.MatrixDb.Select(r => (double[])r.Clone()).ToList();
-        if (input && idx < m.Count) m.RemoveAt(idx);
-        else if (!input) for (int i = 0; i < m.Count; i++) m[i] = m[i].Where((_, j) => j != idx).ToArray();
+        if (input && idx < m.Count)
+        {
+            if (keepSlot) Array.Fill(m[idx], double.NegativeInfinity);
+            else m.RemoveAt(idx);
+        }
+        else if (!input)
+        {
+            for (int i = 0; i < m.Count; i++)
+            {
+                if (keepSlot) m[i][idx] = double.NegativeInfinity;
+                else m[i] = m[i].Where((_, j) => j != idx).ToArray();
+            }
+        }
 
         CommitMixer(Settings with
         {
             Inputs = ins,
             Outputs = outs,
             MatrixDb = m.ToArray(),
-            BusRoutes = Settings.BusRoutes.Where(r => r.Source.Id != removedId && r.Target.Id != removedId).ToArray(),
+            BusRoutes = Settings.BusRoutes.Where(r => r.Source.Id != channel.Id && r.Target.Id != channel.Id).ToArray(),
         }, structural: true);
     }
 
@@ -780,23 +833,149 @@ internal sealed class AppModel
         });
     }
 
-    public void RemoveDeckSlot(Guid deckId, Guid itemId)
+    public void MoveDeck(Guid deckId, int insertion)
     {
-        UpdateDeck(deckId, d => d with { Items = d.Items.Where(i => i.ItemId != itemId).ToArray() });
+        var decks = Decks.Decks.ToList();
+        int index = decks.FindIndex(d => d.Id == deckId);
+        if (index < 0) return;
+        int target = Math.Clamp(insertion - (insertion > index ? 1 : 0), 0, decks.Count - 1);
+        if (target == index) return;
+        var deck = decks[index];
+        decks.RemoveAt(index);
+        decks.Insert(target, deck);
+        SaveDecks(Decks with { Decks = decks });
     }
 
-    public void MoveDeckSlot(Guid deckId, Guid itemId, int delta)
+    public void RemoveDeckSlot(Guid deckId, Guid itemId)
     {
         UpdateDeck(deckId, d =>
         {
+            var removed = d.Items.FirstOrDefault(i => i.ItemId == itemId);
+            return d with
+            {
+                Items = d.Items.Where(i => i.ItemId != itemId)
+                    .Select(i => removed?.FaderPairId is { } pair && i.FaderPairId == pair ? i with { FaderPairId = null } : i)
+                    .ToArray(),
+            };
+        });
+    }
+
+    public void MoveDeckSlot(Guid deckId, Guid itemId, int insertion)
+    {
+        UpdateDeck(deckId, d =>
+        {
+            int index = d.Items.ToList().FindIndex(i => i.ItemId == itemId);
+            if (index < 0) return d;
+            int first = index, last = index;
+            if (d.Items[index].FaderPairId is { } pair)
+            {
+                if (first > 0 && d.Items[first - 1].FaderPairId == pair) first--;
+                if (last + 1 < d.Items.Count && d.Items[last + 1].FaderPairId == pair) last++;
+            }
+
+            insertion = Math.Clamp(insertion, 0, d.Items.Count);
+            if (insertion >= first && insertion <= last + 1) return d;
+            if (insertion > 0 && insertion < d.Items.Count &&
+                d.Items[insertion].FaderPairId is { } other && d.Items[insertion - 1].FaderPairId == other)
+                insertion += insertion > last ? 1 : -1;
+
             var items = d.Items.ToList();
-            int idx = items.FindIndex(i => i.ItemId == itemId);
-            int to = idx + delta;
-            if (idx < 0 || to < 0 || to >= items.Count) return d;
-            (items[idx], items[to]) = (items[to], items[idx]);
+            var moving = items.GetRange(first, last - first + 1);
+            items.RemoveRange(first, moving.Count);
+            items.InsertRange(insertion > last ? insertion - moving.Count : insertion, moving);
             return d with { Items = items };
         });
     }
+
+    public void ToggleDeckFaderPair(Guid deckId, Guid itemId)
+    {
+        UpdateDeck(deckId, d =>
+        {
+            var items = d.Items.ToArray();
+            int index = Array.FindIndex(items, i => i.ItemId == itemId);
+            if (index < 0) return d;
+            var first = items[index];
+            if (first.FaderPairId is { } existing)
+            {
+                for (int i = 0; i < items.Length; i++)
+                    if (items[i].FaderPairId == existing) items[i] = items[i] with { FaderPairId = null };
+            }
+            else
+            {
+                if (index + 1 >= items.Length) return d;
+                var second = items[index + 1];
+                if (first.Kind == DeckItemKind.Spacer || second.Kind == DeckItemKind.Spacer ||
+                    first.TargetId == second.TargetId || second.FaderPairId.HasValue) return d;
+                var pair = Guid.NewGuid();
+                items[index] = first with { FaderPairId = pair };
+                items[index + 1] = second with { FaderPairId = pair };
+            }
+            return d with { Items = items };
+        });
+    }
+
+    public bool SetDeckFaderPairGain(DeckSlotItem source, DeckSlotItem peer, double requestedGain)
+    {
+        var settings = Settings;
+        var sourceGain = FindGain(source);
+        var peerGain = FindGain(peer);
+        if (sourceGain == null || peerGain == null) return false;
+
+        double next = ClampGain(requestedGain, sourceGain.Value.Max);
+        double delta = Floor(next) - Floor(sourceGain.Value.Gain);
+        double linked = Db.IsOff(next) ? next : ClampGain(Floor(peerGain.Value.Gain) + delta, peerGain.Value.Max);
+        ApplyGain(source, next);
+        ApplyGain(peer, linked);
+        CommitMixer(settings);
+        return true;
+
+        static double Floor(double db) => Db.IsOff(db) ? -72 : db;
+        static double ClampGain(double db, double max) => Db.IsOff(db) ? double.NegativeInfinity : Math.Clamp(db, -120, max);
+
+        (double Gain, double Max)? FindGain(DeckSlotItem slot) => slot.Kind switch
+        {
+            DeckItemKind.InputChannel => ChannelGain(settings.Inputs, slot.TargetId),
+            DeckItemKind.OutputChannel => ChannelGain(settings.Outputs, slot.TargetId),
+            DeckItemKind.DeviceMaster or DeckItemKind.VaioSlot =>
+                settings.DeviceMasters.FirstOrDefault(d => d.Id == slot.TargetId) is { } device ? (device.GainDb, Theme.FaderMaxDb) : null,
+            DeckItemKind.MixBus => settings.Buses.FirstOrDefault(b => b.Id == slot.TargetId) is { } bus ? (bus.GainDb, Theme.FaderMaxDb) : null,
+            _ => null,
+        };
+
+        static (double Gain, double Max)? ChannelGain(IReadOnlyList<ChannelDsp> channels, Guid id) =>
+            channels.FirstOrDefault(c => c.Id == id) is { } channel ? (channel.GainDb, channel.MaxGainDb) : null;
+
+        void ApplyGain(DeckSlotItem slot, double db)
+        {
+            switch (slot.Kind)
+            {
+                case DeckItemKind.InputChannel:
+                    settings = settings with { Inputs = SetChannelGain(settings.Inputs, slot.TargetId, db) };
+                    break;
+                case DeckItemKind.OutputChannel:
+                    settings = settings with { Outputs = SetChannelGain(settings.Outputs, slot.TargetId, db) };
+                    break;
+                case DeckItemKind.DeviceMaster:
+                case DeckItemKind.VaioSlot:
+                    settings = settings with { DeviceMasters = settings.DeviceMasters.Select(d => d.Id == slot.TargetId ? d with { GainDb = db } : d).ToArray() };
+                    break;
+                case DeckItemKind.MixBus:
+                    settings = settings with { Buses = settings.Buses.Select(b => b.Id == slot.TargetId ? b with { GainDb = db } : b).ToArray() };
+                    break;
+            }
+        }
+
+        static ChannelDsp[] SetChannelGain(IReadOnlyList<ChannelDsp> channels, Guid id, double db) =>
+            channels.Select(c => c.Id == id ? c with { GainDb = db } : c).ToArray();
+    }
+
+    public void RenameDeckSlot(Guid deckId, Guid itemId, string name) =>
+        UpdateDeck(deckId, d => d with
+        {
+            Items = d.Items.Select(i => i.ItemId == itemId
+                ? i with { CustomLabel = string.IsNullOrWhiteSpace(name) ? null : name.Trim() }
+                : i).ToArray(),
+        });
 
     public void ToggleDeckSlotExpanded(Guid deckId, Guid itemId)
     {
@@ -842,20 +1021,40 @@ internal sealed class AppModel
         RunBackend(() => _backend.ApplySystemConfigAsync(next, reopenAudioIfNeeded));
     }
 
-    public int NextFreeEngineChannel(DeviceFlow flow)
+    public int NextFreeEngineChannel(DeviceFlow flow, int count = 2)
     {
-        int devMax = Config.Devices.Where(d => d.Flow == flow).Select(d => d.EngineFirstChannel + d.ChannelCount).DefaultIfEmpty(0).Max();
-        int vaioMax = Config.Vaios.Where(v => v.Flow == flow).Select(v => v.EngineFirstChannel + v.Channels).DefaultIfEmpty(0).Max();
-        int linkMax = flow == DeviceFlow.Capture ? Config.AppLinks.Select(a => a.EndChannel).DefaultIfEmpty(0).Max() : 0;
-        int curCount = flow == DeviceFlow.Capture ? InputCount : OutputCount;
-        return Math.Max(Math.Max(devMax, vaioMax), Math.Max(linkMax, curCount));
+        var channels = flow == DeviceFlow.Capture ? Settings.Inputs : Settings.Outputs;
+        var occupied = Config.Devices.Where(d => d.Flow == flow).Select(d => (First: d.EngineFirstChannel, Count: d.ChannelCount))
+            .Concat(Config.Vaios.Where(v => v.Flow == flow).Select(v => (First: v.EngineFirstChannel, Count: v.Channels)));
+        if (flow == DeviceFlow.Capture)
+            occupied = occupied.Concat(Config.AppLinks.Select(a => (First: a.FirstChannel, Count: a.Count)));
+        var ranges = occupied.ToArray();
+        int first = 0;
+        int free = 0;
+        for (int i = 0; free < count; i++)
+        {
+            if ((i < channels.Count && !channels[i].IsVacant) || ranges.Any(r => i >= r.First && i - r.First < r.Count))
+            {
+                first = i + 1;
+                free = 0;
+            }
+            else free++;
+        }
+        return first;
     }
 
     public AudioDeviceNode AddHardwareDevice(AudioDeviceInfo info, bool loopback = false, int? channels = null)
     {
         var flow = loopback ? DeviceFlow.Capture : info.Flow;
         int count = Math.Clamp(channels ?? Math.Max(1, info.Channels), 1, 32);
-        int first = NextFreeEngineChannel(flow);
+        if (Config.Devices.FirstOrDefault(d => d.Flow == flow && d.Backend == info.Backend &&
+            d.Loopback == loopback && d.DeviceFirstChannel == 0 &&
+            string.Equals(d.EndpointId, info.Id, StringComparison.OrdinalIgnoreCase)) is { } existing)
+        {
+            if (!existing.Enabled) UpdateHardwareDevice(existing.Id, d => d with { Enabled = true });
+            return existing with { Enabled = true };
+        }
+        int first = NextFreeEngineChannel(flow, count);
         var node = new AudioDeviceNode
         {
             Id = Guid.NewGuid(),
@@ -889,10 +1088,12 @@ internal sealed class AppModel
 
     public VaioSlotConfig AddVirtualCableSlot(AudioDeviceInfo endpoint, string? customName = null, bool loopback = false)
     {
-        var flow = loopback ? DeviceFlow.Capture : endpoint.Flow;
-        int count = loopback ? Math.Clamp(endpoint.Channels, 1, 2) : Math.Clamp(Math.Max(2, endpoint.Channels), 1, 16);
-        int first = NextFreeEngineChannel(flow);
-        if (loopback && string.IsNullOrWhiteSpace(customName))
+        bool native = endpoint.IsNxMixEndpoint && (loopback || endpoint.NativeOutputPort > 0);
+        var flow = loopback ? DeviceFlow.Capture : native ? DeviceFlow.Render : endpoint.Flow;
+        int count = native ? AudioDeviceInfo.NxMixMaxChannels :
+            loopback ? Math.Clamp(endpoint.Channels, 1, 2) : Math.Clamp(Math.Max(2, endpoint.Channels), 1, 16);
+        int first = NextFreeEngineChannel(flow, count);
+        if (loopback && !native && string.IsNullOrWhiteSpace(customName))
         {
             int number = 1;
             while (Config.Vaios.Any(v => string.Equals(v.Name, $"NX-MIX In {number}", StringComparison.OrdinalIgnoreCase)))
@@ -903,7 +1104,7 @@ internal sealed class AppModel
         {
             Id = Guid.NewGuid(),
             Name = string.IsNullOrWhiteSpace(customName) ? endpoint.Name : customName.Trim(),
-            Kind = VaioSlotKind.ExternalDriverEndpoint,
+            Kind = native ? VaioSlotKind.NxMixKernelDriver : VaioSlotKind.ExternalDriverEndpoint,
             Flow = flow,
             Loopback = loopback,
             Channels = count,
@@ -1060,7 +1261,7 @@ internal sealed class AppModel
 
     public string? BindNewAppQuick(string rawExe, int count = 2, string? displayName = null)
     {
-        int first = NextFreeEngineChannel(DeviceFlow.Capture);
+        int first = NextFreeEngineChannel(DeviceFlow.Capture, Math.Clamp(count, 1, 2));
         return SetLink(first, rawExe, count, displayName);
     }
 
@@ -1224,7 +1425,7 @@ internal sealed class AppModel
         if (RunInline && _backend is DaemonEngineController inProc)
             inProc.PumpTelemetryNow();
 
-        if (_backend.TryReadTelemetry(_inPeaks, _outPeaks, _busPeaks, _devPeaks, _specPreDb, _specPostDb, out var meta))
+        if (_backend.TryReadTelemetry(_inPeaks, _outPeaks, _busPeaks, _devPeaks, _specPreDb, _specPostDb, out var meta, _busChannelPeaks))
         {
             _telemetryMeta = meta;
             _telemetryFrameSeq++;

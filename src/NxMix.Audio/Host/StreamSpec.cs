@@ -21,6 +21,7 @@ internal sealed class StreamSpec
     public int? SampleRate { get; init; }
     public int? BufferFrames { get; init; }
     public bool? Exclusive { get; init; }
+    public int NativeOutputPort { get; init; }
 
     /// <summary>Summe aller Kanaele = Breite eines Ringpuffer-Frames.</summary>
     public int Slots { get; private set; }

@@ -433,14 +433,14 @@ internal sealed class UiRoot : Widget
         Shell.SetCapture(false);
     }
 
-    public void MouseWheel(float x, float y, float notches, bool ctrl, bool shift, bool alt)
+    public void MouseWheel(float x, float y, float notches, bool ctrl, bool shift, bool alt, bool horizontal = false)
     {
         _mx = x; _my = y;
         var e = Ev(x, y, 0, ctrl, shift, alt, notches);
         if (Captured != null) return;
         for (var w = HitTest(x, y); w != null; w = w.Parent)
         {
-            if (w.OnMouseWheel(e)) { Dirty = true; break; }
+            if (horizontal ? w.OnHorizontalWheel(e) : w.OnMouseWheel(e)) { Dirty = true; break; }
             if (w is Overlay) break;
         }
         _tipVisible = false; _tipSince = Time;
@@ -527,12 +527,7 @@ internal sealed class UiRoot : Widget
     }
 
     // ---- Snapshot-Schnellwahl in der TopBar ----------------------------------------------------
-    public void QuickSaveSnapshot()
-    {
-        string name = $"Szene {Model.Snapshots.Count + 1}";
-        Model.SaveSnapshot(null, name, "Schnell gespeichert aus Live-Mix", "#3B82F6", 150.0, SnapshotScopeFlags.All,
-            s => Notify.Flash($"Snapshot „{s.Name}“ gespeichert."));
-    }
+    public void QuickSaveSnapshot() => ((SnapshotsPage)Pages[TabSnapshots]).CreateNewSnapshot();
 
     public void ShowQuickSnapshotMenu(RectF anchor)
     {

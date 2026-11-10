@@ -2,6 +2,7 @@ using NxMix.Audio;
 using NxMix.Audio.Apps;
 using NxMix.Audio.Host;
 using NxMix.Audio.Interop;
+using NxMix.Engine;
 
 namespace NxMix.Tests.Audio;
 
@@ -247,6 +248,23 @@ public class AppLinkEngineTests : IDisposable
         Assert.Equal(AppLinkState.Capturing, Only(e).State);
         Assert.Single(e.Slots[0].Lanes);
         Assert.Equal("lane:100", _events[0]);
+
+        var settings = MixerSettings.Create(48000, 8, 2);
+        foreach (var row in settings.MatrixDb) Array.Fill(row, double.NegativeInfinity);
+        settings.MatrixDb[2][0] = 0;
+        settings.MatrixDb[3][1] = 0;
+        var processor = new MixerEngine(settings);
+        var mix = new MixCore(processor, 48000, 480, [], [], e.Slots);
+        mix.Prepare();
+        var samples = Enumerable.Repeat(0.25f, 960).ToArray();
+        var ring = e.Slots[0].Lanes[0].Ring!;
+        for (int i = 0; i < 20; i++)
+        {
+            ring.Write(samples, 480);
+            mix.ProcessChunk(480);
+        }
+        Assert.Contains(mix.Outputs[0], sample => sample > 0.1f);
+        Assert.Contains(mix.Outputs[1], sample => sample > 0.1f);
     }
 
     [Fact]

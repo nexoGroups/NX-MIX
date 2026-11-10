@@ -16,6 +16,12 @@ public sealed record AudioDeviceInfo(string Id, string Name, DeviceFlow Flow, in
     public bool IsVirtualEndpoint { get; init; }
     /// <summary>Erkannter Treiber-/Hardware-Anbieter oder Enumerator (z. B. "ASIO", "VB-Audio", "USB-Audio", "HDAUDIO").</summary>
     public string? DriverProvider { get; init; }
+    public int NativeOutputPort { get; init; }
+
+    public const string NxMixDriverProvider = "NX-MIX WaveRT";
+    public const int NxMixMaxChannels = 8;
+    public bool IsNxMixEndpoint => DriverProvider == NxMixDriverProvider;
+    public int NxMixActiveChannels => Channels is 6 or 8 ? Channels : 2;
 }
 
 /// <summary>Eine Anbindung eines Geraets an Engine-Kanaele.
@@ -27,6 +33,7 @@ public sealed record DeviceBinding(string DeviceId, DeviceFlow Flow, int DeviceF
     public int? SampleRate { get; init; }
     public int? BufferFrames { get; init; }
     public bool? Exclusive { get; init; }
+    public int NativeOutputPort { get; init; }
 }
 
 public sealed record AudioHostConfig(

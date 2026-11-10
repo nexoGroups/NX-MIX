@@ -386,11 +386,12 @@ internal sealed unsafe class MainWindow : IShell
                 _root?.MouseUp(LoWord(lParam) / _scale, HiWord(lParam) / _scale, 1, Ctrl, Shift, Alt);
                 return 0;
             case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
                 {
                     var pt = new POINT { X = LoWord(lParam), Y = HiWord(lParam) };
                     ScreenToClient(hwnd, ref pt);
                     float notches = HiWord(wParam) / 120f;
-                    _root?.MouseWheel(pt.X / _scale, pt.Y / _scale, notches, Ctrl, Shift, Alt);
+                    _root?.MouseWheel(pt.X / _scale, pt.Y / _scale, notches, Ctrl, Shift, Alt, horizontal: msg == WM_MOUSEHWHEEL);
                     return 0;
                 }
             case WM_CAPTURECHANGED:

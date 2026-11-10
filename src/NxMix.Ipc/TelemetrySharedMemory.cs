@@ -8,7 +8,7 @@ namespace NxMix.Ipc;
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public unsafe struct TelemetrySharedBlock
 {
-    public const uint LayoutVersion = 2;
+    public const uint LayoutVersion = 3;
     public const uint MagicValue = 0x584D584E; // 'NXMX'
     public const int MaxInputs = 128;
     public const int MaxOutputs = 128;
@@ -44,6 +44,7 @@ public unsafe struct TelemetrySharedBlock
     public fixed float InputPeaks[MaxInputs];
     public fixed float OutputPeaks[MaxOutputs];
     public fixed float BusPeaks[MaxBuses];
+    public fixed float BusChannelPeaks[MaxBuses];
     public fixed float DeviceMasterPeaks[MaxDeviceMasters];
     public fixed float SpectrumPreDb[SpectrumPoints];
     public fixed float SpectrumPostDb[SpectrumPoints];
@@ -142,7 +143,8 @@ public sealed unsafe class TelemetrySharedMemoryWriter : IDisposable
         ReadOnlySpan<float> devPeaks,
         in TelemetrySnapshotFrame meta,
         ReadOnlySpan<float> specPre,
-        ReadOnlySpan<float> specPost)
+        ReadOnlySpan<float> specPost,
+        ReadOnlySpan<float> busChannelPeaks = default)
     {
         if (_disposed || _ptr == null) return;
         var b = (TelemetrySharedBlock*)_ptr;
@@ -169,6 +171,7 @@ public sealed unsafe class TelemetrySharedMemoryWriter : IDisposable
         int ni = Math.Min(inPeaks.Length, TelemetrySharedBlock.MaxInputs);
         int no = Math.Min(outPeaks.Length, TelemetrySharedBlock.MaxOutputs);
         int nb = Math.Min(busPeaks.Length, TelemetrySharedBlock.MaxBuses);
+        int nbc = Math.Min(busChannelPeaks.Length, TelemetrySharedBlock.MaxBuses);
         int nd = Math.Min(devPeaks.Length, TelemetrySharedBlock.MaxDeviceMasters);
         b->InputCount = ni;
         b->OutputCount = no;
@@ -183,6 +186,8 @@ public sealed unsafe class TelemetrySharedMemoryWriter : IDisposable
 
         for (int i = 0; i < nb; i++) b->BusPeaks[i] = busPeaks[i];
         for (int i = nb; i < TelemetrySharedBlock.MaxBuses; i++) b->BusPeaks[i] = 0f;
+        for (int i = 0; i < nbc; i++) b->BusChannelPeaks[i] = busChannelPeaks[i];
+        for (int i = nbc; i < TelemetrySharedBlock.MaxBuses; i++) b->BusChannelPeaks[i] = 0f;
 
         for (int i = 0; i < nd; i++) b->DeviceMasterPeaks[i] = devPeaks[i];
         for (int i = nd; i < TelemetrySharedBlock.MaxDeviceMasters; i++) b->DeviceMasterPeaks[i] = 0f;
@@ -249,7 +254,8 @@ public sealed unsafe class TelemetrySharedMemoryReader : IDisposable
         Span<float> devPeaks,
         Span<float> specPre,
         Span<float> specPost,
-        out TelemetrySnapshotFrame meta)
+        out TelemetrySnapshotFrame meta,
+        Span<float> busChannelPeaks = default)
     {
         meta = default;
         if (_disposed || !EnsureMapped()) return false;
@@ -281,6 +287,9 @@ public sealed unsafe class TelemetrySharedMemoryReader : IDisposable
             int nb = Math.Min(busPeaks.Length, TelemetrySharedBlock.MaxBuses);
             for (int i = 0; i < nb; i++) busPeaks[i] = copy.BusPeaks[i];
             if (nb < busPeaks.Length) busPeaks[nb..].Clear();
+            int nbc = Math.Min(busChannelPeaks.Length, TelemetrySharedBlock.MaxBuses);
+            for (int i = 0; i < nbc; i++) busChannelPeaks[i] = copy.BusChannelPeaks[i];
+            if (nbc < busChannelPeaks.Length) busChannelPeaks[nbc..].Clear();
 
             int nd = Math.Min(devPeaks.Length, TelemetrySharedBlock.MaxDeviceMasters);
             for (int i = 0; i < nd; i++) devPeaks[i] = copy.DeviceMasterPeaks[i];

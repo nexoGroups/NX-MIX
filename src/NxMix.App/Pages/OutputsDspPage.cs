@@ -106,7 +106,22 @@ internal sealed class OutputsDspPage : Page
         ? $"Ausgang {_outIdx + 1:00}: {_m.DisplayName(false, ClampedOutIdx)}  ·  Live-Weiche, PEQ, REW & Laufzeit ohne Audio-Stopp"
         : "Keine Ausgangskanäle konfiguriert";
 
-    int ClampedOutIdx => _m.OutputCount == 0 ? 0 : Math.Clamp(_outIdx, 0, _m.OutputCount - 1);
+    int ClampedOutIdx
+    {
+        get
+        {
+            int index = Math.Clamp(_outIdx, 0, Math.Max(0, _m.OutputCount - 1));
+            int next = FindOutput(index, 1);
+            return next >= 0 ? next : Math.Max(0, FindOutput(index, -1));
+        }
+    }
+
+    int FindOutput(int start, int step)
+    {
+        for (int i = start; i >= 0 && i < _m.OutputCount; i += step)
+            if (_m.IsChannelVisible(_m.Settings.Outputs[i])) return i;
+        return -1;
+    }
 
     public OutputsDspPage(AppModel m)
     {
@@ -150,8 +165,8 @@ internal sealed class OutputsDspPage : Page
             new("Leisen Testton abspielen …", null, ConfirmOutputTest, _m.HostRunning && !_m.PanicMuted),
         ];
 
-        _prevOut.Clicked += _ => SelectOutputChannel(ClampedOutIdx - 1);
-        _nextOut.Clicked += _ => SelectOutputChannel(ClampedOutIdx + 1);
+        _prevOut.Clicked += _ => SelectOutputChannel(FindOutput(ClampedOutIdx - 1, -1));
+        _nextOut.Clicked += _ => SelectOutputChannel(FindOutput(ClampedOutIdx + 1, 1));
         _outDd.Text = () =>
         {
             if (_m.OutputCount == 0) return "Kein Ausgang vorhanden";
@@ -166,6 +181,22 @@ internal sealed class OutputsDspPage : Page
 
         WireCrossoverControls();
         WirePeqControls();
+        _graph.SelectBand = index =>
+        {
+            _peqBandIdx = index;
+            _compactTab = 1;
+            Layout();
+            Invalidate();
+        };
+        _graph.MoveBand = (index, hz, db) =>
+        {
+            _peqBandIdx = index;
+            ModifySelectedBand(b => b with
+            {
+                FrequencyHz = hz,
+                GainDb = b.Type is FilterType.Peak or FilterType.LowShelf or FilterType.HighShelf ? db : b.GainDb,
+            });
+        };
         WireRewControls();
         WireDelayProtectionControls();
 
@@ -176,7 +207,8 @@ internal sealed class OutputsDspPage : Page
 
     public void SelectOutputChannel(int outputChannelIndex)
     {
-        if (_m.OutputCount == 0) { _outIdx = 0; return; }
+        if ((uint)outputChannelIndex >= (uint)_m.OutputCount || !_m.IsChannelVisible(_m.Settings.Outputs[outputChannelIndex])) return;
+        _graph.EndBandDrag();
         _outIdx = Math.Clamp(outputChannelIndex, 0, _m.OutputCount - 1);
         _peqBandIdx = 0;
         if (Visible)
@@ -331,6 +363,7 @@ internal sealed class OutputsDspPage : Page
         {
             int idx = i;
             var ch = _m.Channel(false, idx);
+            if (!_m.IsChannelVisible(ch)) continue;
             string owner = _m.ChannelOwnerTitle(ch);
             items.Add(new MenuItem(
                 $"OUT {idx + 1:00} · {_m.DisplayName(false, idx)}",
@@ -742,37 +775,39 @@ internal sealed class OutputsDspPage : Page
         _nextOut.Bounds = new RectF(_outDd.Bounds.Right + 4, topY, ch, ch);
 
         bool hasOut = _m.OutputCount > 0;
-        _prevOut.Enabled = hasOut && ClampedOutIdx > 0;
-        _nextOut.Enabled = hasOut && ClampedOutIdx + 1 < _m.OutputCount;
+        _prevOut.Enabled = hasOut && FindOutput(ClampedOutIdx - 1, -1) >= 0;
+        _nextOut.Enabled = hasOut && FindOutput(ClampedOutIdx + 1, 1) >= 0;
         _outDd.Enabled = _spectrumDd.Enabled = hasOut;
         _channelActions.Enabled = hasOut;
 
         // Spektrum-Graph oben
         float graphY = topY + ch + 8;
-        float availAfterTop = Math.Max(220f, area.Bottom - graphY);
-        float graphH = Math.Clamp(availAfterTop * 0.38f, 122f, 240f);
+        float upperH = 36 + 3 * ch;
+        float lowerH = Math.Max(upperH, 58 + 2 * ch);
+        float available = area.Bottom - graphY - 8;
+        _grid2x2 = area.W >= 860f && available >= 150 + upperH + gap + lowerH;
+        float reserved = _grid2x2 ? upperH + gap + lowerH : ch + 6 + lowerH;
+        float graphH = Math.Clamp(available - reserved, 100, 340);
         _graph.Bounds = new RectF(area.X, graphY, area.W, graphH);
 
         float rackTop = _graph.Bounds.Bottom + 8;
-        float remH = Math.Max(120f, area.Bottom - rackTop);
-        _grid2x2 = remH >= 316f && area.W >= 860f;
         _modSeg.Visible = !_grid2x2;
 
         if (_grid2x2)
         {
             float cw = MathF.Floor((area.W - gap) / 2f);
-            float rh = MathF.Floor((remH - gap) / 2f);
+            float rh = upperH;
             _cardRects[0] = new RectF(area.X, rackTop, cw, rh);
             _cardRects[1] = new RectF(area.X + cw + gap, rackTop, area.W - cw - gap, rh);
-            _cardRects[2] = new RectF(area.X, rackTop + rh + gap, cw, remH - rh - gap);
-            _cardRects[3] = new RectF(area.X + cw + gap, rackTop + rh + gap, area.W - cw - gap, remH - rh - gap);
+            _cardRects[2] = new RectF(area.X, rackTop + rh + gap, cw, lowerH);
+            _cardRects[3] = new RectF(area.X + cw + gap, rackTop + rh + gap, area.W - cw - gap, lowerH);
             for (int k = 0; k < 4; k++) SetCardWidgetsVisible(k, true);
         }
         else
         {
             _modSeg.SetSelected(_compactTab);
             _modSeg.Bounds = new RectF(area.X, rackTop, area.W, ch);
-            var single = new RectF(area.X, _modSeg.Bounds.Bottom + 6, area.W, Math.Max(110f, area.Bottom - (_modSeg.Bounds.Bottom + 6)));
+            var single = new RectF(area.X, _modSeg.Bounds.Bottom + 6, area.W, _compactTab == 2 ? lowerH : upperH);
             for (int k = 0; k < 4; k++)
             {
                 _cardRects[k] = single;
@@ -781,6 +816,8 @@ internal sealed class OutputsDspPage : Page
         }
 
         var c = hasOut ? _m.Channel(false, ClampedOutIdx) : new ChannelDsp();
+        _graph.Bands = GetPeqBands(c);
+        _graph.SelectedBand = _peqBandIdx;
         LayoutCard0Crossover(_cardRects[0], c, hasOut);
         LayoutCard1Peq(_cardRects[1], c, hasOut);
         LayoutCard2Rew(_cardRects[2], c, hasOut);

@@ -221,6 +221,7 @@ public sealed record DeckSlotItem
     public Guid TargetId { get; init; }
     public string? CustomLabel { get; init; }
     public bool ExpandedInline { get; init; }
+    public Guid? FaderPairId { get; init; }
 }
 
 public sealed record UiDeckDefinition

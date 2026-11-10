@@ -132,8 +132,7 @@ internal sealed class VirtualIoPage : Page
         if (Root is not { } root) return;
         var items = new List<MenuItem>();
         var virtuals = _m.VirtualEndpointDevices;
-        var playback = virtuals.Where(d => d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows &&
-            d.DriverProvider == "NX-MIX WaveRT").ToList();
+        var playback = virtuals.Where(d => d.Flow == DeviceFlow.Render && d.IsNxMixEndpoint).ToList();
         if (playback.Count > 0)
         {
             items.Add(MenuItem.Header("Windows-Wiedergabe an NX-MIX In senden"));
@@ -152,14 +151,31 @@ internal sealed class VirtualIoPage : Page
             items.Add(MenuItem.Sep);
         }
 
+        var recording = virtuals.Where(d => d.IsNxMixEndpoint && d.NativeOutputPort > 0).ToList();
+        if (recording.Count > 0)
+        {
+            items.Add(MenuItem.Header("NX-MIX Out an Windows-Aufnahmegeräte senden"));
+            foreach (var endpoint in recording)
+            {
+                bool bound = EndpointIsBound(endpoint.Id);
+                items.Add(new MenuItem(endpoint.Name, bound ? "bereits eingebunden" : "als Mixer-Ausgang", () =>
+                {
+                    _m.AddVirtualCableSlot(endpoint, $"NX-MIX Out {endpoint.NativeOutputPort}");
+                    root.Notify.Flash($"Wähle „{endpoint.Name}“ als Aufnahmegerät in deiner App.");
+                }, enabled: !bound) { Icon = Icon.Speaker });
+            }
+            items.Add(MenuItem.Sep);
+        }
+
+        var external = virtuals.Where(d => !d.IsNxMixEndpoint).ToList();
         items.Add(MenuItem.Header("Weitere virtuelle Ein- und Ausgänge"));
-        if (virtuals.Count == 0)
+        if (external.Count == 0)
         {
             items.Add(MenuItem.Header("Kein virtueller Audiotreiber (z. B. VB-CABLE / VAC) installiert"));
         }
         else
         {
-            foreach (var ep in virtuals)
+            foreach (var ep in external)
             {
                 var e = ep;
                 bool alreadyBound = EndpointIsBound(e.Id);
@@ -387,6 +403,20 @@ internal sealed class VirtualIoPage : Page
         }
     }
 
+    static RectF CableNameRect(RectF row, VaioSlotConfig slot)
+    {
+        string badge = slot.Flow == DeviceFlow.Capture ? "VAIO IN" : "VAIO OUT";
+        float left = row.X + 16 + Draw.ChipWidth(badge, false, Theme.MicroStrong);
+        return new RectF(left, row.Y + 6, Math.Max(30, CableActionRects(row).Gain.X - left - 8), 20);
+    }
+
+    static RectF AppNameRect(RectF row, LinkView view)
+    {
+        float left = row.X + 50;
+        float statusWidth = Draw.ChipWidth(LinkLook.Text(view.State), true, Theme.MicroStrong);
+        return new RectF(left, row.Y + 6, Math.Max(30, AppActionRects(row).Edit.X - 14 - statusWidth - left), 19);
+    }
+
     public override void OnMouseDown(in MouseEvent e)
     {
         if (e.Button != 0) return;
@@ -397,6 +427,12 @@ internal sealed class VirtualIoPage : Page
             var slot = _m.Config.Vaios[_hotCable];
             var acts = CableActionRects(CableRowRect(_hotCable));
             var dm = _m.GetDeviceMaster(slot.Id);
+            var name = CableNameRect(CableRowRect(_hotCable), slot);
+            if (name.Contains(e.X, e.Y))
+            {
+                Root?.BeginEdit(name, slot.Name, Theme.BodyMedium, text => _m.RenameDeviceFader(slot.Id, text), 48);
+                return;
+            }
             switch (_hotCableAction)
             {
                 case 0:
@@ -425,7 +461,11 @@ internal sealed class VirtualIoPage : Page
         {
             var entry = _m.Config.AppLinks[_hotApp];
             var acts = AppActionRects(AppRowRect(_hotApp));
-            if (_hotAppAction == 0 && Root != null)
+            var link = new AppLink(entry.ExeName, entry.FirstChannel, entry.Count, entry.DisplayName);
+            var name = AppNameRect(AppRowRect(_hotApp), _m.ViewOf(link));
+            if (name.Contains(e.X, e.Y))
+                Root?.BeginEdit(name, entry.Title, Theme.BodyMedium, text => _m.RenameDeviceFader(entry.Id, text), 48);
+            else if (_hotAppAction == 0 && Root != null)
             {
                 AppLinkPicker.Show(Root, _m, entry.FirstChannel, acts.Edit);
             }
@@ -482,15 +522,14 @@ internal sealed class VirtualIoPage : Page
                 g.StrokeRound(r, 9, Theme.Border);
 
                 var acts = CableActionRects(r);
-                float chipW = Draw.Chip(g, r.X + 10, r.CY - 9,
+                Draw.Chip(g, r.X + 10, r.CY - 9,
                     slot.Flow == DeviceFlow.Capture ? "VAIO IN" : "VAIO OUT",
                     slot.Flow == DeviceFlow.Capture ? Theme.Teal : Theme.Accent,
                     dot: false, Theme.MicroStrong);
 
-                float tx = r.X + 16 + chipW;
-                float tw = Math.Max(30, acts.Gain.X - tx - 8);
-                g.Text(slot.Name, new RectF(tx, r.Y + 6, tw, 20), Theme.BodyMedium, slot.Enabled ? Theme.Text : Theme.TextTertiary);
-                string channels = $"{slot.Channels}ch · Engine {slot.EngineFirstChannel + 1}..{slot.EngineFirstChannel + slot.Channels}";
+                g.Text(slot.Name, CableNameRect(r, slot), Theme.BodyMedium, slot.Enabled ? Theme.Text : Theme.TextTertiary);
+                int activeChannels = _m.ActiveVaioChannels(slot);
+                string channels = $"{activeChannels}ch · Engine {slot.EngineFirstChannel + 1}..{slot.EngineFirstChannel + activeChannels}";
                 string detail = slot.Loopback ? $"Windows: {_m.FindDevice(slot.EndpointOrExe)?.Name ?? "Gerät offline"} · {channels}" : channels;
                 g.Text(detail,
                     new RectF(r.X + 10, r.Bottom - 20, Math.Max(40, acts.Gain.X - r.X - 16), 16), Theme.Caption, Theme.TextSecondary);
@@ -556,12 +595,12 @@ internal sealed class VirtualIoPage : Page
                 float tx = tile.Right + 10;
                 bool hasDetail = !string.IsNullOrWhiteSpace(view.Message);
                 float statusY = hasDetail ? r.Y + 15 : r.CY;
-                float statusW = Draw.Chip(g, acts.Edit.X - 8, statusY, LinkLook.Text(view.State), col, dot: true, Theme.MicroStrong, alignRight: true);
-                float tw = Math.Max(30, acts.Edit.X - 14 - statusW - tx);
+                Draw.Chip(g, acts.Edit.X - 8, statusY, LinkLook.Text(view.State), col, dot: true, Theme.MicroStrong, alignRight: true);
+                var name = AppNameRect(r, view);
 
-                g.Text(link.Title, new RectF(tx, r.Y + 6, tw, 19), Theme.BodyMedium, Theme.Text);
+                g.Text(link.Title, name, Theme.BodyMedium, Theme.Text);
                 string subtitle = hasDetail ? $"{LinkLook.Target(link)}  ·  {view.Message}" : $"{entry.ExeName}  ·  {LinkLook.Target(link)}";
-                float subtitleWidth = hasDetail ? acts.Edit.X - 8 - tx : tw;
+                float subtitleWidth = hasDetail ? acts.Edit.X - 8 - tx : name.W;
                 g.Text(subtitle, new RectF(tx, r.Bottom - 20, Math.Max(30, subtitleWidth), 16), Theme.Caption, Theme.TextSecondary);
 
                 Draw.ButtonLook(g, acts.Edit, "Ändern", ButtonStyle.Gray, true, hot && _hotAppAction == 0, font: Theme.MicroStrong);

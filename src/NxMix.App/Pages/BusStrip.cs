@@ -15,30 +15,47 @@ internal sealed class BusStrip : Widget
     readonly Toggle _mute = new("M", () => Theme.Red) { Tooltip = "Bus stummschalten" };
     readonly Toggle _solo = new("S", () => Theme.Yellow) { ActiveText = () => Theme.Rgb(0x1A1B1E), Tooltip = "Bus Solo" };
     readonly Fader _fader = new();
-    readonly Meter _meter = new() { ExtraTooltip = "Mix-Bus Summenpegel" };
+    readonly StripMeters _meters;
+    readonly int _channelCount;
+    public float ExtraMeterWidth => _meters.ExtraWidth;
+    public Action<string>? RenameDeckSlot;
+    public Func<double, bool>? ApplyPairedGain;
+    public string? CustomDeckLabel;
     readonly ValueBox _value = new();
 
     public BusStrip(AppModel m, Guid id)
     {
         _m = m; BusId = id;
-        Add(_name); Add(_patch); Add(_mute); Add(_solo); Add(_meter); Add(_fader); Add(_value);
-        _name.Clicked += () => { if (Root is { } r) BusSheet.Show(r, m, id); };
+        _channelCount = m.Settings.Buses.First(b => b.Id == id).Channels;
+        _meters = new StripMeters(this, _channelCount);
+        Add(_name); Add(_patch); Add(_mute); Add(_solo); Add(_fader); Add(_value);
+        _name.Clicked += () => Root?.BeginEdit(_name.Bounds, _name.Text, _name.Font, text =>
+        {
+            if (RenameDeckSlot is { } rename) rename(text);
+            else if (!string.IsNullOrWhiteSpace(text)) m.UpdateBus(id, b => b with { Name = text.Trim() });
+        }, 40, align: HAlign.Center);
         _patch.Clicked += () => { if (Root is { } r) BusSheet.Show(r, m, id); };
         _mute.Toggled += on => m.UpdateBus(id, b => b with { Mute = on });
         _solo.Toggled += on => m.UpdateBus(id, b => b with { Solo = on });
-        _fader.Changed += value => m.UpdateBus(id, b => b with { GainDb = Db.IsOff(value) ? double.NegativeInfinity : Math.Clamp(value, -120, 12) });
+        _fader.Changed += SetGain;
         _value.Typed += text =>
         {
             if (Db.TryParse(text, out var v))
-                m.UpdateBus(id, b => b with { GainDb = Db.IsOff(v) ? double.NegativeInfinity : Math.Clamp(v, -120, 12) });
+                SetGain(v);
         };
+    }
+
+    void SetGain(double db)
+    {
+        if (ApplyPairedGain?.Invoke(db) != true)
+            _m.UpdateBus(BusId, b => b with { GainDb = Db.IsOff(db) ? double.NegativeInfinity : Math.Clamp(db, -120, 12) });
     }
 
     public void Sync()
     {
         var bus = _m.Settings.Buses.FirstOrDefault(b => b.Id == BusId);
         if (bus == null) return;
-        _name.Text = bus.Name;
+        _name.Text = CustomDeckLabel ?? bus.Name;
         _mute.SetChecked(bus.Mute);
         _solo.SetChecked(bus.Solo);
         _fader.SetValue(bus.GainDb);
@@ -46,7 +63,14 @@ internal sealed class BusStrip : Widget
         _value.TextColor = !Db.IsOff(bus.GainDb) && bus.GainDb > 0.05 ? Theme.Yellow : null;
     }
 
-    public bool FeedMeter(float peak, float dt) => _meter.Feed(peak, dt);
+    public bool FeedMeters(float dt)
+    {
+        var peaks = _m.GetBusChannelPeaks(BusId);
+        bool changed = false;
+        for (int i = 0; i < _channelCount; i++)
+            changed |= _meters.Feed(i, i < peaks.Length ? peaks[i] : 0, dt);
+        return changed;
+    }
 
     public override void Layout()
     {
@@ -72,10 +96,9 @@ internal sealed class BusStrip : Widget
         _value.Bounds = new RectF(x0, by, w, rh);
 
         float fy = y, fh = Math.Max(20, by - 8 - fy);
-        float mw = Theme.MeterW;
-        _meter.Bounds = new RectF(b.Right - pad - mw - 2, fy + 4, mw, Math.Max(10, fh - 8));
+        _meters.Layout(b.Right - pad - 2, fy + 4, Math.Max(10, fh - 8));
         _fader.ShowLabels = b.W >= 68;
-        _fader.Bounds = new RectF(x0, fy, Math.Max(10, _meter.Bounds.X - x0 - 4), fh);
+        _fader.Bounds = new RectF(x0, fy, Math.Max(10, _meters.Bounds.X - x0 - 4), fh);
         foreach (var c in Children) c.Layout();
     }
 

@@ -10,7 +10,7 @@ public sealed class DeviceCatalog : IDeviceCatalog
     {
         try
         {
-            return ComThread.Run(EnumerateAll, 20000);
+            return ComThread.Run(() => EnumerateAll(includeAsio: true), 20000);
         }
         catch
         {
@@ -18,7 +18,10 @@ public sealed class DeviceCatalog : IDeviceCatalog
         }
     }
 
-    private static IReadOnlyList<AudioDeviceInfo> EnumerateAll()
+    public IReadOnlyList<AudioDeviceInfo> ListWindows() =>
+        ComThread.Run(() => EnumerateAll(includeAsio: false), 5000);
+
+    private static IReadOnlyList<AudioDeviceInfo> EnumerateAll(bool includeAsio)
     {
         var result = new List<AudioDeviceInfo>();
         IMMDeviceEnumerator? enumerator = null;
@@ -39,7 +42,10 @@ public sealed class DeviceCatalog : IDeviceCatalog
         {
             WasapiEndpoint.ReleaseCom(enumerator);
         }
-        try { result.AddRange(AsioCatalog.List()); } catch { }
+        if (includeAsio)
+        {
+            try { result.AddRange(AsioCatalog.List()); } catch { }
+        }
         return result;
     }
 
@@ -67,15 +73,19 @@ public sealed class DeviceCatalog : IDeviceCatalog
                     if (collection.Item(i, out device) < 0 || device == null) continue;
                     if (device.GetId(out string id) < 0) continue;
                     string name = DeviceNames.ReadFriendlyName(device) ?? id;
-                    if (!DeviceNames.TryReadDeviceFormat(device, out int channels, out int rate))
-                        TryReadMixFormat(device, out channels, out rate);
                     var (isVirtual, provider) = DeviceNames.ClassifyEndpoint(device, name);
+                    bool nxMix = provider == AudioDeviceInfo.NxMixDriverProvider;
+                    int channels = 0, rate = 0;
+                    if (nxMix) TryReadMixFormat(device, out channels, out rate);
+                    if (channels == 0 && !DeviceNames.TryReadDeviceFormat(device, out channels, out rate) && !nxMix)
+                        TryReadMixFormat(device, out channels, out rate);
                     bool isDefault = defaultId != null && string.Equals(defaultId, id, StringComparison.OrdinalIgnoreCase);
                     result.Add(new AudioDeviceInfo(id, name, flow, channels, rate, isDefault)
                     {
                         Backend = AudioBackend.Windows,
                         IsVirtualEndpoint = isVirtual,
                         DriverProvider = provider,
+                        NativeOutputPort = nxMix && flow == DeviceFlow.Capture ? DeviceNames.ReadNxMixOutputPort(device, name) : 0,
                     });
                 }
                 catch

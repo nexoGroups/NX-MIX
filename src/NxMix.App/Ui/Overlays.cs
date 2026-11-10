@@ -15,6 +15,7 @@ internal sealed class MenuItem
     public bool Checked;
     public bool Danger { get; set; }
     public Icon Icon;
+    public Color4? Swatch;
 
     public MenuItem(string text, string? shortcut, Action? action, bool enabled = true) { Text = text; Shortcut = shortcut; Action = action; Enabled = enabled; }
     public static MenuItem Sep => new("", null, null) { IsSeparator = true };
@@ -43,7 +44,7 @@ internal sealed class PopupMenu : Overlay
         _items = items.Count > 0 ? items : new List<MenuItem> { MenuItem.Header("Keine Einträge") };
         _minWidth = minWidth;
         _rowOffsets = new float[_items.Count];
-        _hasIcons = _items.Any(i => i.Icon != Icon.None || i.Checked);
+        _hasIcons = _items.Any(i => i.Icon != Icon.None || i.Checked || i.Swatch.HasValue);
     }
 
     public static PopupMenu Show(UiRoot root, RectF anchor, List<MenuItem> items, float minWidth = 0)
@@ -205,7 +206,13 @@ internal sealed class PopupMenu : Overlay
             float tx = r.X + 10;
             if (_hasIcons)
             {
-                if (it.Checked) Icons.Draw(g, Icon.Check, r.X + 18, r.CY, 15, hot ? Theme.OnAccent : Theme.AccentText);
+                if (it.Swatch is Color4 swatch)
+                {
+                    var chip = new RectF(r.X + 11, r.CY - 7, 14, 14);
+                    g.FillRound(chip, 4, swatch);
+                    if (it.Checked) g.StrokeRound(chip.Deflate(-2), 5, col);
+                }
+                else if (it.Checked) Icons.Draw(g, Icon.Check, r.X + 18, r.CY, 15, hot ? Theme.OnAccent : Theme.AccentText);
                 else if (it.Icon != Icon.None) Icons.Draw(g, it.Icon, r.X + 18, r.CY, 16, it.Danger && it.Enabled ? Theme.Red : hot ? Theme.OnAccent : it.Enabled ? Theme.TextSecondary : Theme.TextTertiary);
                 tx = r.X + 34;
             }

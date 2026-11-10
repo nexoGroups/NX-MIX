@@ -403,8 +403,7 @@ internal sealed class AppLinkEngine
 
             if (_routingError != null || _routes == null)
             {
-                slot.SetStatus(_parkingId == null ? AppLinkState.MixedWithoutRedirect : AppLinkState.Capturing,
-                    _routingError, count);
+                slot.SetStatus(AppLinkState.MixedWithoutRedirect, _routingError, count);
                 continue;
             }
 

@@ -83,6 +83,12 @@ internal static class SelfTest
         // ======================================================================================
         using var liveSession = Program.CreateHeadlessSession(demo: true, hostRunning: true);
         var m = liveSession.Model;
+        var palette = ChannelColors.Menu(null, color => m.UpdateChannel(true, 0, c => c with { ColorIndex = color }));
+        Check("Kanalfarbe bietet acht Farbfelder und Standard", palette.Count(item => item.Swatch != null) == 8 &&
+            palette.Single(item => item.Text == "Standard").Checked);
+        palette.Single(item => item.Text == "Blau").Action!();
+        Check("Kanalfarbe wird im Mixerzustand gespeichert", m.Settings.Inputs[0].ColorIndex == 5);
+        palette.Single(item => item.Text == "Standard").Action!();
         Check("Demo-Livesitzung läuft beim Start aktiv (HostState.Running)", m.HostState == HostState.Running, m.HostState.ToString());
         Check("Alle 8 Navigationsbereiche sind vorhanden", true);
 
@@ -285,6 +291,28 @@ internal static class SelfTest
             Check("Fader-Änderung über Deck A ist auf Deck B identisch (-4.2 dB)",
                 Math.Abs(m.Channel(true, 0).GainDb - (-4.2)) < 0.05, $"GainDb={m.Channel(true, 0).GainDb}");
 
+            var peerId = m.Settings.Outputs[0].Id;
+            m.AddDeckSlot(d2.Id, DeckItemKind.OutputChannel, peerId);
+            m.AddDeckSlot(d2.Id, DeckItemKind.Spacer, Guid.Empty);
+            var slots = m.ActiveCustomDeck!.Items;
+            m.ToggleDeckFaderPair(d2.Id, slots[0].ItemId);
+            m.MoveDeckSlot(d2.Id, slots[1].ItemId, 3);
+            var reordered = m.ActiveCustomDeck!.Items;
+            Check("Ein verknüpfter Streifen verschiebt das vollständige Paar",
+                reordered.Select(i => i.ItemId).SequenceEqual(new[] { slots[2].ItemId, slots[0].ItemId, slots[1].ItemId }));
+
+            m.UpdateChannel(false, 0, c => c with { GainDb = -8, Mute = true });
+            var stereoGroup = m.Channel(true, 0).LinkGroupId;
+            bool moved = m.SetDeckFaderPairGain(reordered[1], reordered[2], -7.2);
+            Check("Deck-Faderpaar koppelt den Pegel über Ein- und Ausgang und belässt Mute",
+                moved && Math.Abs(m.Channel(false, 0).GainDb - (-11)) < 0.05 && m.Channel(false, 0).Mute &&
+                m.Channel(true, 0).LinkGroupId == stereoGroup);
+            var output = root.CurrentPage.Children.OfType<StripBankPanel>()
+                .Single(bank => bank.Visible).Items.OfType<ChannelStrip>().Single(strip => !strip.IsInput);
+            root.MouseWheel(output.Fader.Bounds.CX, output.Fader.Bounds.CY, -1, false, false, false);
+            Check("Der zweite Fader bewegt seinen Partner ebenfalls",
+                Math.Abs(m.Channel(true, 0).GainDb - (-8.2)) < 0.05);
+            m.UpdateChannel(false, 0, c => c with { Mute = false });
             m.SelectDeck(null);
         }
 
@@ -342,6 +370,18 @@ internal static class SelfTest
             root.Resize(1600, 900);
             root.OpenOutputDsp(0);
             var dspPage = (OutputsDspPage)root.Pages[UiRoot.TabOutputsDsp];
+            var originalFilters = m.Channel(false, 0).Filters;
+            m.UpdateChannel(false, 0, c => c with { Filters = new[] { new FilterSpec(FilterType.Peak, 1000, 1.41, 0) } });
+            var graph = dspPage.Children.OfType<EqSpectrumGraph>().Single();
+            var plot = graph.Bounds.Deflate(47, 30, 45, 33);
+            float x = plot.X + plot.W * (float)(Math.Log(50) / Math.Log(1000));
+            root.MouseDown(x, plot.CY, 0, false, false, false);
+            root.MouseMove(x + 30, plot.CY - 20, false, false, false);
+            root.MouseUp(x + 30, plot.CY - 20, 0, false, false, false);
+            var draggedBand = m.Channel(false, 0).Filters.Single();
+            Check("PEQ-Punkt ändert Frequenz und Gain per Drag-and-drop",
+                draggedBand.FrequencyHz > 1000 && draggedBand.GainDb > 0 && draggedBand.Q == 1.41);
+            m.UpdateChannel(false, 0, c => c with { Filters = originalFilters });
             dspPage.ApplyRewPreview(0, preview, applyHeadroomTrim: true);
             var source = m.Channel(false, 0);
             var target = m.Channel(false, 1);
@@ -369,6 +409,19 @@ internal static class SelfTest
         // ======================================================================================
         {
             var sysBefore = m.Config;
+            string snapshotFile = Path.Combine(liveSession.TempDirectory, "Datei-Test.nxmix-snapshot.json");
+            var root = new UiRoot(m, new NullShell { SaveResult = snapshotFile, OpenResult = snapshotFile }, new UiPrefs());
+            root.Resize(1600, 900);
+            root.SwitchPage(UiRoot.TabSnapshots);
+            int snapshotCount = m.Snapshots.Count;
+            root.QuickSaveSnapshot();
+            Check("Neuer Snapshot wird als portable Datei gespeichert",
+                File.Exists(snapshotFile) && m.Snapshots.Count == snapshotCount + 1);
+            var open = root.CurrentPage.Children.OfType<Button>().Single(button => button.Text == "Datei öffnen");
+            root.MouseDown(open.Bounds.CX, open.Bounds.CY, 0, false, false, false);
+            root.MouseUp(open.Bounds.CX, open.Bounds.CY, 0, false, false, false);
+            Check("Snapshot-Datei lässt sich ohne sofortigen Recall wieder öffnen",
+                m.Snapshots.Count == snapshotCount + 2 && m.Snapshots.Count(s => s.Name == "Datei-Test") == 2);
 
             // Ausgangszustand für Snapshot definieren
             m.UpdateChannel(true, 0, c => c with { GainDb = -1.0, RecallSafe = RecallSafeFlags.None });

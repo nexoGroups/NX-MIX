@@ -51,9 +51,11 @@ internal sealed class MatrixGridWidget : Widget
         for (int i = 0; i < _m.InputCount; i++)
         {
             var ch = _m.Settings.Inputs[i];
+            if (!_m.IsChannelVisible(ch)) continue;
             string grp = _m.ChannelOwnerTitle(ch);
             if (string.IsNullOrEmpty(grp)) grp = _m.LinkAt(i) != null ? "APP" : "IN";
-            rows.Add(new AxisPort(new RoutePort(RouteKind.Input, ch.Id), i, grp, $"{i + 1:00} · {_m.DisplayName(true, i)}", Theme.Teal));
+            rows.Add(new AxisPort(new RoutePort(RouteKind.Input, ch.Id), i, grp, $"{i + 1:00} · {_m.DisplayName(true, i)}",
+                ChannelColors.Get(ch.ColorIndex) ?? Theme.Teal));
         }
 
         if (ScopeFilter != 1)
@@ -73,9 +75,11 @@ internal sealed class MatrixGridWidget : Widget
         for (int o = 0; o < _m.OutputCount; o++)
         {
             var ch = _m.Settings.Outputs[o];
+            if (!_m.IsChannelVisible(ch)) continue;
             string grp = _m.ChannelOwnerTitle(ch);
             if (string.IsNullOrEmpty(grp)) grp = "OUT";
-            cols.Add(new AxisPort(new RoutePort(RouteKind.Output, ch.Id), o, grp, $"{o + 1:00} · {_m.DisplayName(false, o)}", Theme.AccentText));
+            cols.Add(new AxisPort(new RoutePort(RouteKind.Output, ch.Id), o, grp, $"{o + 1:00} · {_m.DisplayName(false, o)}",
+                ChannelColors.Get(ch.ColorIndex) ?? Theme.AccentText));
         }
 
         if (ScopeFilter == 2)
@@ -315,7 +319,6 @@ internal sealed class MatrixGridWidget : Widget
         var items = new List<MenuItem> { MenuItem.Header($"{source.Label} → {target.Label}") };
         if (!_m.HostRunning) items.Add(MenuItem.Header("Audio-Engine gestoppt"));
         if (_m.PanicMuted) items.Add(MenuItem.Header("Panik-Stumm aktiv"));
-        if (Db.IsOff(_m.Settings.MasterGainDb)) items.Add(MenuItem.Header("Master auf −∞"));
 
         if (source.Port.Kind == RouteKind.Input)
         {

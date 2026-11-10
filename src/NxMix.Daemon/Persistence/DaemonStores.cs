@@ -263,7 +263,8 @@ public sealed class SnapshotManager
             if (!File.Exists(f)) return null;
             try
             {
-                return DaemonPaths.ReadJson<MixSnapshot>(f);
+                var snapshot = DaemonPaths.ReadJson<MixSnapshot>(f);
+                return snapshot == null ? null : snapshot with { CapturedState = snapshot.CapturedState.FoldLegacyMasterIntoOutputs() };
             }
             catch
             {
@@ -293,6 +294,36 @@ public sealed class SnapshotManager
             DaemonPaths.AtomicWriteJson(FileFor(snap.Id), snap);
             return snap;
         }
+    }
+
+    public MixSnapshot Import(MixSnapshot source)
+    {
+        lock (_gate)
+        {
+            var state = source.CapturedState;
+            if (state == null ||
+                !HasUniqueIds(state.Inputs, c => c.Id) || !HasUniqueIds(state.Outputs, c => c.Id) ||
+                !HasUniqueIds(state.DeviceMasters, d => d.Id) || !HasUniqueIds(state.Buses, b => b.Id) ||
+                state.MatrixDb == null || state.MatrixDb.Any(row => row == null) ||
+                state.BusRoutes == null || state.BusRoutes.Any(r => r?.Source == null || r.Target == null) ||
+                state.Inputs.Concat(state.Outputs).Any(c => c.Filters == null || c.Filters.Any(f => f == null) ||
+                    (c.Correction != null && (c.Correction.Filters == null || c.Correction.Filters.Any(f => f == null)))))
+                throw new InvalidDataException("Die Snapshot-Datei enthält ungültige Mischdaten.");
+
+            var snapshot = source with
+            {
+                Id = Guid.NewGuid(),
+                Name = string.IsNullOrWhiteSpace(source.Name) ? "Snapshot" : source.Name.Trim(),
+                DefaultFadeMs = double.IsFinite(source.DefaultFadeMs) ? Math.Clamp(source.DefaultFadeMs, 0, 10000) : 100,
+                DefaultScope = source.DefaultScope & SnapshotScopeFlags.All,
+                CapturedState = state.FoldLegacyMasterIntoOutputs() with { TransitionMs = null },
+            };
+            DaemonPaths.AtomicWriteJson(FileFor(snapshot.Id), snapshot);
+            return snapshot;
+        }
+
+        static bool HasUniqueIds<T>(IReadOnlyList<T>? items, Func<T, Guid> getId) where T : class =>
+            items != null && items.All(item => item != null) && items.Select(getId).Distinct().Count() == items.Count;
     }
 
     public MixSnapshot? Rename(Guid id, string newName)

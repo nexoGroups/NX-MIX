@@ -60,6 +60,7 @@ internal abstract class Widget
     public virtual void OnMouseMove(in MouseEvent e) { }
     public virtual void OnMouseUp(in MouseEvent e) { }
     public virtual bool OnMouseWheel(in MouseEvent e) => false;
+    public virtual bool OnHorizontalWheel(in MouseEvent e) => false;
 
     public bool IsHovered => Root?.Hovered == this;
     public bool IsPressed => Root?.Captured == this;

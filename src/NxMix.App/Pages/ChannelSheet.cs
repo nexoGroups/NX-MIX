@@ -38,6 +38,7 @@ internal sealed class ChannelSheet : SheetOverlay
     readonly IconButton _prev = new(Icon.ChevronLeft, "Vorheriger Kanal (←)") { IconSize = 16 };
     readonly IconButton _next = new(Icon.ChevronRight, "Nächster Kanal (→)") { IconSize = 16 };
     readonly IconButton _close = new(Icon.Close, "Schließen (Esc)") { IconSize = 16 };
+    readonly Button _color = new("Farbe", ButtonStyle.Gray) { Font = Theme.CaptionStrong, Tooltip = "Kanalfarbe wählen" };
     public readonly NameField Name = new();
 
     public readonly Slider Gain = new() { Min = Theme.FaderMinDb, Max = Theme.FaderMaxDb, Step = 0.1, WheelStep = 1 };
@@ -72,7 +73,7 @@ internal sealed class ChannelSheet : SheetOverlay
     ChannelSheet(AppModel m, bool input, int index)
     {
         _m = m; IsInput = input; Index = index;
-        AddHeader(_prev); AddHeader(_next); AddHeader(_close); AddHeader(Name);
+        AddHeader(_prev); AddHeader(_next); AddHeader(_close); AddHeader(Name); AddHeader(_color);
 
         Add(Gain); Add(GainBox);
         if (input) { Add(Trim); Add(TrimBox); Add(Pan); Add(PanBox); Add(LowCut); Add(LinkBind); Add(LinkRemove); }
@@ -86,6 +87,13 @@ internal sealed class ChannelSheet : SheetOverlay
         _next.Clicked += _ => Go(+1);
         _close.Clicked += _ => Close();
         Name.Clicked += BeginRename;
+        _color.Clicked += () =>
+        {
+            if (Root is not { } root || Count == 0) return;
+            var channel = Cur;
+            PopupMenu.Show(root, _color.Bounds, ChannelColors.Menu(channel.ColorIndex,
+                color => _m.UpdateChannelById(IsInput, channel.Id, c => c with { ColorIndex = color })));
+        };
 
         Gain.ToNorm = db => Db.IsOff(db) ? 0 : FaderScale.ToT(db);
         Gain.FromNorm = t => { double db = FaderScale.ToDb(t); return Db.IsOff(db) ? db : Math.Round(db * 10) / 10; };
@@ -161,8 +169,15 @@ internal sealed class ChannelSheet : SheetOverlay
 
         _left.Clicked += () => { if (_m.CanMoveChannel(IsInput, Index, -1)) { _m.MoveChannel(IsInput, Index, -1); Index--; Layout(); Invalidate(); } };
         _right.Clicked += () => { if (_m.CanMoveChannel(IsInput, Index, +1)) { _m.MoveChannel(IsInput, Index, +1); Index++; Layout(); Invalidate(); } };
-        Delete.Clicked += () => Root?.Confirm("Kanal löschen?", $"„{_m.DisplayName(IsInput, Index)}“ wird entfernt.", "Löschen",
-            () => { int idx = Index; Close(); _m.RemoveChannel(IsInput, idx); }, danger: true);
+        Delete.Clicked += () =>
+        {
+            string owner = _m.ChannelOwnerTitle(Cur);
+            string message = string.IsNullOrEmpty(owner)
+                ? $"„{_m.DisplayName(IsInput, Index)}“ wird entfernt."
+                : $"Die Zuordnung „{owner}“ und ihre automatisch angelegten Kanäle werden entfernt.";
+            Root?.Confirm("Entfernen?", message, "Löschen",
+                () => { int idx = Index; Close(); _m.RemoveChannel(IsInput, idx); }, danger: true);
+        };
 
         _m.ValuesChanged += SyncAndInvalidate;
         _m.StructureChanged += OnStructure;
@@ -217,6 +232,7 @@ internal sealed class ChannelSheet : SheetOverlay
     {
         if (Count == 0) { Close(); return; }
         Index = Math.Clamp(Index, 0, Count - 1);
+        if (!_m.IsChannelVisible(Cur)) { Close(); return; }
         Layout();
         Invalidate();
     }
@@ -226,12 +242,19 @@ internal sealed class ChannelSheet : SheetOverlay
 
     void Go(int dir)
     {
-        int next = Index + dir;
-        if (next < 0 || next >= Count) return;
+        int next = FindAdjacent(dir);
+        if (next < 0) return;
         Index = next;
         ResetScroll();
         Layout();
         Invalidate();
+    }
+
+    int FindAdjacent(int direction)
+    {
+        for (int i = Index + direction; i >= 0 && i < Count; i += direction)
+            if (_m.IsChannelVisible(_m.Channel(IsInput, i))) return i;
+        return -1;
     }
 
     public void BeginRename()
@@ -261,8 +284,8 @@ internal sealed class ChannelSheet : SheetOverlay
         var c = Cur;
         Name.Text = _m.DisplayName(IsInput, Index);
         Name.Placeholder = string.IsNullOrWhiteSpace(c.Name);
-        _prev.Enabled = Index > 0;
-        _next.Enabled = Index + 1 < Count;
+        _prev.Enabled = FindAdjacent(-1) >= 0;
+        _next.Enabled = FindAdjacent(1) >= 0;
 
         float start = y;
         float pad = 14f;
@@ -419,7 +442,8 @@ internal sealed class ChannelSheet : SheetOverlay
         _prev.Bounds = new RectF(Panel.X + 14, y, 30, 32);
         _next.Bounds = new RectF(Panel.X + 46, y, 30, 32);
         _close.Bounds = new RectF(Panel.Right - 44, y, 30, 32);
-        Name.Bounds = new RectF(Panel.X + 84, y, Math.Max(60, _close.Bounds.X - (Panel.X + 92)), 32);
+        _color.Bounds = new RectF(_close.Bounds.X - 66, y, 60, 32);
+        Name.Bounds = new RectF(Panel.X + 84, y, Math.Max(60, _color.Bounds.X - (Panel.X + 92)), 32);
     }
 
     protected override void PaintHeader(Renderer g, RectF header)
@@ -427,7 +451,8 @@ internal sealed class ChannelSheet : SheetOverlay
         if (Count == 0) return;
         string owner = _m.ChannelOwnerTitle(Cur);
         string tag = (IsInput ? $"EINGANG {Index + 1:00}" : $"AUSGANG {Index + 1:00}") + (owner.Length > 0 ? $"  ·  {owner}" : "");
-        g.Text(tag, new RectF(Name.Bounds.X, header.Y + 6, Name.Bounds.W, 14), Theme.MicroStrong, Theme.AccentText);
+        g.Text(tag, new RectF(Name.Bounds.X, header.Y + 6, Name.Bounds.W, 14), Theme.MicroStrong,
+            ChannelColors.Get(Cur.ColorIndex) ?? Theme.AccentText);
     }
 
     protected override void PaintBody(Renderer g)

@@ -65,9 +65,12 @@ public sealed class DaemonEngineController : INxMixBackend
     private readonly Timer _statusPollTimer;
     private bool _audioRequested;
     private long _nextAsioRetry;
+    private long _nextAppRouteRetry;
+    private long _nextNativeFormatPoll;
     private readonly float[] _inPeaks = new float[PoolMaxInputs];
     private readonly float[] _outPeaks = new float[PoolMaxOutputs];
     private readonly float[] _busPeaks = new float[PoolMaxBuses];
+    private readonly float[] _busChannelPeaks = new float[PoolMaxBuses];
     private readonly float[] _devPeaks = new float[TelemetrySharedBlock.MaxDeviceMasters];
     private readonly float[] _specPreDb = new float[SpectrumAnalyzer.Points];
     private readonly float[] _specPostDb = new float[SpectrumAnalyzer.Points];
@@ -219,8 +222,28 @@ public sealed class DaemonEngineController : INxMixBackend
         _vaioAvail = _vaioManager.Evaluate(_discoveredDevices, _routeRestorer);
     }
 
-    private MixerSettings EffectiveEngineSettings(MixerSettings logical) =>
-        _panicMuted ? logical with { MasterGainDb = double.NegativeInfinity, TransitionMs = 10.0 } : logical;
+    private MixerSettings EffectiveEngineSettings(MixerSettings logical)
+    {
+        var active = _config.Vaios.Where(v => v.Kind == VaioSlotKind.NxMixKernelDriver)
+            .ToDictionary(v => v.Id, v => v.Enabled ? NativeEndpoint(v)?.NxMixActiveChannels ?? 0 : 0);
+        if (active.Count > 0)
+        {
+            ChannelDsp EffectiveChannel(ChannelDsp c) => c.DeviceId is Guid id &&
+                active.TryGetValue(id, out int count) && c.DeviceChannelIndex >= count
+                ? c with { Mute = true, Solo = false }
+                : c;
+            logical = logical with
+            {
+                Inputs = logical.Inputs.Select(EffectiveChannel).ToArray(),
+                Outputs = logical.Outputs.Select(EffectiveChannel).ToArray(),
+            };
+        }
+        return _panicMuted ? logical with { MasterGainDb = double.NegativeInfinity, TransitionMs = 10.0 } : logical;
+    }
+
+    private AudioDeviceInfo? NativeEndpoint(VaioSlotConfig slot) =>
+        _discoveredDevices.FirstOrDefault(d => d.IsNxMixEndpoint &&
+            string.Equals(d.Id, slot.EndpointOrExe, StringComparison.OrdinalIgnoreCase));
 
     private static MixerSettings SanitizeMixer(MixerSettings s)
     {
@@ -246,17 +269,15 @@ public sealed class DaemonEngineController : INxMixBackend
             }
         }
 
-        double master = double.IsNaN(s.MasterGainDb) ? 0.0 : Math.Clamp(s.MasterGainDb, -120.0, 12.0);
-        return s with
+        return (s with
         {
             Inputs = ins,
             Outputs = outs,
             MatrixDb = m,
-            MasterGainDb = master,
             DeviceMasters = (s.DeviceMasters ?? Array.Empty<DeviceMasterDsp>()).ToArray(),
             Buses = (s.Buses ?? Array.Empty<MixBus>()).ToArray(),
             BusRoutes = (s.BusRoutes ?? Array.Empty<BusRoute>()).ToArray(),
-        };
+        }).FoldLegacyMasterIntoOutputs();
     }
 
     private static ChannelDsp SanitizeChannel(ChannelDsp c)
@@ -285,8 +306,8 @@ public sealed class DaemonEngineController : INxMixBackend
     public static MixerSettings ReconcileMixerWithSystemConfig(MixerSettings mixer, SystemConfig cfg,
         SystemConfig? previousConfig = null)
     {
-        int needIn = mixer.Inputs.Count;
-        int needOut = mixer.Outputs.Count;
+        int needIn = 0;
+        int needOut = 0;
 
         foreach (var d in cfg.Devices)
         {
@@ -307,9 +328,9 @@ public sealed class DaemonEngineController : INxMixBackend
         }
 
         var ins = mixer.Inputs.ToList();
-        while (ins.Count < needIn) ins.Add(new ChannelDsp { DeviceChannelIndex = ins.Count });
+        while (ins.Count < needIn) ins.Add(new ChannelDsp { DeviceChannelIndex = ins.Count, AutoCreatedForDevice = true });
         var outs = mixer.Outputs.ToList();
-        while (outs.Count < needOut) outs.Add(new ChannelDsp { DeviceChannelIndex = outs.Count });
+        while (outs.Count < needOut) outs.Add(new ChannelDsp { DeviceChannelIndex = outs.Count, AutoCreatedForDevice = true });
 
         // DeviceMasters abgleichen (jedes AudioDeviceNode und jedes VaioSlotConfig hat genau einen DeviceMasterDsp)
         var existingMasters = mixer.DeviceMasters.ToDictionary(m => m.Id);
@@ -317,26 +338,160 @@ public sealed class DaemonEngineController : INxMixBackend
 
         var configuredIds = cfg.Devices.Select(d => d.Id).Concat(cfg.Vaios.Select(v => v.Id))
             .Concat(cfg.AppLinks.Select(a => a.Id)).ToHashSet();
-        var appTitles = cfg.AppLinks.Select(a => a.Title).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var activeTitles = cfg.Devices.Select(d => (d.Flow, d.DisplayTitle.ToUpperInvariant()))
+            .Concat(cfg.Vaios.Select(v => (v.Flow, v.Name.ToUpperInvariant())))
+            .Concat(cfg.AppLinks.Select(a => (DeviceFlow.Capture, a.Title.ToUpperInvariant()))).ToHashSet();
         var previousApps = (previousConfig?.AppLinks ?? Array.Empty<AppLinkEntry>()).GroupBy(a => a.Id)
             .ToDictionary(group => group.Key, group => group.First().Title);
-        var detachedAppIds = new HashSet<Guid>();
-        for (int i = 0; i < ins.Count; i++)
-        {
-            var channel = ins[i];
-            if (channel.DeviceId is not Guid id) continue;
-            if (!previousApps.TryGetValue(id, out string? title))
-            {
-                if (configuredIds.Contains(id) || !existingMasters.TryGetValue(id, out var master) ||
-                    !master.IsInput || !appTitles.Contains(master.Name)) continue;
-                title = master.Name;
-            }
-            if (cfg.AppLinks.Any(a => a.Id == id && i >= a.FirstChannel && i < a.EndChannel)) continue;
+        var previousDevices = previousConfig?.Devices ?? Array.Empty<AudioDeviceNode>();
+        var previousVaios = previousConfig?.Vaios ?? Array.Empty<VaioSlotConfig>();
+        var detachedIds = new HashSet<Guid>();
+        var removedChannels = new HashSet<Guid>();
+        var restoredColumns = new Dictionary<int, int>();
+        var restoredOutputIds = new Dictionary<Guid, Guid>();
+        var routedOrphans = previousConfig == null
+            ? mixer.Outputs.Select((c, i) => (c, i))
+                .Where(x => x.c.DeviceId is Guid id && !configuredIds.Contains(id) && HasOutputRoute(x.i, x.c.Id))
+                .Select(x => x.c.DeviceId!.Value).ToHashSet()
+            : new HashSet<Guid>();
+        RestoreOutputBindings();
+        var resetInputs = DetachChannels(ins, DeviceFlow.Capture);
+        var resetOutputs = DetachChannels(outs, DeviceFlow.Render);
+        resetOutputs.UnionWith(restoredColumns.Values.Except(restoredColumns.Keys));
 
-            string stereoName = $"{title} {(channel.DeviceChannelIndex == 0 ? "L" : "R")}";
-            bool autoNamed = channel.Name == title || channel.Name == stereoName;
-            if (!configuredIds.Contains(id)) detachedAppIds.Add(id);
-            ins[i] = channel with { DeviceId = null, DeviceChannelIndex = i, Name = autoNamed ? "" : channel.Name };
+        static bool IsAutoName(ChannelDsp channel, string title)
+        {
+            int k = channel.DeviceChannelIndex;
+            return channel.Name == title || channel.Name == $"{title} {(k == 0 ? "L" : "R")}" || channel.Name == $"{title} {k + 1}";
+        }
+
+        void RestoreOutputBindings()
+        {
+            var orphaned = mixer.Outputs.Select((channel, index) => (Channel: channel, Index: index))
+                .Where(x => x.Channel.DeviceId is Guid id && !configuredIds.Contains(id))
+                .GroupBy(x => x.Channel.DeviceId!.Value)
+                .ToArray();
+            foreach (var device in cfg.Devices.Where(d => d.Enabled && d.Flow == DeviceFlow.Render && !d.Loopback))
+            {
+                if (device.ChannelCount <= 0 || device.EngineFirstChannel < 0 ||
+                    device.EngineFirstChannel > outs.Count - device.ChannelCount) continue;
+                bool Overlaps(int first, int count) =>
+                    first < device.EngineFirstChannel + device.ChannelCount && device.EngineFirstChannel < (long)first + count;
+                if (cfg.Devices.Any(d => d.Id != device.Id && d.Flow == DeviceFlow.Render && Overlaps(d.EngineFirstChannel, d.ChannelCount)) ||
+                    cfg.Vaios.Any(v => v.Flow == DeviceFlow.Render && Overlaps(v.EngineFirstChannel, v.Channels)))
+                    continue;
+
+                bool SameDevice(Guid id)
+                {
+                    if (previousDevices.FirstOrDefault(d => d.Id == id) is { } old)
+                        return old.Flow == device.Flow && old.Backend == device.Backend && !old.Loopback &&
+                            old.DeviceFirstChannel == device.DeviceFirstChannel &&
+                            !string.IsNullOrWhiteSpace(device.EndpointId) &&
+                            string.Equals(old.EndpointId, device.EndpointId, StringComparison.OrdinalIgnoreCase);
+
+                    // Alte Mixerstände speichern nur den Anzeigenamen. ASIO-Treibernamen identifizieren den Treiber.
+                    return previousConfig == null && device.Backend == AudioBackend.Asio && device.DeviceFirstChannel == 0 &&
+                        !string.IsNullOrWhiteSpace(device.FriendlyName) &&
+                        string.Equals(device.DisplayTitle, device.FriendlyName, StringComparison.OrdinalIgnoreCase) &&
+                        cfg.Devices.Count(d => d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Asio &&
+                            string.Equals(d.DisplayTitle, device.DisplayTitle, StringComparison.OrdinalIgnoreCase)) == 1 &&
+                        existingMasters.GetValueOrDefault(id) is { IsInput: false } master &&
+                        string.Equals(master.Name, device.DisplayTitle, StringComparison.OrdinalIgnoreCase);
+                }
+
+                var candidates = orphaned.Where(group => SameDevice(group.Key)).ToArray();
+                if (candidates.Length != 1 || detachedIds.Contains(candidates[0].Key)) continue;
+                var source = candidates[0].OrderBy(x => x.Channel.DeviceChannelIndex).ToArray();
+                if (source.Length != device.ChannelCount ||
+                    source.Where((x, k) => x.Channel.DeviceChannelIndex != k || x.Channel.AutoCreatedForDevice == false).Any() ||
+                    !source.Any(x => HasOutputRoute(x.Index, x.Channel.Id))) continue;
+
+                var targets = outs.GetRange(device.EngineFirstChannel, device.ChannelCount);
+                if (targets.Where((channel, k) => !CanRestore(channel, k)).Any()) continue;
+
+                var oldMaster = existingMasters.GetValueOrDefault(candidates[0].Key);
+                var currentMaster = existingMasters.GetValueOrDefault(device.Id);
+                if (oldMaster != null && currentMaster != null &&
+                    currentMaster != new DeviceMasterDsp { Id = device.Id, Name = currentMaster.Name } &&
+                    currentMaster != (oldMaster with { Id = device.Id, Name = currentMaster.Name }))
+                    continue;
+
+                bool CanRestore(ChannelDsp channel, int k)
+                {
+                    int index = device.EngineFirstChannel + k;
+                    if (index == source[k].Index) return true;
+                    if (channel.IsVacant) return true;
+                    return channel.DeviceId == device.Id && channel.AutoCreatedForDevice != false &&
+                        !HasOutputRoute(index, channel.Id) && IsAutoName(channel, device.DisplayTitle) &&
+                        channel.Filters.Count == 0 &&
+                        (channel with { Id = Guid.Empty, DeviceId = null, AutoCreatedForDevice = null,
+                            DeviceChannelIndex = 0, Name = "", Filters = Array.Empty<FilterSpec>() }) ==
+                        new ChannelDsp { Id = Guid.Empty };
+                }
+
+                foreach (var old in source)
+                    outs[old.Index] = new ChannelDsp { DeviceChannelIndex = old.Index, AutoCreatedForDevice = true };
+
+                for (int k = 0; k < source.Length; k++)
+                {
+                    var old = source[k];
+                    int index = device.EngineFirstChannel + k;
+                    var target = targets[k];
+                    outs[index] = old.Channel with { Id = target.Id, DeviceId = device.Id, AutoCreatedForDevice = true };
+                    restoredColumns[index] = old.Index;
+                    restoredOutputIds[old.Channel.Id] = target.Id;
+                }
+                detachedIds.Add(candidates[0].Key);
+                if (oldMaster != null)
+                    existingMasters[device.Id] = oldMaster with { Id = device.Id, Name = device.DisplayTitle };
+            }
+        }
+
+        bool HasOutputRoute(int index, Guid id) =>
+            mixer.MatrixDb.Any(row => index < row.Length && !double.IsNegativeInfinity(row[index])) ||
+            mixer.BusRoutes.Any(r => r.Target.Kind == RouteKind.Output && r.Target.Id == id);
+
+        HashSet<int> DetachChannels(List<ChannelDsp> channels, DeviceFlow flow)
+        {
+            var reset = new HashSet<int>();
+            for (int i = 0; i < channels.Count; i++)
+            {
+                var channel = channels[i];
+                if (channel.DeviceId is not Guid id) continue;
+                if (flow == DeviceFlow.Render && routedOrphans.Contains(id)) continue;
+                if (cfg.Devices.Any(d => d.Id == id && d.Flow == flow && i >= d.EngineFirstChannel && i - d.EngineFirstChannel < d.ChannelCount) ||
+                    cfg.Vaios.Any(v => v.Id == id && v.Flow == flow && i >= v.EngineFirstChannel && i - v.EngineFirstChannel < v.Channels) ||
+                    (flow == DeviceFlow.Capture && cfg.AppLinks.Any(a => a.Id == id && i >= a.FirstChannel && i < a.EndChannel)))
+                    continue;
+
+                var oldDevice = previousDevices.FirstOrDefault(d => d.Id == id);
+                var oldVaio = previousVaios.FirstOrDefault(v => v.Id == id);
+                string? title = oldDevice?.DisplayTitle ?? oldVaio?.Name ?? previousApps.GetValueOrDefault(id);
+                string? masterName = existingMasters.GetValueOrDefault(id)?.Name;
+                bool duplicate = masterName != null && !configuredIds.Contains(id) &&
+                    activeTitles.Contains((flow, masterName.ToUpperInvariant()));
+                bool generatedOrphan = masterName != null && channel.AutoCreatedForDevice == null && !configuredIds.Contains(id) &&
+                    channels.Where(c => c.DeviceId == id).All(c => IsAutoName(c, masterName));
+                if (title == null && channel.AutoCreatedForDevice != true && !configuredIds.Contains(id) && !duplicate && !generatedOrphan)
+                    continue;
+                title ??= masterName;
+                bool autoNamed = title != null && IsAutoName(channel, title);
+                bool copiedName = duplicate && channels.Any(c => c.DeviceId is Guid other && configuredIds.Contains(other) &&
+                    string.Equals(existingMasters.GetValueOrDefault(other)?.Name, masterName, StringComparison.OrdinalIgnoreCase) &&
+                    c.DeviceChannelIndex == channel.DeviceChannelIndex && c.Name == channel.Name);
+                if (!configuredIds.Contains(id)) detachedIds.Add(id);
+                if (channel.AutoCreatedForDevice ?? (autoNamed || copiedName))
+                {
+                    removedChannels.Add(channel.Id);
+                    reset.Add(i);
+                    channels[i] = new ChannelDsp { DeviceChannelIndex = i, AutoCreatedForDevice = true };
+                }
+                else
+                {
+                    channels[i] = channel with { DeviceId = null, DeviceChannelIndex = i, Name = autoNamed ? "" : channel.Name };
+                }
+            }
+            return reset;
         }
 
         foreach (var d in cfg.Devices)
@@ -357,6 +512,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 targetList[chIdx] = cur with
                 {
                     DeviceId = d.Id,
+                    AutoCreatedForDevice = cur.AutoCreatedForDevice ?? (cur.DeviceId == null ? false : null),
                     DeviceChannelIndex = k,
                     Name = string.IsNullOrWhiteSpace(cur.Name) ? autoName : cur.Name,
                 };
@@ -381,6 +537,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 targetList[chIdx] = cur with
                 {
                     DeviceId = v.Id,
+                    AutoCreatedForDevice = cur.AutoCreatedForDevice ?? (cur.DeviceId == null ? false : null),
                     DeviceChannelIndex = k,
                     Name = string.IsNullOrWhiteSpace(cur.Name) ? autoName : cur.Name,
                 };
@@ -403,6 +560,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 ins[chIdx] = cur with
                 {
                     DeviceId = a.Id,
+                    AutoCreatedForDevice = cur.AutoCreatedForDevice ?? (cur.DeviceId == null ? false : null),
                     DeviceChannelIndex = k,
                     Name = string.IsNullOrWhiteSpace(cur.Name) ? autoName : cur.Name,
                 };
@@ -412,31 +570,39 @@ public sealed class DaemonEngineController : INxMixBackend
         // Auch manuell angelegte DeviceMasters behalten, falls keine Kollision:
         foreach (var m in mixer.DeviceMasters)
         {
-            if (!detachedAppIds.Contains(m.Id) && nextMasters.All(x => x.Id != m.Id))
+            if (!detachedIds.Contains(m.Id) && nextMasters.All(x => x.Id != m.Id) &&
+                !(activeTitles.Contains((m.IsInput ? DeviceFlow.Capture : DeviceFlow.Render, m.Name.ToUpperInvariant())) &&
+                    ins.All(c => c.DeviceId != m.Id) && outs.All(c => c.DeviceId != m.Id)))
                 nextMasters.Add(m);
         }
 
+        while (ins.Count > needIn && ins[^1].IsVacant) ins.RemoveAt(ins.Count - 1);
+        while (outs.Count > needOut && outs[^1].IsVacant) outs.RemoveAt(outs.Count - 1);
         var resizedMatrix = new double[ins.Count][];
         for (int i = 0; i < ins.Count; i++)
         {
             resizedMatrix[i] = new double[outs.Count];
             for (int o = 0; o < outs.Count; o++)
             {
-                resizedMatrix[i][o] = i < mixer.MatrixDb.Length && o < mixer.MatrixDb[i].Length
-                    ? mixer.MatrixDb[i][o]
+                int source = restoredColumns.GetValueOrDefault(o, o);
+                resizedMatrix[i][o] = !resetInputs.Contains(i) && !resetOutputs.Contains(o) &&
+                    !ins[i].IsVacant && !outs[o].IsVacant && i < mixer.MatrixDb.Length && source < mixer.MatrixDb[i].Length
+                    ? mixer.MatrixDb[i][source]
                     : double.NegativeInfinity;
             }
         }
 
-        if (previousConfig != null && FirstPlaybackOutput(cfg) is { } output)
+        if (previousConfig != null && FirstPlaybackOutput(cfg) is { } output &&
+            !restoredColumns.Keys.Any(o => o >= output.First && o - output.First < output.Count))
         {
             bool firstOutput = FirstPlaybackOutput(previousConfig) == null;
             var appInputs = cfg.AppLinks.Where(a => cfg.AppLinksEnabled && a.Enabled &&
-                (firstOutput || !previousConfig.AppLinks.Any(old => old.Id == a.Id && old.Enabled)))
+                (firstOutput || !previousConfig.AppLinksEnabled || !previousConfig.AppLinks.Any(old =>
+                    old.Id == a.Id && old.Enabled && old.FirstChannel == a.FirstChannel && old.Count == a.Count)))
                 .Select(a => (First: a.FirstChannel, Count: a.Count));
             var virtualInputs = cfg.Vaios.Where(v => v.Loopback && v.Enabled &&
                 (firstOutput || !previousConfig.Vaios.Any(old => old.Id == v.Id && old.Enabled)))
-                .Select(v => (First: v.EngineFirstChannel, Count: v.Channels));
+                .Select(v => (First: v.EngineFirstChannel, Count: v.Kind == VaioSlotKind.NxMixKernelDriver ? Math.Min(v.Channels, 2) : v.Channels));
             foreach (var source in appInputs.Concat(virtualInputs))
             {
                 for (int channel = 0; channel < source.Count; channel++)
@@ -456,6 +622,10 @@ public sealed class DaemonEngineController : INxMixBackend
             Inputs = ins,
             Outputs = outs,
             MatrixDb = resizedMatrix,
+            BusRoutes = mixer.BusRoutes.Where(r => !removedChannels.Contains(r.Source.Id) && !removedChannels.Contains(r.Target.Id))
+                .Select(r => r.Target.Kind == RouteKind.Output && restoredOutputIds.TryGetValue(r.Target.Id, out Guid id)
+                    ? r with { Target = r.Target with { Id = id } }
+                    : r).ToArray(),
         };
     }
 
@@ -465,7 +635,8 @@ public sealed class DaemonEngineController : INxMixBackend
             d.ChannelCount > 0 && !string.IsNullOrWhiteSpace(d.EndpointId));
         if (device != null) return (device.EngineFirstChannel, device.ChannelCount);
         var vaio = cfg.Vaios.FirstOrDefault(v => v.Enabled && v.Flow == DeviceFlow.Render && !v.Loopback &&
-            v.Kind == VaioSlotKind.ExternalDriverEndpoint && v.Channels > 0 && !string.IsNullOrWhiteSpace(v.EndpointOrExe));
+            v.Kind is VaioSlotKind.ExternalDriverEndpoint or VaioSlotKind.NxMixKernelDriver &&
+            v.Channels > 0 && !string.IsNullOrWhiteSpace(v.EndpointOrExe));
         return vaio != null ? (vaio.EngineFirstChannel, vaio.Channels) : null;
     }
 
@@ -491,7 +662,19 @@ public sealed class DaemonEngineController : INxMixBackend
 
         foreach (var v in cfg.Vaios.Where(x => x.Enabled && !string.IsNullOrWhiteSpace(x.EndpointOrExe) && x.Channels > 0))
         {
-            if (v.Kind == VaioSlotKind.ExternalDriverEndpoint)
+            if (v.Kind == VaioSlotKind.NxMixKernelDriver)
+            {
+                var endpoint = NativeEndpoint(v);
+                if (endpoint == null || (v.Loopback ? endpoint.Flow != DeviceFlow.Render : endpoint.NativeOutputPort == 0))
+                    continue;
+                bindings.Add(new DeviceBinding(v.EndpointOrExe, v.Loopback ? DeviceFlow.Capture : DeviceFlow.Render, 0,
+                    v.EngineFirstChannel, Math.Min(v.Channels, endpoint.NxMixActiveChannels), v.Loopback)
+                {
+                    Exclusive = false,
+                    NativeOutputPort = v.Loopback ? 0 : endpoint.NativeOutputPort,
+                });
+            }
+            else if (v.Kind == VaioSlotKind.ExternalDriverEndpoint)
             {
                 var flow = v.Loopback ? DeviceFlow.Capture : v.Flow;
                 bindings.Add(new DeviceBinding(v.EndpointOrExe, flow, 0, v.EngineFirstChannel, v.Channels, v.Loopback));
@@ -622,7 +805,7 @@ public sealed class DaemonEngineController : INxMixBackend
             _engine.ReadOutputPeaks(_outPeaks.AsSpan(0, no));
             if (no < _outPeaks.Length) _outPeaks.AsSpan(no).Clear();
 
-            _engine.ReadBusPeaks(_busPeaks.AsSpan(0, nb));
+            _engine.ReadBusPeaks(_busPeaks.AsSpan(0, nb), _busChannelPeaks);
             if (nb < _busPeaks.Length) _busPeaks.AsSpan(nb).Clear();
 
             _engine.ReadDeviceMasterPeaks(_devPeaks.AsSpan(0, nd));
@@ -654,7 +837,7 @@ public sealed class DaemonEngineController : INxMixBackend
                 _specChannel);
 
             _lastMeta = meta;
-            _shmWriter?.Publish(_inPeaks, _outPeaks, _busPeaks, _devPeaks, in meta, _specPreDb, _specPostDb);
+            _shmWriter?.Publish(_inPeaks, _outPeaks, _busPeaks, _devPeaks, in meta, _specPreDb, _specPostDb, _busChannelPeaks);
         }
         catch
         {
@@ -668,6 +851,25 @@ public sealed class DaemonEngineController : INxMixBackend
         lock (_gate)
         {
             if (_disposed) return;
+            if (Environment.TickCount64 >= _nextNativeFormatPoll && _deviceCatalog is DeviceCatalog catalog &&
+                _config.Vaios.Any(v => v.Enabled && v.Kind == VaioSlotKind.NxMixKernelDriver))
+            {
+                _nextNativeFormatPoll = Environment.TickCount64 + 3000;
+                var before = BuildAudioHostConfig(_config).Bindings;
+                try
+                {
+                    var windows = catalog.ListWindows();
+                    if (windows.Count > 0)
+                        _discoveredDevices = windows.Concat(_discoveredDevices.Where(d => d.Backend == AudioBackend.Asio)).ToArray();
+                    if (ApplyNativeFormatChanges(before))
+                    {
+                        _vaioAvail = _vaioManager.Evaluate(_discoveredDevices, _routeRestorer);
+                        RebuildSnapshotAndNotify(saveLive: false);
+                        return;
+                    }
+                }
+                catch (Exception ex) { AppendLog("Warn", "WaveRT", $"Windows-Kanalformat: {ex.Message}"); }
+            }
             var prevSnap = _currentSnapshot;
             HostStats st;
             try { st = _host.GetStats(); } catch { return; }
@@ -681,6 +883,13 @@ public sealed class DaemonEngineController : INxMixBackend
             if (_host is IAppLinkMonitor mon)
             {
                 try { links = mon.GetAppLinks(); } catch { }
+            }
+
+            if (Environment.TickCount64 >= _nextAppRouteRetry &&
+                (st.State is HostState.Stopped or HostState.Faulted || (st.State == HostState.Running && links.Count == 0)))
+            {
+                _nextAppRouteRetry = Environment.TickCount64 + 5000;
+                _routeRestorer.RestoreAllKnown();
             }
 
             bool changed = st.State != prevSnap.HostStats.State
@@ -742,12 +951,14 @@ public sealed class DaemonEngineController : INxMixBackend
         Span<float> devPeaks,
         Span<float> specPre,
         Span<float> specPost,
-        out TelemetrySnapshotFrame meta)
+        out TelemetrySnapshotFrame meta,
+        Span<float> busChannelPeaks = default)
     {
         meta = _lastMeta;
         CopySlice(_inPeaks, inPeaks);
         CopySlice(_outPeaks, outPeaks);
         CopySlice(_busPeaks, busPeaks);
+        CopySlice(_busChannelPeaks, busChannelPeaks);
         CopySlice(_devPeaks, devPeaks);
         CopySlice(_specPreDb, specPre);
         CopySlice(_specPostDb, specPost);
@@ -926,10 +1137,22 @@ public sealed class DaemonEngineController : INxMixBackend
     {
         lock (_gate)
         {
+            var before = BuildAudioHostConfig(_config).Bindings;
             RefreshCatalogsCore();
+            ApplyNativeFormatChanges(before);
             RebuildSnapshotAndNotify(saveLive: false);
         }
     });
+
+    private bool ApplyNativeFormatChanges(IReadOnlyList<DeviceBinding> before)
+    {
+        if (before.SequenceEqual(BuildAudioHostConfig(_config).Bindings)) return false;
+        bool running = _host.State is HostState.Running or HostState.Starting;
+        if (running) _host.Stop();
+        if ((running || _audioRequested) && CanStartAudio(out _))
+            StartAudioInternal("Windows-Kanalformat geändert");
+        return true;
+    }
 
     public Task StartAudioAsync() => Task.Run(() =>
     {
@@ -1053,6 +1276,19 @@ public sealed class DaemonEngineController : INxMixBackend
             AppendLog("Info", "Snapshots", $"Snapshot '{saved.Name}' gespeichert.");
             RebuildSnapshotAndNotify(saveLive: true);
             return Task.FromResult(saved);
+        }
+    }
+
+    public Task<MixSnapshot?> GetSnapshotAsync(Guid snapshotId) =>
+        Task.FromResult(_snapshots.Load(snapshotId));
+
+    public Task<MixSnapshot> ImportSnapshotAsync(MixSnapshot snapshot)
+    {
+        lock (_gate)
+        {
+            var imported = _snapshots.Import(snapshot);
+            RebuildSnapshotAndNotify(saveLive: false);
+            return Task.FromResult(imported);
         }
     }
 

@@ -23,7 +23,7 @@ public sealed class DeviceGainAndSnapshotFadeTests
         var busB = new MixBus { Name = "Main", Channels = 2, GainDb = 0.0 };
         s1 = s1 with
         {
-            Buses = new[] { busA, busB },
+            Buses = new[] { busB, busA },
             BusRoutes = new[]
             {
                 new BusRoute(new RoutePort(RouteKind.Input, s1.Inputs[6].Id), new RoutePort(RouteKind.Bus, busA.Id, 0)),
@@ -40,9 +40,14 @@ public sealed class DeviceGainAndSnapshotFadeTests
         Assert.Equal(expected, outBufs[7][255], 4);
 
         Span<float> busPeaks = stackalloc float[2];
-        engine.ReadBusPeaks(busPeaks);
+        Span<float> busChannelPeaks = stackalloc float[4];
+        engine.ReadBusPeaks(busPeaks, busChannelPeaks);
         Assert.Equal(expected, busPeaks[0], 3);
         Assert.Equal(expected, busPeaks[1], 3);
+        Assert.Equal(0f, busChannelPeaks[0]);
+        Assert.Equal(expected, busChannelPeaks[1], 3);
+        Assert.Equal(expected, busChannelPeaks[2], 3);
+        Assert.Equal(0f, busChannelPeaks[3]);
 
         long allocBefore = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 50; i++) engine.Process(inBufs, outBufs, 256);

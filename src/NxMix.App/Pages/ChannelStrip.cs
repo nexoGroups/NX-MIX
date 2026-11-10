@@ -5,7 +5,7 @@ using Vortice.Mathematics;
 
 namespace NxMix.App.Pages;
 
-/// <summary>Scribble-Strip-Kopf eines Kanalstreifens: Nummer, Name, Gerätemarke. Klick öffnet das Kanal-Blatt.</summary>
+/// <summary>Kanalstreifen-Kopf mit direkt bearbeitbarem Namen und Zugriff auf die Kanal-Einstellungen.</summary>
 internal sealed class StripHeader : Widget
 {
     readonly ChannelStrip _strip;
@@ -13,30 +13,36 @@ internal sealed class StripHeader : Widget
     public string Name = "";
     public bool NamePlaceholder;
     public Color4? Mark;
+    public int? ColorIndex;
     Motion _selection;
 
     public StripHeader(ChannelStrip strip) { _strip = strip; Cursor = CursorKind.Hand; }
 
     public override bool AcceptsMouse => Visible;
-    public override CursorKind CursorAt(float x, float y) => _strip.IsMaster ? CursorKind.Arrow : CursorKind.Hand;
+    public override CursorKind CursorAt(float x, float y) => NameBounds.Contains(x, y) ? CursorKind.IBeam : CursorKind.Hand;
     public override void OnMouseEnter() => Invalidate();
     public override void OnMouseLeave() => Invalidate();
     public override void OnMouseDown(in MouseEvent e) => Invalidate();
     public override void OnMouseUp(in MouseEvent e)
     {
         Invalidate();
-        if (_strip.IsMaster || !HitOnRelease(e)) return;
-        if (e.Button is 0 or 1) _strip.OpenSheet();
+        if (!HitOnRelease(e)) return;
+        if (e.Button == 0 && NameBounds.Contains(e.X, e.Y)) _strip.Rename(NameBounds);
+        else if (e.Button is 0 or 1) _strip.OpenSheet();
     }
 
-    public override string? TooltipAt(float x, float y) => _strip.IsMaster ? null : "Kanal-Einstellungen öffnen";
+    RectF NameBounds => RectF.FromLTRB(Bounds.X + 4, Bounds.Y + 20, Bounds.Right - 4, Bounds.Bottom - 4);
+    public override string? TooltipAt(float x, float y) =>
+        NameBounds.Contains(x, y) ? "Klick: umbenennen · Rechtsklick: Kanal-Einstellungen" : "Kanal-Einstellungen öffnen";
 
     public override void Paint(Renderer g)
     {
         var b = Bounds;
         float selected = _selection.At(Root, _strip.Selected ? 1 : 0, Motion.Selection);
-        float hover = HoverAmount(IsHovered && !_strip.IsMaster);
+        float hover = HoverAmount(IsHovered);
         var bg = Theme.Mix(Theme.Mix(Theme.Control, Theme.ControlHover, hover), Theme.AccentSoft, selected);
+        var channelColor = ChannelColors.Get(ColorIndex);
+        if (channelColor is Color4 color) bg = Theme.Mix(bg, color, 0.18f);
         g.FillRound(b, Theme.RadiusControl, bg);
         if (selected > 0) g.StrokeRound(b, Theme.RadiusControl, Theme.Accent.With(selected), 1.5f);
         if (Mark is Color4 mk) g.FillPill(new RectF(b.CX - b.W * 0.3f, b.Y + 4, b.W * 0.6f, 3), mk);
@@ -44,24 +50,24 @@ internal sealed class StripHeader : Widget
         if (Number.Length > 0)
         {
             g.Text(Number, new RectF(b.X + 3, y, b.W - 6, 13), Theme.MicroStrong,
-                Theme.Mix(Theme.TextTertiary, Theme.AccentText, selected), HAlign.Center, VAlign.Middle, false);
-            y += 13;
+                channelColor ?? Theme.Mix(Theme.TextTertiary, Theme.AccentText, selected), HAlign.Center, VAlign.Middle, false);
         }
-        var nr = RectF.FromLTRB(b.X + 4, y, b.Right - 4, b.Bottom - 4);
-        var font = _strip.IsMaster ? Theme.BodyStrong : (b.W < 76 ? Theme.CaptionStrong : Theme.CalloutStrong);
+        var nr = NameBounds;
+        var font = b.W < 76 ? Theme.CaptionStrong : Theme.CalloutStrong;
         g.Text(Name, nr, font, NamePlaceholder ? Theme.TextTertiary : Theme.Text, HAlign.Center, VAlign.Middle, true, true);
     }
 }
 
-/// <summary>Einzelkanal-Streifen (Eingang, Ausgang oder Global-Master).
+/// <summary>Einzelkanal-Streifen (Eingang oder Ausgang).
 /// Eingänge zeigen ehrlich „Kanal / HPF“ (kein leerer Input-EQ!), Ausgänge öffnen mit „DSP“ direkt den Tab Outputs / DSP.</summary>
 internal sealed class ChannelStrip : Widget
 {
     readonly AppModel _m;
     public readonly bool IsInput;
-    public readonly bool IsMaster;
     public int Index;
     public string? CustomDeckLabel;
+    public Action<string>? RenameDeckSlot;
+    public Func<double, bool>? ApplyPairedGain;
 
     public readonly StripHeader Header;
     public readonly Toggle Mute = new("M", () => Theme.Red);
@@ -74,9 +80,9 @@ internal sealed class ChannelStrip : Widget
     readonly List<(Icon Icon, Color4 Color, string? Text, string Tip)> _marks = new();
     RectF _marksRect;
 
-    public ChannelStrip(AppModel m, bool input, int index, bool master = false)
+    public ChannelStrip(AppModel m, bool input, int index)
     {
-        _m = m; IsInput = input; Index = index; IsMaster = master;
+        _m = m; IsInput = input; Index = index;
         Header = Add(new StripHeader(this));
         Add(Meter);
         Add(Fader);
@@ -85,17 +91,6 @@ internal sealed class ChannelStrip : Widget
         ActionBtn = input
             ? new Button("Kanal", ButtonStyle.Gray) { Font = Theme.CaptionStrong, Tooltip = "Trim, Low-Cut (HPF), Pan, Laufzeit & App-Link" }
             : new Button("DSP", ButtonStyle.Tinted) { Font = Theme.CaptionStrong, Tooltip = "Ausgangs-DSP (Crossover, PEQ, REW & Limiter) öffnen" };
-
-        if (master)
-        {
-            Header.Name = "Master";
-            Fader.ScaleTop = Theme.MasterMaxDb;
-            Fader.MaxDb = Theme.MasterMaxDb;
-            Fader.Changed += v => _m.SetMaster(v);
-            Readout.Typed += s => ApplyTyped(s, db => _m.SetMaster(Math.Min(db, Theme.MasterMaxDb)));
-            Meter.ExtraTooltip = "Globaler Summen-Master";
-            return;
-        }
 
         Add(Mute); Add(Solo); Add(ActionBtn);
         ActionBtn.Clicked += () =>
@@ -106,8 +101,24 @@ internal sealed class ChannelStrip : Widget
         Mute.Tooltip = "Stumm"; Solo.Tooltip = "Solo";
         Mute.Toggled += on => _m.UpdateChannel(IsInput, Index, c => c with { Mute = on });
         Solo.Toggled += on => _m.UpdateChannel(IsInput, Index, c => c with { Solo = on });
-        Fader.Changed += v => _m.UpdateChannel(IsInput, Index, c => c with { GainDb = v });
-        Readout.Typed += s => ApplyTyped(s, db => _m.UpdateChannel(IsInput, Index, c => c with { GainDb = Math.Min(db, c.MaxGainDb) }));
+        Fader.Changed += SetGain;
+        Readout.Typed += s => ApplyTyped(s, SetGain);
+    }
+
+    void SetGain(double db)
+    {
+        if (ApplyPairedGain?.Invoke(db) != true)
+            _m.UpdateChannel(IsInput, Index, c => c with { GainDb = Math.Min(db, c.MaxGainDb) });
+    }
+
+    public void Rename(RectF bounds)
+    {
+        var channel = _m.Channel(IsInput, Index);
+        Root?.BeginEdit(bounds, Header.Name, Theme.CaptionStrong, text =>
+        {
+            if (RenameDeckSlot is { } rename) rename(text);
+            else _m.UpdateChannelById(IsInput, channel.Id, c => c with { Name = text.Trim() });
+        }, 40, align: HAlign.Center);
     }
 
     void ApplyTyped(string text, Action<double> apply)
@@ -117,26 +128,19 @@ internal sealed class ChannelStrip : Widget
         Sync();
     }
 
-    public bool Selected => !IsMaster && Root != null && Root.Overlays.Any(o => o is ChannelSheet s && s.IsInput == IsInput && s.Index == Index);
+    public bool Selected => Root != null && Root.Overlays.Any(o => o is ChannelSheet s && s.IsInput == IsInput && s.Index == Index);
 
     public void OpenSheet()
     {
-        var root = Root; if (root == null || IsMaster) return;
+        var root = Root; if (root == null) return;
         ChannelSheet.Show(root, _m, IsInput, Index);
     }
 
     public void Sync()
     {
-        if (IsMaster)
-        {
-            double mg = _m.Settings.MasterGainDb;
-            Fader.SetValue(mg);
-            Readout.Text = Db.Format(mg);
-            Readout.TextColor = mg > 0.05 ? Theme.Yellow : null;
-            return;
-        }
         if (Index < 0 || Index >= (IsInput ? _m.InputCount : _m.OutputCount)) return;
         var c = _m.Channel(IsInput, Index);
+        Header.ColorIndex = c.ColorIndex;
         var link = IsInput ? _m.LinkAt(Index) : null;
         Header.Number = (IsInput ? "IN " : "OUT ") + (Index + 1).ToString("00");
 
@@ -191,29 +195,25 @@ internal sealed class ChannelStrip : Widget
         float pad = 6f;
         float x0 = b.X + pad, w = Math.Max(10, b.W - pad * 2);
         float y = b.Y + pad;
-        Header.Bounds = new RectF(x0, y, w, IsMaster ? 40 : Theme.StripHeaderH);
+        Header.Bounds = new RectF(x0, y, w, Theme.StripHeaderH);
         y = Header.Bounds.Bottom + 4;
-        if (!IsMaster)
+        _marksRect = new RectF(x0, y, w, 16);
+        y += 20;
+        float bh = Theme.MuteSoloH;
+        if (w >= 2 * 24 + 4)
         {
-            _marksRect = new RectF(x0, y, w, 16);
-            y += 20;
-            float bh = Theme.MuteSoloH;
-            if (w >= 2 * 24 + 4)
-            {
-                float hw = (w - 4) / 2;
-                Mute.Bounds = new RectF(x0, y, hw, bh);
-                Solo.Bounds = new RectF(x0 + hw + 4, y, hw, bh);
-                y += bh + 6;
-            }
-            else
-            {
-                Mute.Bounds = new RectF(x0, y, w, bh); y += bh + 4;
-                Solo.Bounds = new RectF(x0, y, w, bh); y += bh + 6;
-            }
-            ActionBtn.Bounds = new RectF(x0, y, w, Theme.ControlHSmall);
-            y = ActionBtn.Bounds.Bottom + 6;
+            float hw = (w - 4) / 2;
+            Mute.Bounds = new RectF(x0, y, hw, bh);
+            Solo.Bounds = new RectF(x0 + hw + 4, y, hw, bh);
+            y += bh + 6;
         }
-        else y += 8;
+        else
+        {
+            Mute.Bounds = new RectF(x0, y, w, bh); y += bh + 4;
+            Solo.Bounds = new RectF(x0, y, w, bh); y += bh + 6;
+        }
+        ActionBtn.Bounds = new RectF(x0, y, w, Theme.ControlHSmall);
+        y = ActionBtn.Bounds.Bottom + 6;
 
         float rh = Theme.Touch ? 32 : 26;
         float by = b.Bottom - pad - rh;
@@ -235,7 +235,7 @@ internal sealed class ChannelStrip : Widget
         var b = Bounds;
         g.FillRound(b, Theme.RadiusInner, Theme.Surface2);
         if (Selected) g.StrokeRound(b, Theme.RadiusInner, Theme.Accent.With(0.6f), 1.5f);
-        if (!IsMaster && _marks.Count > 0) PaintMarks(g);
+        if (_marks.Count > 0) PaintMarks(g);
         PaintChildren(g);
     }
 
@@ -274,7 +274,13 @@ internal sealed class DeviceMasterStrip : Widget
     public readonly Guid DeviceId;
     public readonly bool IsInput;
     readonly string _fallbackTitle;
-    readonly int _memberCount;
+    readonly IReadOnlyList<int> _members;
+    readonly StripMeters _meters;
+    readonly Button _name = new("", ButtonStyle.Tinted) { Font = Theme.CaptionStrong, Tooltip = "Klick: umbenennen" };
+    public Action<string>? RenameDeckSlot;
+    public Func<double, bool>? ApplyPairedGain;
+    public string? CustomDeckLabel;
+    public float ExtraMeterWidth => _meters.ExtraWidth;
     readonly Action _onToggleExpand;
     readonly Func<bool> _isExpanded;
 
@@ -282,16 +288,16 @@ internal sealed class DeviceMasterStrip : Widget
     public readonly Toggle Dim = new("DIM", () => Theme.Orange) { Font = Theme.MicroStrong, Tooltip = "Dim (−20 dB Absenkung)" };
     public readonly Button ExpandBtn;
     public readonly Fader Fader = new();
-    public readonly Meter Meter = new();
     public readonly ValueBox Readout = new();
 
-    public DeviceMasterStrip(AppModel m, Guid deviceId, string title, bool isInput, int memberCount, Func<bool> isExpanded, Action onToggleExpand)
+    public DeviceMasterStrip(AppModel m, Guid deviceId, string title, bool isInput, IReadOnlyList<int> members, Func<bool> isExpanded, Action onToggleExpand)
     {
         _m = m;
         DeviceId = deviceId;
         IsInput = isInput;
         _fallbackTitle = title;
-        _memberCount = memberCount;
+        _members = members;
+        _meters = new StripMeters(this, Math.Max(1, members.Count));
         _isExpanded = isExpanded;
         _onToggleExpand = onToggleExpand;
 
@@ -302,19 +308,31 @@ internal sealed class DeviceMasterStrip : Widget
         };
         ExpandBtn.Clicked += () => _onToggleExpand();
 
-        Add(Mute); Add(Dim); Add(ExpandBtn); Add(Meter); Add(Fader); Add(Readout);
+        Add(_name); Add(Mute); Add(Dim); Add(ExpandBtn); Add(Fader); Add(Readout);
+        _name.Clicked += () => Root?.BeginEdit(_name.Bounds, _name.Text, _name.Font, text =>
+        {
+            if (RenameDeckSlot is { } rename) rename(text);
+            else if (!string.IsNullOrWhiteSpace(text))
+                _m.RenameDeviceFader(DeviceId, text);
+        }, 40, align: HAlign.Center);
 
         Fader.ScaleTop = Theme.FaderMaxDb;
         Fader.MaxDb = Theme.FaderMaxDb;
         Mute.Toggled += on => _m.UpdateDeviceMaster(DeviceId, d => d with { Mute = on }, _fallbackTitle, IsInput);
         Dim.Toggled += on => _m.UpdateDeviceMaster(DeviceId, d => d with { Dim = on }, _fallbackTitle, IsInput);
-        Fader.Changed += v => _m.UpdateDeviceMaster(DeviceId, d => d with { GainDb = v }, _fallbackTitle, IsInput);
+        Fader.Changed += SetGain;
         Readout.Typed += text =>
         {
             if (Db.TryParse(text, out double db))
-                _m.UpdateDeviceMaster(DeviceId, d => d with { GainDb = Math.Clamp(db, -120, Theme.FaderMaxDb) }, _fallbackTitle, IsInput);
+                SetGain(db);
             Sync();
         };
+    }
+
+    void SetGain(double db)
+    {
+        if (ApplyPairedGain?.Invoke(db) != true)
+            _m.UpdateDeviceMaster(DeviceId, d => d with { GainDb = Db.IsOff(db) ? double.NegativeInfinity : Math.Clamp(db, -120, Theme.FaderMaxDb) }, _fallbackTitle, IsInput);
     }
 
     public void Sync()
@@ -327,19 +345,27 @@ internal sealed class DeviceMasterStrip : Widget
         Readout.Text = Db.Format(gain);
         Readout.TextColor = dm?.Dim == true ? Theme.Orange : gain > 0.05 ? Theme.Yellow : null;
         bool exp = _isExpanded();
-        ExpandBtn.Text = _memberCount > 0 ? (exp ? $"▾ {_memberCount} CH" : $"▸ {_memberCount} CH") : "Gerät";
+        ExpandBtn.Text = _members.Count > 0 ? (exp ? $"▾ {_members.Count} CH" : $"▸ {_members.Count} CH") : "Gerät";
         ExpandBtn.Style = exp ? ButtonStyle.Filled : ButtonStyle.Tinted;
-        ExpandBtn.Enabled = _memberCount > 0;
-        Meter.ExtraTooltip = $"Geräte-Summenpegel ({_fallbackTitle})";
+        ExpandBtn.Enabled = _members.Count > 0;
+        _name.Text = CustomDeckLabel ?? (!string.IsNullOrWhiteSpace(dm?.Name) ? dm.Name : _fallbackTitle);
     }
 
-    public bool FeedMeter(float peak, float dt) => Meter.Feed(peak, dt);
+    public bool FeedMeters(float dt)
+    {
+        if (_members.Count == 0) return _meters.Feed(0, _m.GetDeviceMasterPeak(DeviceId), dt);
+        bool changed = false;
+        for (int i = 0; i < _members.Count; i++)
+            changed |= _meters.Feed(i, IsInput ? _m.GetInputPeak(_members[i]) : _m.GetOutputPeak(_members[i]), dt);
+        return changed;
+    }
 
     public override void Layout()
     {
         var b = Bounds;
         float pad = 6f;
         float x0 = b.X + pad, w = Math.Max(10, b.W - pad * 2);
+        _name.Bounds = new RectF(x0, b.Y + pad + 20, w, Theme.StripHeaderH - 20);
         float y = b.Y + pad + Theme.StripHeaderH + 24;
 
         float bh = Theme.MuteSoloH;
@@ -356,15 +382,14 @@ internal sealed class DeviceMasterStrip : Widget
         Readout.Bounds = new RectF(x0, by, w, rh);
 
         float fy = y, fh = Math.Max(20, by - 8 - fy);
-        float mw = Theme.MeterW;
-        Meter.Bounds = new RectF(b.Right - pad - mw - 2, fy + 4, mw, Math.Max(10, fh - 8));
+        _meters.Layout(b.Right - pad - 2, fy + 4, Math.Max(10, fh - 8));
         Fader.ShowLabels = b.W >= 68;
-        Fader.Bounds = new RectF(x0, fy, Math.Max(10, Meter.Bounds.X - x0 - 4), fh);
+        Fader.Bounds = new RectF(x0, fy, Math.Max(10, _meters.Bounds.X - x0 - 4), fh);
         foreach (var c in Children) c.Layout();
     }
 
     public override bool OnMouseWheel(in MouseEvent e) =>
-        Meter.Bounds.Contains(e.X, e.Y) && Fader.OnMouseWheel(e);
+        _meters.Bounds.Contains(e.X, e.Y) && Fader.OnMouseWheel(e);
 
     public override void Paint(Renderer g)
     {
@@ -378,12 +403,35 @@ internal sealed class DeviceMasterStrip : Widget
         g.FillPill(new RectF(head.CX - head.W * 0.32f, head.Y + 4, head.W * 0.64f, 3), accent);
         g.Text(IsInput ? "DEV IN" : "DEV OUT", new RectF(head.X + 4, head.Y + 7, head.W - 8, 13), Theme.MicroStrong, accent, HAlign.Center);
 
-        var dm = _m.GetDeviceMaster(DeviceId);
-        string title = !string.IsNullOrWhiteSpace(dm?.Name) ? dm!.Name : _fallbackTitle;
-        g.Text(title, new RectF(head.X + 4, head.Y + 20, head.W - 8, head.H - 23),
-            b.W < 76 ? Theme.CaptionStrong : Theme.CalloutStrong, Theme.Text, HAlign.Center, VAlign.Middle, true, true);
-
         g.Text("MASTER", new RectF(b.X + 6, head.Bottom + 3, b.W - 12, 16), Theme.MicroStrong, Theme.TextTertiary, HAlign.Center);
         PaintChildren(g);
     }
+}
+
+
+/// <summary>Ein schmaler Pegelbalken je Kanal eines gemeinsamen Faders.</summary>
+internal sealed class StripMeters
+{
+    readonly Meter[] _meters;
+    const float Gap = 3;
+
+    public StripMeters(Widget owner, int count)
+    {
+        _meters = new Meter[count];
+        for (int i = 0; i < count; i++)
+            _meters[i] = owner.Add(new Meter { ExtraTooltip = $"Pegel · Kanal {i + 1}" });
+    }
+
+    public RectF Bounds { get; private set; }
+    public float ExtraWidth => (_meters.Length - 1) * (Theme.MeterW + Gap);
+
+    public void Layout(float right, float y, float height)
+    {
+        float width = Theme.MeterW + ExtraWidth;
+        Bounds = new RectF(right - width, y, width, height);
+        for (int i = 0; i < _meters.Length; i++)
+            _meters[i].Bounds = new RectF(Bounds.X + i * (Theme.MeterW + Gap), y, Theme.MeterW, height);
+    }
+
+    public bool Feed(int channel, float peak, float dt) => _meters[channel].Feed(peak, dt);
 }

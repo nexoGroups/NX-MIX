@@ -17,6 +17,7 @@ internal sealed class StripBankPanel : Widget
     public readonly List<Widget> Items = new();
     public readonly List<(int FirstItem, int LastItem, string Label, Color4 Color)> Brackets = new();
     public readonly Button HeaderAction;
+    public readonly List<(Widget First, Widget Second)> Pairs = new();
 
     RectF _viewport;
     float _scroll;
@@ -39,6 +40,7 @@ internal sealed class StripBankPanel : Widget
         foreach (var w in Items) { Children.Remove(w); w.Parent = null; }
         Items.Clear();
         Brackets.Clear();
+        Pairs.Clear();
     }
 
     public T AddStrip<T>(T w) where T : Widget
@@ -51,7 +53,13 @@ internal sealed class StripBankPanel : Widget
 
     public void SetStripWidth(float w) => _stripW = w;
 
-    float WidthOf(Widget w) => w is DeckSpacerWidget ? 26f : _stripW;
+    float WidthOf(Widget w) => w switch
+    {
+        DeckSpacerWidget => 26f,
+        DeviceMasterStrip device => _stripW + device.ExtraMeterWidth,
+        BusStrip bus => _stripW + bus.ExtraMeterWidth,
+        _ => _stripW,
+    };
 
     public float ContentWidth
     {
@@ -148,10 +156,14 @@ internal sealed class StripBankPanel : Widget
     public override void OnMouseMove(in MouseEvent e) { if (_dragBar && IsPressed) DragBarTo(e.X); }
     public override void OnMouseUp(in MouseEvent e) { _dragBar = false; Invalidate(); }
 
-    public override bool OnMouseWheel(in MouseEvent e)
+    public override bool OnHorizontalWheel(in MouseEvent e) => ScrollBy(e.Wheel);
+
+    public override bool OnMouseWheel(in MouseEvent e) => ScrollBy(-e.Wheel);
+
+    bool ScrollBy(float notches)
     {
         if (ContentWidth <= _viewport.W) return false;
-        _scroll = Math.Clamp(_scroll - e.Wheel * 70, 0, Math.Max(0, ContentWidth - _viewport.W));
+        _scroll = Math.Clamp(_scroll + notches * 70, 0, Math.Max(0, ContentWidth - _viewport.W));
         Layout();
         return true;
     }
@@ -183,6 +195,15 @@ internal sealed class StripBankPanel : Widget
         foreach (var s in Items)
             if (s.Bounds.Right > _viewport.X && s.Bounds.X < _viewport.Right)
                 s.Paint(g);
+        foreach (var (first, second) in Pairs)
+        {
+            float x = (first.Bounds.Right + second.Bounds.X) / 2;
+            float y = _viewport.Y + 6 + Theme.StripHeaderH + 8;
+            var mark = new RectF(x - 11, y - 10, 22, 20);
+            g.FillPill(mark, Theme.Well);
+            g.StrokeRound(mark, 10, Theme.Accent);
+            Icons.Draw(g, Icon.Link, x, y, 13, Theme.AccentText);
+        }
         g.PopClip();
 
         if (_barTrack.W > 0)
@@ -204,7 +225,6 @@ internal sealed class DeckSpacerWidget : Widget
     }
 }
 
-internal sealed class MasterContainerWidget : Widget { }
 
 /// <summary>Haupt-Mischpult-Seite im Mixing-Station-Stil:
 /// Oben Deck-Schnellwahl („Hauptpult (Geräte)“ + eigene Fader-Decks + Kompakt/Detailliert).
@@ -216,8 +236,6 @@ internal sealed class MixerPage : Page
     readonly StripBankPanel _busBank;
     readonly StripBankPanel _outBank;
     readonly StripBankPanel _customDeckBank;
-    readonly MasterContainerWidget _masterCard = new();
-    readonly ChannelStrip _masterStrip;
 
     readonly List<Button> _deckButtons = new();
     readonly Button _manageDecksBtn = new("Decks …", ButtonStyle.Gray, Icon.Decks) { Font = Theme.CalloutMedium };
@@ -227,11 +245,10 @@ internal sealed class MixerPage : Page
     public override string Title => "Mixer";
     public override Icon Icon => Icon.Mixer;
     public override string? Subtitle =>
-        $"{Fmt.Inputs(_m.InputCount)}  ·  {_m.BusCount} Busse  ·  {Fmt.Outputs(_m.OutputCount)}";
+        $"{Fmt.Inputs(_m.Settings.Inputs.Count(_m.IsChannelVisible))}  ·  {_m.BusCount} Busse  ·  {Fmt.Outputs(_m.Settings.Outputs.Count(_m.IsChannelVisible))}";
 
     internal IReadOnlyList<ChannelStrip> InputChannelStrips => _inBank.Items.OfType<ChannelStrip>().ToList();
     internal IReadOnlyList<ChannelStrip> OutputChannelStrips => _outBank.Items.OfType<ChannelStrip>().ToList();
-    internal ChannelStrip Master => _masterStrip;
 
     public MixerPage(AppModel m)
     {
@@ -261,8 +278,6 @@ internal sealed class MixerPage : Page
             EmptyBody = "Füge im Tab „Decks“ beliebige Geräte-Master, Einzelkanäle, Busse oder Virtual-I/O-Slots hinzu.",
         });
 
-        Add(_masterCard);
-        _masterStrip = _masterCard.Add(new ChannelStrip(m, false, 0, master: true));
 
         Add(_manageDecksBtn);
         Add(_densitySeg);
@@ -384,7 +399,7 @@ internal sealed class MixerPage : Page
             {
                 if (channels[i].DeviceId == devId)
                 {
-                    memberIndices.Add(i);
+                    if (_m.IsChannelVisible(channels[i])) memberIndices.Add(i);
                     handled[i] = true;
                 }
             }
@@ -398,7 +413,7 @@ internal sealed class MixerPage : Page
                 capturedId,
                 title,
                 isInput,
-                memberIndices.Count,
+                memberIndices,
                 () => _m.IsMainDeviceExpanded(capturedId),
                 () => _m.ToggleMainDeviceExpanded(capturedId)));
 
@@ -414,7 +429,7 @@ internal sealed class MixerPage : Page
         // Übrige Kanäle ohne Geräte-Zugehörigkeit (z. B. App-Links oder manuelle Einzelkanäle)
         for (int i = 0; i < channels.Count; i++)
         {
-            if (!handled[i])
+            if (!handled[i] && _m.IsChannelVisible(channels[i]))
                 bank.AddStrip(new ChannelStrip(_m, isInput, i));
         }
     }
@@ -424,9 +439,18 @@ internal sealed class MixerPage : Page
         _customDeckBank.Title = $"Deck: {deck.Name}";
         _customDeckBank.ClearItems();
 
-        foreach (var item in deck.Items)
+        var pairStarts = new Dictionary<Guid, Widget>();
+        var pendingMembers = new List<(bool Input, int Index)>();
+        for (int slotIndex = 0; slotIndex < deck.Items.Count; slotIndex++)
         {
-            var slot = item;
+            var slot = deck.Items[slotIndex];
+            int start = _customDeckBank.Items.Count;
+            var peer = slot.FaderPairId is { } id
+                ? deck.Items.FirstOrDefault(item => item.FaderPairId == id && item.ItemId != slot.ItemId)
+                : null;
+            bool startsPair = peer != null && slotIndex + 1 < deck.Items.Count && deck.Items[slotIndex + 1].ItemId == peer.ItemId;
+            Action<string> rename = name => _m.RenameDeckSlot(deck.Id, slot.ItemId, name);
+            Func<double, bool>? pairedGain = peer == null ? null : gain => _m.SetDeckFaderPairGain(slot, peer, gain);
             switch (slot.Kind)
             {
                 case DeckItemKind.DeviceMaster:
@@ -436,9 +460,10 @@ internal sealed class MixerPage : Page
                         var devNode = _m.Config.Devices.FirstOrDefault(d => d.Id == slot.TargetId);
                         var vaio = _m.Config.Vaios.FirstOrDefault(v => v.Id == slot.TargetId);
                         bool isInput = dm?.IsInput ?? (devNode != null ? devNode.Flow == DeviceFlow.Capture : vaio?.Flow == DeviceFlow.Capture);
-                        string title = slot.CustomLabel ?? devNode?.DisplayTitle ?? vaio?.Name ?? dm?.Name ?? "Gerät";
+                        string title = devNode?.DisplayTitle ?? vaio?.Name ?? dm?.Name ?? "Gerät";
                         var chList = isInput ? _m.Settings.Inputs : _m.Settings.Outputs;
-                        var members = Enumerable.Range(0, chList.Count).Where(idx => chList[idx].DeviceId == slot.TargetId).ToList();
+                        var members = Enumerable.Range(0, chList.Count)
+                            .Where(idx => chList[idx].DeviceId == slot.TargetId && _m.IsChannelVisible(chList[idx])).ToList();
 
                         int first = _customDeckBank.Items.Count;
                         _customDeckBank.AddStrip(new DeviceMasterStrip(
@@ -446,11 +471,18 @@ internal sealed class MixerPage : Page
                             slot.TargetId,
                             title,
                             isInput,
-                            members.Count,
+                            members,
                             () => slot.ExpandedInline,
-                            () => _m.ToggleDeckSlotExpanded(deck.Id, slot.ItemId)));
+                            () => _m.ToggleDeckSlotExpanded(deck.Id, slot.ItemId))
+                        {
+                            ApplyPairedGain = pairedGain,
+                            CustomDeckLabel = slot.CustomLabel,
+                            RenameDeckSlot = rename,
+                        });
 
-                        if (slot.ExpandedInline && members.Count > 0)
+                        if (slot.ExpandedInline && startsPair)
+                            pendingMembers.AddRange(members.Select(index => (isInput, index)));
+                        else if (slot.ExpandedInline && members.Count > 0)
                         {
                             foreach (int chIdx in members)
                                 _customDeckBank.AddStrip(new ChannelStrip(_m, isInput, chIdx));
@@ -461,24 +493,43 @@ internal sealed class MixerPage : Page
                 case DeckItemKind.InputChannel:
                     {
                         int idx = IndexOfChannel(_m.Settings.Inputs, slot.TargetId);
-                        if (idx >= 0) _customDeckBank.AddStrip(new ChannelStrip(_m, true, idx) { CustomDeckLabel = slot.CustomLabel });
+                        if (idx >= 0 && _m.IsChannelVisible(_m.Settings.Inputs[idx]))
+                            _customDeckBank.AddStrip(new ChannelStrip(_m, true, idx) { CustomDeckLabel = slot.CustomLabel, ApplyPairedGain = pairedGain, RenameDeckSlot = rename });
                         break;
                     }
                 case DeckItemKind.OutputChannel:
                     {
                         int idx = IndexOfChannel(_m.Settings.Outputs, slot.TargetId);
-                        if (idx >= 0) _customDeckBank.AddStrip(new ChannelStrip(_m, false, idx) { CustomDeckLabel = slot.CustomLabel });
+                        if (idx >= 0 && _m.IsChannelVisible(_m.Settings.Outputs[idx]))
+                            _customDeckBank.AddStrip(new ChannelStrip(_m, false, idx) { CustomDeckLabel = slot.CustomLabel, ApplyPairedGain = pairedGain, RenameDeckSlot = rename });
                         break;
                     }
                 case DeckItemKind.MixBus:
                     if (_m.Settings.Buses.Any(b => b.Id == slot.TargetId))
-                        _customDeckBank.AddStrip(new BusStrip(_m, slot.TargetId));
+                        _customDeckBank.AddStrip(new BusStrip(_m, slot.TargetId) { CustomDeckLabel = slot.CustomLabel, ApplyPairedGain = pairedGain, RenameDeckSlot = rename });
                     break;
                 case DeckItemKind.Spacer:
                     _customDeckBank.AddStrip(new DeckSpacerWidget(slot.CustomLabel));
                     break;
             }
+
+            if (slot.FaderPairId is not { } pair || peer == null) continue;
+            if (_customDeckBank.Items.Count > start)
+            {
+                var strip = _customDeckBank.Items[start];
+                if (pairStarts.Remove(pair, out var first))
+                    _customDeckBank.Pairs.Add((first, strip));
+                else pairStarts.Add(pair, strip);
+            }
+            if (!startsPair)
+            {
+                foreach (var (input, index) in pendingMembers)
+                    _customDeckBank.AddStrip(new ChannelStrip(_m, input, index));
+                pendingMembers.Clear();
+            }
         }
+        foreach (var (input, index) in pendingMembers)
+            _customDeckBank.AddStrip(new ChannelStrip(_m, input, index));
     }
 
     static int IndexOfChannel(IReadOnlyList<ChannelDsp> list, Guid id)
@@ -502,7 +553,6 @@ internal sealed class MixerPage : Page
         SyncBank(_busBank);
         SyncBank(_outBank);
         SyncBank(_customDeckBank);
-        _masterStrip.Sync();
         Invalidate();
     }
 
@@ -536,19 +586,13 @@ internal sealed class MixerPage : Page
 
         var body = new RectF(area.X, area.Y + barH + 10, area.W, Math.Max(0, area.H - barH - 10));
         float stripW = compact ? (Theme.Touch ? 82f : 68f) : (Theme.Touch ? 104f : 90f);
-        float masterStripW = Theme.Touch ? 100f : 88f;
-        float masterCardW = masterStripW + 2 * StripBankPanel.Inner;
 
         bool isCustom = _m.ActiveCustomDeck != null;
         _customDeckBank.Visible = isCustom;
         _inBank.Visible = _outBank.Visible = !isCustom;
         _busBank.Visible = !isCustom && (_m.BusCount > 0 || body.W >= 1280);
 
-        _masterCard.Bounds = new RectF(body.Right - masterCardW, body.Y, masterCardW, body.H);
-        _masterStrip.Bounds = new RectF(_masterCard.Bounds.X + StripBankPanel.Inner, body.Y + 48, masterStripW, Math.Max(40, body.H - 48 - StripBankPanel.Inner));
-        _masterStrip.Layout();
-
-        float freeW = Math.Max(0, _masterCard.Bounds.X - Theme.Gap - body.X);
+        float freeW = body.W;
 
         if (isCustom)
         {
@@ -566,7 +610,7 @@ internal sealed class MixerPage : Page
         {
             float minBusW = Math.Min(132f, freeW * 0.24f);
             float maxBusW = Math.Max(minBusW, freeW * 0.26f);
-            float busDesired = Math.Clamp(2 * StripBankPanel.Inner + Math.Max(1, _busBank.Items.Count) * (stripW + Theme.StripGap), minBusW, maxBusW);
+            float busDesired = Math.Clamp(2 * StripBankPanel.Inner + Math.Max(stripW, _busBank.ContentWidth), minBusW, maxBusW);
             float rem = Math.Max(0, freeW - busDesired - 2 * Theme.Gap);
             float inW = rem * 0.52f;
             float outW = rem - inW;
@@ -589,8 +633,6 @@ internal sealed class MixerPage : Page
 
     public override void Paint(Renderer g)
     {
-        Draw.Card(g, _masterCard.Bounds);
-        Draw.CardTitle(g, new RectF(_masterCard.Bounds.X + Theme.CardPad, _masterCard.Bounds.Y + 2, 90, 48), "Master");
         PaintChildren(g);
     }
 
@@ -605,18 +647,15 @@ internal sealed class MixerPage : Page
             {
                 switch (w)
                 {
-                    case ChannelStrip cs when !cs.IsMaster:
+                    case ChannelStrip cs:
                         float cp = cs.IsInput ? _m.GetInputPeak(cs.Index) : _m.GetOutputPeak(cs.Index);
                         changed |= cs.FeedMeter(cp, dt);
                         break;
                     case DeviceMasterStrip dms:
-                        changed |= dms.FeedMeter(_m.GetDeviceMasterPeak(dms.DeviceId), dt);
+                        changed |= dms.FeedMeters(dt);
                         break;
                     case BusStrip bs:
-                        int bIdx = -1;
-                        for (int i = 0; i < _m.Settings.Buses.Count; i++)
-                            if (_m.Settings.Buses[i].Id == bs.BusId) { bIdx = i; break; }
-                        if (bIdx >= 0) changed |= bs.FeedMeter(_m.GetBusPeak(bIdx), dt);
+                        changed |= bs.FeedMeters(dt);
                         break;
                 }
             }
@@ -625,9 +664,6 @@ internal sealed class MixerPage : Page
         if (_m.ActiveCustomDeck != null) FeedBank(_customDeckBank);
         else { FeedBank(_inBank); FeedBank(_busBank); FeedBank(_outBank); }
 
-        float maxOut = 0f;
-        for (int o = 0; o < _m.OutputCount; o++) maxOut = Math.Max(maxOut, _m.GetOutputPeak(o));
-        changed |= _masterStrip.FeedMeter(maxOut, dt);
 
         if (changed) Invalidate();
     }

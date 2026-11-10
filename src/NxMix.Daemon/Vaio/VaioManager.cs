@@ -52,12 +52,12 @@ public sealed class NxMixWaveRtProvider : IVaioBackendProvider
 
     public bool IsAvailable(IReadOnlyList<AudioDeviceInfo> catalog, IAppRouteRestorer? restorer, out string statusMessage)
     {
-        int endpoints = catalog.Count(d => d.Flow == DeviceFlow.Render && d.Backend == AudioBackend.Windows &&
-            d.DriverProvider == "NX-MIX WaveRT");
-        statusMessage = endpoints > 0
-            ? $"{endpoints} native NX-MIX-Wiedergabegeräte in Windows verfügbar."
+        int inputs = catalog.Count(d => d.IsNxMixEndpoint && d.Flow == DeviceFlow.Render);
+        int outputs = catalog.Count(d => d.IsNxMixEndpoint && d.NativeOutputPort > 0);
+        statusMessage = inputs + outputs > 0
+            ? $"{inputs} digitale NX-MIX-Eingänge und {outputs} digitale NX-MIX-Ausgänge verfügbar."
             : "Eigene NX-MIX-Wiedergabegeräte erscheinen in Windows, sobald der native WaveRT-Treiber installiert ist. App-Capture kann bereits ohne Treiber den Eingangspegel anzeigen.";
-        return endpoints > 0;
+        return inputs + outputs > 0;
     }
 }
 

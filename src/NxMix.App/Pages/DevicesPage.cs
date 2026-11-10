@@ -208,6 +208,31 @@ internal sealed class DeviceUnitCard : Widget
         }
     }
 
+    string FlowText(AudioDeviceNode node) =>
+        node.Loopback ? "LOOPBACK" : node.Flow == DeviceFlow.Capture ? "EINGANG" : "AUSGANG";
+    static string DriverText(AudioDeviceNode node) => node.Backend == AudioBackend.Asio ? "ASIO" : "WASAPI";
+    bool IsOnline(AudioDeviceNode node) => _m.FindDevice(node.EndpointId) is { } info && string.IsNullOrEmpty(info.UnavailableReason);
+
+    RectF TitleRect(AudioDeviceNode node, bool online)
+    {
+        float left = Bounds.X + Theme.CardPad +
+            Draw.ChipWidth(FlowText(node), false, Theme.MicroStrong) +
+            Draw.ChipWidth(DriverText(node), false, Theme.MicroStrong) +
+            Draw.ChipWidth(online ? "Online" : "Offline", true, Theme.MicroStrong) + 22;
+        float right = (node.Backend == AudioBackend.Asio ? _driverBtn.Bounds.X : _exclSw.Bounds.X - 68) - 10;
+        return new RectF(left, Bounds.Y + 10, Math.Max(40, right - left), 30);
+    }
+
+    public override bool AcceptsMouse => true;
+
+    public override void OnMouseUp(in MouseEvent e)
+    {
+        if (e.Button != 0 || !HitOnRelease(e) || Node is not { } node) return;
+        var title = TitleRect(node, IsOnline(node));
+        if (title.Contains(e.X, e.Y))
+            Root?.BeginEdit(title, node.DisplayTitle, Theme.Headline, name => _m.RenameDeviceFader(node.Id, name), 48);
+    }
+
     public override void Paint(Renderer g)
     {
         var b = Bounds;
@@ -217,22 +242,19 @@ internal sealed class DeviceUnitCard : Widget
 
         float pad = Theme.CardPad;
         float cy1 = b.Y + 12 + Theme.ControlHSmall / 2f;
-        var info = _m.FindDevice(n.EndpointId);
-        bool online = info != null && string.IsNullOrEmpty(info.UnavailableReason);
+        bool online = IsOnline(n);
 
         float x = b.X + pad;
-        float wFlow = Draw.Chip(g, x, cy1, n.Loopback ? "LOOPBACK" : n.Flow == DeviceFlow.Capture ? "EINGANG" : "AUSGANG",
+        float wFlow = Draw.Chip(g, x, cy1, FlowText(n),
             n.Flow == DeviceFlow.Capture ? Theme.Teal : Theme.Accent, dot: false, Theme.MicroStrong);
         x += wFlow + 6;
-        float wDrv = Draw.Chip(g, x, cy1, n.Backend == AudioBackend.Asio ? "ASIO" : "WASAPI",
+        float wDrv = Draw.Chip(g, x, cy1, DriverText(n),
             n.Backend == AudioBackend.Asio ? Theme.Purple : Theme.TextSecondary, dot: false, Theme.MicroStrong);
         x += wDrv + 6;
-        float wOn = Draw.Chip(g, x, cy1, online ? "Online" : "Offline", online ? Theme.Green : Theme.Orange, dot: true, Theme.MicroStrong);
-        x += wOn + 10;
+        Draw.Chip(g, x, cy1, online ? "Online" : "Offline", online ? Theme.Green : Theme.Orange, dot: true, Theme.MicroStrong);
 
-        float rightLimit = (n.Backend == AudioBackend.Asio ? _driverBtn.Bounds.X : _exclSw.Bounds.X - 68) - 10;
         g.Text($"{n.DisplayTitle}  ·  {n.ChannelCount} Kanäle (Engine {n.EngineFirstChannel + 1}..{n.EngineFirstChannel + n.ChannelCount})",
-            new RectF(x, b.Y + 10, Math.Max(40, rightLimit - x), 30), Theme.Headline, Theme.Text);
+            TitleRect(n, online), Theme.Headline, Theme.Text);
 
         if (n.Backend != AudioBackend.Asio)
             g.Text("Exklusiv", new RectF(_exclSw.Bounds.X - 64, b.Y + 12, 58, Theme.ControlHSmall), Theme.CaptionMedium, Theme.TextSecondary, HAlign.Right);

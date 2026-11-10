@@ -1,3 +1,5 @@
+using NxMix.Daemon.Persistence;
+using System.Text.Json;
 using System.Globalization;
 using NxMix.App.Model;
 using NxMix.App.Ui;
@@ -24,7 +26,9 @@ internal sealed class SnapshotsPage : Page
     readonly Button _newBtn = new("+ Neu", ButtonStyle.Filled) { Font = Theme.CaptionStrong, Tooltip = "Aktuellen Live-Mix als neuen Snapshot speichern" };
     readonly Button _updBtn = new("Aktualisieren", ButtonStyle.Gray) { Font = Theme.CaptionMedium, Tooltip = "Ausgewählten Snapshot mit aktuellem Live-Mix überschreiben" };
     readonly Button _dupBtn = new("Kopie", ButtonStyle.Gray, Icon.Copy) { Font = Theme.CaptionMedium, Tooltip = "Ausgewählten Snapshot duplizieren" };
-    readonly Button _renBtn = new("Name", ButtonStyle.Gray, Icon.Edit) { Font = Theme.CaptionMedium, Tooltip = "Ausgewählten Snapshot umbenennen" };
+    readonly Button _exportBtn = new("Datei sichern", ButtonStyle.Gray);
+    readonly Button _importBtn = new("Datei öffnen", ButtonStyle.Tinted);
+    const string FileFilter = "NX-MIX Snapshot (*.nxmix-snapshot.json)|*.nxmix-snapshot.json|JSON (*.json)|*.json";
     readonly Button _delBtn = new("Löschen", ButtonStyle.DestructiveTinted, Icon.Trash) { Font = Theme.CaptionMedium, Tooltip = "Snapshot löschen" };
 
     // Rechte Karte: Recall, Blende, Scope, Diff / Recall-Safe
@@ -47,12 +51,12 @@ internal sealed class SnapshotsPage : Page
     public override string Title => "Snapshots";
     public override Icon Icon => Icon.Snapshots;
     public override string? Subtitle =>
-        $"{_m.Snapshots.Count} gespeicherte Mischpult-Snapshots  ·  Hardware & App-Links bleiben stets unberührt";
+        $"{_m.Snapshots.Count} Mischpult-Snapshots  ·  Einstellungen und Dateisicherung";
 
     public SnapshotsPage(AppModel m)
     {
         _m = m;
-        Add(_newBtn); Add(_updBtn); Add(_dupBtn); Add(_renBtn); Add(_delBtn);
+        Add(_newBtn); Add(_updBtn); Add(_dupBtn); Add(_exportBtn); Add(_importBtn); Add(_delBtn);
         Add(_recallBtn); Add(_fadeSeg); Add(_fadeBox); Add(_scopeDd); Add(_viewSeg);
 
         _newBtn.Clicked += CreateNewSnapshot;
@@ -61,7 +65,8 @@ internal sealed class SnapshotsPage : Page
         {
             if (SelectedSummary is { } s) _m.DuplicateSnapshot(s.Id);
         };
-        _renBtn.Clicked += RenameSelectedSnapshot;
+        _exportBtn.Clicked += ExportSelectedSnapshot;
+        _importBtn.Clicked += ImportSnapshot;
         _delBtn.Clicked += () =>
         {
             if (SelectedSummary is { } s)
@@ -142,19 +147,91 @@ internal sealed class SnapshotsPage : Page
         Layout();
     }
 
-    void CreateNewSnapshot()
+    internal void CreateNewSnapshot()
     {
+        if (Root is not { } root) return;
         string defaultName = $"Szene {_m.Snapshots.Count + 1}";
-        string[] palette = { "#3B82F6", "#10B981", "#F59E0B", "#A855F7", "#EC4899" };
-        string color = palette[_m.Snapshots.Count % palette.Length];
-        _m.SaveSnapshot(null, defaultName, "Aus Live-Mix erfasst", color, _fadeMs, _scope, saved =>
+        string? file = root.Shell.ShowSaveDialog("Live-Mix als Snapshot-Datei speichern", FileFilter, defaultName + ".nxmix-snapshot.json");
+        if (string.IsNullOrWhiteSpace(file)) return;
+        string name = Path.GetFileNameWithoutExtension(file);
+        const string suffix = ".nxmix-snapshot";
+        if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) name = name[..^suffix.Length];
+        _m.SaveSnapshot(null, name, "", "#3B82F6", _fadeMs, _scope, saved =>
         {
-            _selectedId = saved.Id;
-            RefreshPreview();
-            Layout();
-            Invalidate();
-            Root?.Notify.Flash($"Snapshot „{saved.Name}“ gespeichert.");
+            SelectSnapshot(saved.Id);
+            WriteSnapshotFile(file, saved);
         });
+    }
+
+    void ExportSelectedSnapshot()
+    {
+        if (Root is not { } root || SelectedSummary is not { } selected) return;
+        string name = string.Join("_", selected.Name.Split(Path.GetInvalidFileNameChars()));
+        string? file = root.Shell.ShowSaveDialog("Snapshot-Datei sichern", FileFilter, name + ".nxmix-snapshot.json");
+        if (string.IsNullOrWhiteSpace(file)) return;
+        RunFileOperation(async () =>
+        {
+            var snapshot = await _m.Backend.GetSnapshotAsync(selected.Id).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Snapshot nicht gefunden.");
+            DaemonPaths.AtomicWriteJson(file, snapshot);
+            _m.Post(() => Root?.Notify.Flash($"Snapshot-Datei gespeichert: {Path.GetFileName(file)}"));
+        });
+    }
+
+    void ImportSnapshot()
+    {
+        if (Root is not { } root) return;
+        string? file = root.Shell.ShowOpenDialog("Snapshot-Datei öffnen", FileFilter);
+        if (string.IsNullOrWhiteSpace(file)) return;
+        RunFileOperation(async () =>
+        {
+            using var stream = File.OpenRead(file);
+            using var json = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+            if (json.RootElement.ValueKind != JsonValueKind.Object ||
+                !json.RootElement.TryGetProperty("capturedState", out var state) || state.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("Die Datei enthält keinen NX-MIX-Snapshot.");
+            var snapshot = json.RootElement.Deserialize<MixSnapshot>(IpcJson.Options)
+                ?? throw new InvalidDataException("Die Datei enthält keinen NX-MIX-Snapshot.");
+            var imported = await _m.Backend.ImportSnapshotAsync(snapshot).ConfigureAwait(false);
+            _m.Post(() =>
+            {
+                SelectSnapshot(imported.Id);
+                Root?.Notify.Flash($"Snapshot „{imported.Name}“ importiert.");
+            });
+        });
+    }
+
+    void WriteSnapshotFile(string file, MixSnapshot snapshot) =>
+        RunFileOperation(() =>
+        {
+            DaemonPaths.AtomicWriteJson(file, snapshot);
+            _m.Post(() => Root?.Notify.Flash($"Snapshot-Datei gespeichert: {Path.GetFileName(file)}"));
+            return Task.CompletedTask;
+        });
+
+    void RunFileOperation(Func<Task> operation)
+    {
+        async Task RunAsync()
+        {
+            try { await operation().ConfigureAwait(false); }
+            catch (Exception ex) { _m.Post(() => Root?.Notify.Flash("Snapshot-Datei: " + ex.Message, true)); }
+        }
+
+        if (_m.RunInline) RunAsync().GetAwaiter().GetResult();
+        else _ = Task.Run(RunAsync);
+    }
+
+    void SelectSnapshot(Guid id)
+    {
+        _selectedId = id;
+        if (SelectedSummary is { } selected)
+        {
+            _fadeMs = selected.DefaultFadeMs;
+            _scope = selected.DefaultScope;
+        }
+        RefreshPreview();
+        Layout();
+        Invalidate();
     }
 
     void UpdateSelectedSnapshot()
@@ -169,10 +246,10 @@ internal sealed class SnapshotsPage : Page
         });
     }
 
-    void RenameSelectedSnapshot()
+    void RenameSelectedSnapshot(RectF bounds)
     {
         if (SelectedSummary is not { } s || Root == null) return;
-        Root.BeginEdit(_renBtn.Bounds, s.Name, Theme.BodyMedium, nextName =>
+        Root.BeginEdit(bounds, s.Name, Theme.BodyMedium, nextName =>
         {
             if (string.IsNullOrWhiteSpace(nextName)) return;
             _m.RenameSnapshot(s.Id, nextName.Trim(), _ =>
@@ -337,15 +414,18 @@ internal sealed class SnapshotsPage : Page
         _newBtn.Bounds = new RectF(_leftCard.Right - pad - 74, _leftCard.Y + 11, 74, ch);
         float botY = _leftCard.Bottom - pad;
         float halfL = MathF.Floor((_leftCard.W - 2 * pad - 6) / 2f);
-        _renBtn.Bounds = new RectF(_leftCard.X + pad, botY - ch, halfL, ch);
-        _delBtn.Bounds = new RectF(_renBtn.Bounds.Right + 6, botY - ch, _leftCard.W - 2 * pad - halfL - 6, ch);
+        _importBtn.Bounds = new RectF(_leftCard.X + pad, botY - ch, halfL, ch);
+        _delBtn.Bounds = new RectF(_importBtn.Bounds.Right + 6, botY - ch, _leftCard.W - 2 * pad - halfL - 6, ch);
         botY -= ch + 6;
         _updBtn.Bounds = new RectF(_leftCard.X + pad, botY - ch, halfL + 10, ch);
         _dupBtn.Bounds = new RectF(_updBtn.Bounds.Right + 6, botY - ch, _leftCard.W - 2 * pad - (halfL + 10) - 6, ch);
+        botY -= ch + 6;
+        _exportBtn.Bounds = new RectF(_leftCard.X + pad, botY - ch, _leftCard.W - 2 * pad, ch);
         botY -= ch + 10;
 
         bool hasSel = SelectedSummary != null;
-        _updBtn.Enabled = _dupBtn.Enabled = _renBtn.Enabled = _delBtn.Enabled = _recallBtn.Enabled = hasSel && _scope != SnapshotScopeFlags.None;
+        _updBtn.Enabled = _dupBtn.Enabled = _exportBtn.Enabled = _delBtn.Enabled = hasSel;
+        _recallBtn.Enabled = hasSel && _scope != SnapshotScopeFlags.None;
 
         _snapListRect = RectF.FromLTRB(_leftCard.X + pad, _leftCard.Y + 48, _leftCard.Right - pad, Math.Max(_leftCard.Y + 64, botY));
         _snapScroll.Update(_snapListRect, _m.Snapshots.Count * (SnapRowH + 5));
@@ -379,6 +459,9 @@ internal sealed class SnapshotsPage : Page
     RectF SnapRowRect(int i) =>
         new(_snapListRect.X, _snapListRect.Y + i * (SnapRowH + 5) - _snapScroll.Offset,
             _snapListRect.W - (_snapScroll.Needed ? 12 : 0), SnapRowH);
+
+    static RectF SnapshotNameRect(RectF r, bool active) =>
+        new(r.X + 14, r.Y + 5, Math.Max(30, r.W - (active ? 85 : 30)), 19);
 
     RectF TableRowRect(int i) =>
         new(_tableRect.X, _tableRect.Y + i * (TableRowH + 4) - _tableScroll.Offset,
@@ -431,14 +514,18 @@ internal sealed class SnapshotsPage : Page
         if (e.Button != 0) return;
         if (_snapScroll.Down(e.X, e.Y) || _tableScroll.Down(e.X, e.Y)) { Invalidate(); return; }
 
-        if (_hotSnap >= 0 && _hotSnap < _m.Snapshots.Count)
+        int index = (int)((e.Y - _snapListRect.Y + _snapScroll.Offset) / (SnapRowH + 5));
+        if (_snapListRect.Contains(e.X, e.Y) && index >= 0 && index < _m.Snapshots.Count && SnapRowRect(index).Contains(e.X, e.Y))
         {
-            var picked = _m.Snapshots[_hotSnap];
+            var picked = _m.Snapshots[index];
             _selectedId = picked.Id;
             _fadeMs = picked.DefaultFadeMs;
+            _scope = picked.DefaultScope;
             RefreshPreview();
             Layout();
             Invalidate();
+            var nameBounds = SnapshotNameRect(SnapRowRect(index), picked.Id == _m.ActiveSnapshotId);
+            if (nameBounds.Contains(e.X, e.Y)) RenameSelectedSnapshot(nameBounds);
             return;
         }
 
@@ -491,7 +578,7 @@ internal sealed class SnapshotsPage : Page
         {
             Draw.Empty(g, _snapListRect, _snapListRect.Y + 12, Icon.Snapshots,
                 "Noch keine Szene",
-                "Speichere deinen aktuellen Live-Mix mit „+ Neu“ oder Strg+S als abrufbaren Snapshot.");
+                "Speichere den Live-Mix mit „+ Neu“ als Datei oder öffne eine vorhandene Snapshot-Datei.");
         }
         else
         {
@@ -512,7 +599,7 @@ internal sealed class SnapshotsPage : Page
                 if (active)
                     rightUsed += Draw.Chip(g, r.Right - 8, r.CY, "LIVE", Theme.Green, dot: true, Theme.MicroStrong, alignRight: true) + 6f;
 
-                g.Text(s.Name, new RectF(r.X + 14, r.Y + 5, Math.Max(30, r.W - 22 - rightUsed), 19), Theme.BodyMedium, Theme.Text);
+                g.Text(s.Name, SnapshotNameRect(r, active), Theme.BodyMedium, Theme.Text);
                 g.Text($"Blende {s.DefaultFadeMs:0} ms  ·  {s.UpdatedUtc.ToLocalTime():dd.MM. HH:mm}",
                     new RectF(r.X + 14, r.Bottom - 19, Math.Max(30, r.W - 22 - rightUsed), 15), Theme.Caption, Theme.TextSecondary);
             }

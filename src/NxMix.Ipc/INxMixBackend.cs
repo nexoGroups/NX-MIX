@@ -20,7 +20,8 @@ public interface INxMixBackend : IDisposable
         Span<float> devPeaks,
         Span<float> specPre,
         Span<float> specPost,
-        out TelemetrySnapshotFrame meta);
+        out TelemetrySnapshotFrame meta,
+        Span<float> busChannelPeaks = default);
 
     // ---- Echtzeit-Mischer & Geräte-Master (sofort per Rampe) ----
     Task<string?> ApplyMixerAsync(MixerSettings mixer);
@@ -42,6 +43,8 @@ public interface INxMixBackend : IDisposable
 
     // ---- Mischpult-Snapshots ----
     Task<MixSnapshot> SaveSnapshotAsync(Guid? existingId, string name, string notes, string colorHex, double defaultFadeMs, SnapshotScopeFlags defaultScope);
+    Task<MixSnapshot?> GetSnapshotAsync(Guid snapshotId);
+    Task<MixSnapshot> ImportSnapshotAsync(MixSnapshot snapshot);
     Task<MixSnapshot?> RenameSnapshotAsync(Guid snapshotId, string newName);
     Task DeleteSnapshotAsync(Guid snapshotId);
     Task<MixSnapshot?> DuplicateSnapshotAsync(Guid snapshotId);

@@ -23,8 +23,8 @@ internal static unsafe class DeviceNames
         string? desc = ReadStringProperty(device, DeviceDesc);
         string combined = $"{friendlyName} | {ifaceName} | {desc} | {enumerator}";
 
-        if (ContainsAny(combined, "NxMixVAD", "NX-MIX Virtual", "NX-MIX VAIO"))
-            return (true, "NX-MIX WaveRT");
+        if (ContainsAny(combined, "NxMixVAD", "NX-MIX Virtual", "NX-MIX VAIO", "NX-MIX Out "))
+            return (true, AudioDeviceInfo.NxMixDriverProvider);
         if (ContainsAny(combined, "VB-Audio", "VBMatrix", "CABLE Input", "CABLE Output", "CABLE In ", "VoiceMeeter", "Hi-Fi Cable"))
             return (true, "VB-Audio");
         if (ContainsAny(combined, "Virtual Audio Cable", "EuMus", "Muzychenko"))
@@ -43,6 +43,21 @@ internal static unsafe class DeviceNames
             : !string.IsNullOrWhiteSpace(enumerator) ? enumerator!
             : "WASAPI";
         return (false, provider);
+    }
+
+    public static int ReadNxMixOutputPort(IMMDevice device, string friendlyName)
+    {
+        const string prefix = "NX-MIX Out ";
+        foreach (string? name in new[] { ReadStringProperty(device, DeviceDesc), ReadStringProperty(device, InterfaceFriendlyName), friendlyName })
+        {
+            int start = name?.IndexOf(prefix, StringComparison.OrdinalIgnoreCase) ?? -1;
+            if (start < 0) continue;
+            int digit = start + prefix.Length;
+            if (digit < name!.Length && name[digit] is >= '1' and <= '3' &&
+                (digit + 1 == name.Length || !char.IsDigit(name[digit + 1])))
+                return name[digit] - '0';
+        }
+        return 0;
     }
 
     private static bool ContainsAny(string haystack, params string[] needles)

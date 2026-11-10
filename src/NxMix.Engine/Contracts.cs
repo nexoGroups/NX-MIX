@@ -71,9 +71,14 @@ public sealed record ChannelDsp
     public Guid Id { get; init; } = Guid.NewGuid();
     /// <summary>Optionale Zugehoerigkeit zu einem physischen oder virtuellen Geraet (DeviceMasterDsp.Id).</summary>
     public Guid? DeviceId { get; init; }
+    // null kennzeichnet Kanäle aus älteren Mixerständen ohne Herkunftsangabe.
+    public bool? AutoCreatedForDevice { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsVacant => DeviceId == null && AutoCreatedForDevice == true;
     /// <summary>0-basierter Hardware-Kanalindex innerhalb des zugeordneten Geraets.</summary>
     public int DeviceChannelIndex { get; init; }
     public string Name { get; init; } = "";
+    public int? ColorIndex { get; init; }
     /// <summary>Digitaler Vorverstaerkungs-Trim (dB), getrennt vom Arbeits-Fader GainDb.</summary>
     public double TrimDb { get; init; } = 0.0;
     public double GainDb { get; init; } = 0.0;
@@ -110,6 +115,21 @@ public sealed record MixerSettings
     /// Null nutzt die Standard-Klickschutzrampe (10 ms).</summary>
     public double? TransitionMs { get; init; }
 
+    // Ältere Mischstände hatten einen zusätzlichen Summenfader vor den Ausgangslimitern.
+    public MixerSettings FoldLegacyMasterIntoOutputs()
+    {
+        double gain = double.IsNaN(MasterGainDb) ? 0 : Math.Clamp(MasterGainDb, -120, 12);
+        if (gain == 0) return MasterGainDb == 0 ? this : this with { MasterGainDb = 0 };
+        return this with
+        {
+            MasterGainDb = 0,
+            Outputs = Outputs.Select(output => output with
+            {
+                GainDb = Math.Min(output.GainDb + gain, output.MaxGainDb),
+            }).ToArray(),
+        };
+    }
+
     public static MixerSettings Create(int sampleRate, int inputs, int outputs)
     {
         var m = new double[inputs][];
@@ -137,6 +157,12 @@ public interface IMixerEngine : IBlockProcessor
     void ReadOutputPeaks(Span<float> destination);
     /// <summary>Spitzenpegel je Mix-Bus (Maximum ueber alle Kanaele des jeweiligen Busses in Settings.Buses-Reihenfolge).</summary>
     void ReadBusPeaks(Span<float> destination) => destination.Clear();
+    /// <summary>Spitzenpegel je Bus und zusätzlich je Kanal in Settings.Buses-Reihenfolge.</summary>
+    void ReadBusPeaks(Span<float> destination, Span<float> channelPeaks)
+    {
+        ReadBusPeaks(destination);
+        channelPeaks.Clear();
+    }
     /// <summary>Spitzenpegel je DeviceMasterDsp (Maximum ueber alle zugeordneten Kanaele in Settings.DeviceMasters-Reihenfolge).</summary>
     void ReadDeviceMasterPeaks(Span<float> destination) => destination.Clear();
     /// <summary>Zaehlt, wie oft ein Ausgang durch den Sicherheits-Limiter begrenzt wurde.</summary>

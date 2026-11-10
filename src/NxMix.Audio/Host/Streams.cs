@@ -454,6 +454,9 @@ internal sealed unsafe class CaptureStream : StreamBase
 internal sealed unsafe class RenderStream : StreamBase
 {
     private WasapiEndpoint _ep = null!;
+    private NxMixOutputBridge? _bridge;
+    private nint _bridgeTimer;
+    private byte[]? _bridgeFrames;
 
     public override WasapiEndpoint? Endpoint => _ep;
     private float[][] _slots = Array.Empty<float[]>();
@@ -475,6 +478,11 @@ internal sealed unsafe class RenderStream : StreamBase
 
     protected override void OpenDevice()
     {
+        if (Spec!.NativeOutputPort != 0)
+        {
+            OpenNativeOutput();
+            return;
+        }
         _ep = WasapiEndpoint.Open(Spec!.DeviceId, capture: false, loopback: false, Spec.SampleRate ?? Run.EngineRate, Spec.BufferFrames ?? Run.Chunk, Spec.Exclusive ?? Run.Config.UseExclusiveMode);
         Name = _ep.Name;
         ValidateMaps(_ep);
@@ -493,12 +501,42 @@ internal sealed unsafe class RenderStream : StreamBase
         PrimeSilence(_ep);
     }
 
-    protected override void StartDevice() => _ep.Start();
+    private void OpenNativeOutput()
+    {
+        StreamSpec spec = Spec!;
+        if (spec.Maps.Any(m => m.DeviceFirstChannel > AudioDeviceInfo.NxMixMaxChannels - m.Count))
+            throw new AudioException(0, "NX-MIX WaveRT unterstützt bis zu acht Kanäle pro Ausgang.");
+        _bridge = NxMixOutputBridge.Open(spec.NativeOutputPort);
+        Name = $"NX-MIX Out {spec.NativeOutputPort}";
+        _bridgeTimer = Native.CreateWaitableTimerEx(0, null, 2, 0x1F0003);
+        if (_bridgeTimer == 0) throw new AudioException(0, "Der Taktgeber für den virtuellen Ausgang konnte nicht geöffnet werden.");
+        int rate = NxMixOutputBridge.SampleRate;
+        int frames = NxMixOutputBridge.BlockFrames;
+        double scale = Run.EngineRate / (double)rate;
+        int target = Run.MasterPeriodFrames + (int)Math.Ceiling(2 * frames * scale);
+        Ring = new SpscFloatRing(spec.Slots, target * 5);
+        Reader = new ClockMatchedReader(Ring, scale, rate, target, frames, countUnderruns: false);
+        _slots = Enumerable.Range(0, spec.Slots).Select(_ => new float[frames]).ToArray();
+        Stage = new float[Run.Chunk * spec.Slots];
+        _bridgeFrames = new byte[frames * NxMixOutputBridge.BlockAlign];
+    }
 
-    protected override void CloseDevice() => _ep?.Dispose();
+    protected override void StartDevice() => _ep?.Start();
+
+    protected override void CloseDevice()
+    {
+        _ep?.Dispose();
+        if (_bridgeTimer != 0) Native.CloseHandle(_bridgeTimer);
+        _bridge?.Dispose();
+    }
 
     protected override void RunLoop()
     {
+        if (_bridge != null)
+        {
+            RunNativeOutput();
+            return;
+        }
         WasapiEndpoint ep = _ep;
         IAudioClient client = ep.Client;
         IAudioRenderClient render = ep.RenderClient!;
@@ -553,6 +591,38 @@ internal sealed unsafe class RenderStream : StreamBase
             }
             Hr.Check(render.ReleaseBuffer((uint)avail, 0), "ReleaseBuffer");
             ProbeAllocation();
+        }
+    }
+
+    private void RunNativeOutput()
+    {
+        const int frames = NxMixOutputBridge.BlockFrames;
+        const int align = NxMixOutputBridge.BlockAlign;
+        long due = -100_000;
+        if (Native.SetWaitableTimer(_bridgeTimer, &due, 10, 0, 0, 0) == 0)
+            throw new AudioException(0, "Der Taktgeber für den virtuellen Ausgang konnte nicht gestartet werden.");
+        nint* handles = stackalloc nint[] { _bridgeTimer, Run.StopEvent };
+        var maps = Spec!.Maps;
+        fixed (byte* data = _bridgeFrames!)
+        {
+            while (true)
+            {
+                uint ready = Native.WaitForMultipleObjects(2, handles, 0, 1000);
+                if (ready == Native.WaitObject0 + 1) return;
+                if (ready != Native.WaitObject0)
+                    throw new AudioException(0, "Der virtuelle Ausgang liefert keinen Takt mehr.");
+                Reader!.Read(_slots, 0, frames);
+                foreach (Mapping map in maps)
+                {
+                    for (int k = 0; k < map.Count; k++)
+                    {
+                        fixed (float* src = _slots[map.SlotOffset + k])
+                            PcmConvert.WriteChannel(src, frames, data, align, map.DeviceFirstChannel + k, SampleKind.Int32);
+                    }
+                }
+                _bridge!.Write(data);
+                ProbeAllocation();
+            }
         }
     }
 }

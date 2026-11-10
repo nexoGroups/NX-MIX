@@ -40,7 +40,8 @@ internal static unsafe partial class FileDialogs
         char* file = stackalloc char[cap];
         for (int i = 0; i < cap; i++) file[i] = '\0';
         for (int i = 0; i < Math.Min(initialName.Length, cap - 1); i++) file[i] = initialName[i];
-        fixed (char* pFilter = filter)
+        string nativeFilter = filter.Replace('|', '\0') + "\0\0";
+        fixed (char* pFilter = nativeFilter)
         fixed (char* pTitle = title)
         fixed (char* pExt = "json")
         {

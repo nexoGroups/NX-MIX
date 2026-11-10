@@ -19,7 +19,7 @@ internal static class LinkLook
     public static string Text(LinkUi s) => s switch
     {
         LinkUi.Linked => "Über NX-MIX",
-        LinkUi.Capturing => "Nur Pegel · Windows spielt",
+        LinkUi.Capturing => "Windows-Umleitung offen",
         LinkUi.MixedWithoutRedirect => "NX-MIX + Windows",
         LinkUi.Waiting => "Wartet auf das Programm",
         LinkUi.Failed => "Fehler",
@@ -36,7 +36,7 @@ internal static class LinkLook
         string state = v.State switch
         {
             LinkUi.Linked => "über NX-MIX" + (v.ProcessCount > 1 ? $" ({v.ProcessCount} Prozesse)" : ""),
-            LinkUi.Capturing => "Pegel sichtbar, bis die Windows-Umleitung greift",
+            LinkUi.Capturing => "erfasstes Signal wird gemischt",
             LinkUi.MixedWithoutRedirect => "wird gemischt, Windows-Ausgabe bleibt aktiv",
             LinkUi.Waiting => "wartet auf das Programm",
             LinkUi.Failed => "Fehler",

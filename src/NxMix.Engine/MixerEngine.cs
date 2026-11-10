@@ -415,12 +415,16 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
     public void ReadInputPeaks(Span<float> destination) => ReadPeaks(_inPeaks, destination);
     public void ReadOutputPeaks(Span<float> destination) => ReadPeaks(_outPeaks, destination);
 
-    public void ReadBusPeaks(Span<float> destination)
+    public void ReadBusPeaks(Span<float> destination) => ReadBusPeaks(destination, default);
+
+    public void ReadBusPeaks(Span<float> destination, Span<float> channelPeaks)
     {
+        channelPeaks.Clear();
         var plan = Volatile.Read(ref _cur);
         var bp = plan.BusPlan;
         if (bp == null) { destination.Clear(); return; }
         int count = Math.Min(bp.BusRanges.Length, destination.Length);
+        int channelOffset = 0;
         for (int b = 0; b < count; b++)
         {
             var (first, chs) = bp.BusRanges[b];
@@ -430,10 +434,12 @@ public sealed class MixerEngine : IMixerEngine, IInputMonitorBlockProcessor
                 for (int c = 0; c < chs; c++)
                 {
                     float p = BitConverter.Int32BitsToSingle(Interlocked.Exchange(ref _busSlotPeaks[first + c], 0));
+                    if (channelOffset + c < channelPeaks.Length) channelPeaks[channelOffset + c] = p;
                     if (p > max) max = p;
                 }
             }
             destination[b] = max;
+            channelOffset += chs;
         }
         for (int b = count; b < destination.Length; b++) destination[b] = 0f;
     }

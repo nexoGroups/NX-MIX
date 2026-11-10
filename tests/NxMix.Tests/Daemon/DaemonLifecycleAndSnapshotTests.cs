@@ -83,6 +83,18 @@ public sealed class DaemonLifecycleAndSnapshotTests
         public IReadOnlyList<AppSessionInfo> List() => Array.Empty<AppSessionInfo>();
     }
 
+    private sealed class NativeCatalog : IDeviceCatalog
+    {
+        public int Channels { get; set; } = 2;
+        public IReadOnlyList<AudioDeviceInfo> List() =>
+        [
+            new("sim:nx-in", "NX-MIX In 1", DeviceFlow.Render, Channels, 48000, false)
+                { IsVirtualEndpoint = true, DriverProvider = AudioDeviceInfo.NxMixDriverProvider },
+            new("sim:nx-out", "NX-MIX Out 1", DeviceFlow.Capture, Channels, 48000, false)
+                { IsVirtualEndpoint = true, DriverProvider = AudioDeviceInfo.NxMixDriverProvider, NativeOutputPort = 1 },
+        ];
+    }
+
     private sealed class NoopRestorer : IAppRouteRestorer
     {
         public bool IsSupported => true;
@@ -114,26 +126,29 @@ public sealed class DaemonLifecycleAndSnapshotTests
         float[] inP = { 0.125f, 0.5f, 0.75f };
         float[] outP = { 0.25f, 0.8f };
         float[] busP = { 0.42f };
+        float[] busChannels = { 0.42f, 0.1f };
         float[] devP = { 0.8f, 0.5f };
         float[] pre = Enumerable.Range(0, SpectrumAnalyzer.Points).Select(i => -80f + i * 0.25f).ToArray();
         float[] post = Enumerable.Range(0, SpectrumAnalyzer.Points).Select(i => -70f + i * 0.25f).ToArray();
         var meta = new TelemetrySnapshotFrame(1234, HostState.Running, 256, 48000, false, 0.07, 5.33, 0, 0, 2, 2, 1);
 
-        writer.Publish(inP, outP, busP, devP, in meta, pre, post);
+        writer.Publish(inP, outP, busP, devP, in meta, pre, post, busChannels);
 
         float[] rIn = new float[3];
         float[] rOut = new float[2];
         float[] rBus = new float[1];
+        float[] rBusChannels = new float[2];
         float[] rDev = new float[2];
         float[] rPre = new float[SpectrumAnalyzer.Points];
         float[] rPost = new float[SpectrumAnalyzer.Points];
 
-        Assert.True(reader.TryRead(rIn, rOut, rBus, rDev, rPre, rPost, out var rMeta));
+        Assert.True(reader.TryRead(rIn, rOut, rBus, rDev, rPre, rPost, out var rMeta, rBusChannels));
         Assert.Equal(HostState.Running, rMeta.HostState);
         Assert.Equal(256, rMeta.BlockFrames);
         Assert.Equal(2, rMeta.LimiterHits);
         Assert.Equal(0.75f, rIn[2], 5);
         Assert.Equal(0.42f, rBus[0], 5);
+        Assert.Equal(busChannels, rBusChannels);
         Assert.Equal(0.8f, rDev[0], 5);
         Assert.Equal(256, rPre.Length);
         Assert.Equal(pre[^1], rPre[^1], 4);
@@ -141,7 +156,7 @@ public sealed class DaemonLifecycleAndSnapshotTests
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 100; i++)
-            Assert.True(reader.TryRead(rIn, rOut, rBus, rDev, rPre, rPost, out _));
+            Assert.True(reader.TryRead(rIn, rOut, rBus, rDev, rPre, rPost, out _, rBusChannels));
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
     }
 
@@ -192,6 +207,56 @@ public sealed class DaemonLifecycleAndSnapshotTests
     }
 
     [Fact]
+    public async Task Native_WaveRT_switches_active_width_without_replacing_channels_or_routes()
+    {
+        string dir = CreateTempDir();
+        try
+        {
+            var input = new VaioSlotConfig
+            {
+                Name = "NX-MIX In 1", Kind = VaioSlotKind.NxMixKernelDriver, Loopback = true, Channels = 8,
+                EndpointOrExe = "sim:nx-in",
+            };
+            var output = new VaioSlotConfig
+            {
+                Name = "NX-MIX Out 1", Kind = VaioSlotKind.NxMixKernelDriver, Flow = DeviceFlow.Render, Channels = 8,
+                EndpointOrExe = "sim:nx-out",
+            };
+            var config = new SystemConfig { Vaios = [input, output], AutoStartAudioOnBoot = true, CompanionApiEnabled = false };
+            var catalog = new NativeCatalog();
+            var host = new SimContinuousAudioHost();
+            using var controller = new DaemonEngineController(new DaemonEngineOptions
+            {
+                CustomDataDir = dir, CustomIpcKey = "native_formats_" + Guid.NewGuid().ToString("N"),
+                DeviceCatalog = catalog, AppCatalog = new EmptyApps(), AppRouteRestorer = new NoopRestorer(),
+                HostFactory = () => host, InitialSystemConfigOverride = config,
+            });
+            var state = controller.Snapshot.Mixer;
+            Assert.Equal(8, state.Inputs.Count);
+            Assert.Equal(8, state.Outputs.Count);
+            var outputs = state.Outputs.ToArray();
+            outputs[7] = outputs[7] with { ColorIndex = 5, GainDb = -12 };
+            state.MatrixDb[7][7] = -3;
+            Assert.Null(await controller.ApplyMixerAsync(state with { Outputs = outputs }));
+
+            foreach (int channels in new[] { 2, 6, 8, 2 })
+            {
+                catalog.Channels = channels;
+                await controller.RefreshDevicesAsync();
+                var bindings = controller.BuildAudioHostConfig(config).Bindings;
+                Assert.Equal(channels, Assert.Single(bindings, b => b.Loopback).Count);
+                var render = Assert.Single(bindings, b => b.Flow == DeviceFlow.Render);
+                Assert.Equal(channels, render.Count);
+                Assert.Equal(1, render.NativeOutputPort);
+                Assert.Equal(outputs[7], controller.Snapshot.Mixer.Outputs[7]);
+                Assert.Equal(-3, controller.Snapshot.Mixer.MatrixDb[7][7]);
+            }
+            Assert.Equal(4, host.StartCount);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void Duplicate_app_links_are_migrated_and_old_channel_labels_are_removed()
     {
         var oldLink = new AppLinkEntry { ExeName = "Spotify", Count = 2 };
@@ -219,6 +284,97 @@ public sealed class DaemonLifecycleAndSnapshotTests
         Assert.DoesNotContain(next.DeviceMasters, master => master.Id == oldLink.Id);
         Assert.Equal(keptLink.Id, next.Inputs[2].DeviceId);
         Assert.Equal(keptLink.Id, next.Inputs[3].DeviceId);
+    }
+
+    [Fact]
+    public void Removing_app_and_output_clears_owned_channels_and_keeps_later_bindings()
+    {
+        var spotify = new AppLinkEntry { ExeName = "Spotify.exe", Count = 2 };
+        var output = new AudioDeviceNode { EndpointId = "sim:out", Flow = DeviceFlow.Render, ChannelCount = 2 };
+        var later = output with { Id = Guid.NewGuid(), EndpointId = "sim:later", EngineFirstChannel = 2 };
+        var config = new SystemConfig { AppLinks = [spotify], Devices = [output, later] };
+        var mixer = DaemonEngineController.ReconcileMixerWithSystemConfig(MixerSettings.Create(48000, 0, 0), config);
+        Guid laterChannel = mixer.Outputs[2].Id;
+        mixer.MatrixDb[0][0] = 0;
+
+        var withoutFirst = config with { AppLinks = [], Devices = [later] };
+        var removed = DaemonEngineController.ReconcileMixerWithSystemConfig(mixer, withoutFirst, config);
+        Assert.Empty(removed.Inputs);
+        Assert.All(removed.Outputs.Take(2), channel => Assert.True(channel.IsVacant));
+        Assert.Equal(laterChannel, removed.Outputs[2].Id);
+        Assert.DoesNotContain(removed.DeviceMasters, master => master.Id == output.Id || master.Id == spotify.Id);
+
+        var added = DaemonEngineController.ReconcileMixerWithSystemConfig(removed, config, withoutFirst);
+        Assert.Equal(2, added.Inputs.Count);
+        Assert.Equal(4, added.Outputs.Count);
+        Assert.Equal(laterChannel, added.Outputs[2].Id);
+        Assert.Equal(0, added.MatrixDb[0][0]);
+
+        var noDevices = config with { AppLinks = [], Devices = [] };
+        var cleared = DaemonEngineController.ReconcileMixerWithSystemConfig(added, noDevices, config);
+        Assert.Empty(cleared.Inputs);
+        Assert.Empty(cleared.Outputs);
+    }
+
+    [Fact]
+    public void Startup_removes_legacy_duplicate_output_block_with_matching_custom_labels()
+    {
+        var old = new AudioDeviceNode { FriendlyName = "ASIO", Flow = DeviceFlow.Render, ChannelCount = 2 };
+        var current = old with { Id = Guid.NewGuid(), EngineFirstChannel = 2 };
+        var mixer = DaemonEngineController.ReconcileMixerWithSystemConfig(MixerSettings.Create(48000, 0, 0),
+            new SystemConfig { Devices = [old, current] });
+        mixer = mixer with
+        {
+            Outputs = mixer.Outputs.Select((c, i) => c with { AutoCreatedForDevice = null, Name = i % 2 == 0 ? "Links Mid" : "Rechts Mid" }).ToArray(),
+        };
+
+        var clean = DaemonEngineController.ReconcileMixerWithSystemConfig(mixer, new SystemConfig { Devices = [current] });
+        Assert.All(clean.Outputs.Take(2), c => Assert.True(c.IsVacant));
+        Assert.Equal(mixer.Outputs[2].Id, clean.Outputs[2].Id);
+        Assert.Equal("Links Mid", clean.Outputs[2].Name);
+        Assert.Equal(current.Id, Assert.Single(clean.DeviceMasters).Id);
+    }
+
+    [Fact]
+    public void Startup_restores_orphaned_asio_matrix_and_crossover_on_active_output_block()
+    {
+        var old = new AudioDeviceNode
+        {
+            EndpointId = "sim:asio/umc", FriendlyName = "UMC ASIO Driver", Backend = AudioBackend.Asio,
+            Flow = DeviceFlow.Render, ChannelCount = 2,
+        };
+        var current = old with { Id = Guid.NewGuid(), EngineFirstChannel = 2 };
+        var mixer = DaemonEngineController.ReconcileMixerWithSystemConfig(MixerSettings.Create(48000, 2, 0),
+            new SystemConfig { Devices = [old, current] });
+        var outputs = mixer.Outputs.Select(c => c with { AutoCreatedForDevice = null, Filters = new List<FilterSpec>() }).ToArray();
+        outputs[0] = outputs[0] with { Name = "Rechts Mid", Filters = [new FilterSpec(FilterType.HighPass, 80, 0.707, 0, 4, true)] };
+        outputs[1] = outputs[1] with { Name = "Links Hi", GainDb = -12, MaxGainDb = -3 };
+        foreach (var row in mixer.MatrixDb) Array.Fill(row, double.NegativeInfinity);
+        mixer.MatrixDb[0][0] = -3;
+        var bus = new MixBus();
+        var busRoute = new BusRoute(new RoutePort(RouteKind.Bus, bus.Id), new RoutePort(RouteKind.Output, outputs[1].Id), -6);
+        mixer = mixer with { Outputs = outputs, Buses = [bus], BusRoutes = [busRoute] };
+        var config = new SystemConfig { Devices = [current] };
+
+        var restored = DaemonEngineController.ReconcileMixerWithSystemConfig(mixer, config);
+
+        Assert.All(restored.Outputs.Take(2), c => Assert.True(c.IsVacant));
+        Assert.Equal(outputs[2].Id, restored.Outputs[2].Id);
+        Assert.Equal("Rechts Mid", restored.Outputs[2].Name);
+        Assert.Equal(outputs[0].Filters, restored.Outputs[2].Filters);
+        Assert.Equal("Links Hi", restored.Outputs[3].Name);
+        Assert.Equal(-12, restored.Outputs[3].GainDb);
+        Assert.Equal(-3, restored.Outputs[3].MaxGainDb);
+        Assert.Equal(-3, restored.MatrixDb[0][2]);
+        Assert.Equal(double.NegativeInfinity, restored.MatrixDb[0][0]);
+        Assert.Equal(busRoute with { Target = busRoute.Target with { Id = outputs[3].Id } }, Assert.Single(restored.BusRoutes));
+        Assert.Equal(current.Id, Assert.Single(restored.DeviceMasters).Id);
+
+        mixer.MatrixDb[0][2] = -9;
+        var alreadyRouted = DaemonEngineController.ReconcileMixerWithSystemConfig(mixer, config);
+        Assert.Equal(-9, alreadyRouted.MatrixDb[0][2]);
+        Assert.Equal(-3, alreadyRouted.MatrixDb[0][0]);
+        Assert.Empty(alreadyRouted.Outputs[2].Filters);
     }
 
     [Fact]
@@ -449,8 +605,19 @@ public sealed class DaemonLifecycleAndSnapshotTests
             };
             await controller.ApplyMixerAsync(m);
 
+            // Der frühere Summenfader wird einmalig auf die Ausgangspegel übertragen.
+            await controller.ApplyMixerAsync(controller.Snapshot.Mixer with { MasterGainDb = -6.0 });
+            Assert.Equal(0.0, controller.Snapshot.Mixer.MasterGainDb);
+            Assert.Equal(-6.0, controller.Snapshot.Mixer.Outputs[0].GainDb);
+
             // Save Snapshot "Talk": Moderator 0 dB, Music -12 dB
             var talkSnap = await controller.SaveSnapshotAsync(null, "Talk", "Moderation", "#3B82F6", 150.0, SnapshotScopeFlags.All);
+
+            var exported = Assert.IsType<MixSnapshot>(await controller.GetSnapshotAsync(talkSnap.Id));
+            var imported = await controller.ImportSnapshotAsync(exported);
+            Assert.NotEqual(talkSnap.Id, imported.Id);
+            Assert.Equal(talkSnap.Id, controller.Snapshot.ActiveSnapshotId);
+            Assert.Equal(-12.0, imported.CapturedState.Inputs[1].GainDb);
 
             // Change live state AND put Moderator on RecallSafe (Fader + Mute), and change SystemConfig.BlockFrames to 512:
             await controller.ApplySystemConfigAsync(controller.Snapshot.Config with { BlockFrames = 512 });

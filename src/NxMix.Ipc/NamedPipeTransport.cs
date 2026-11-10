@@ -227,6 +227,17 @@ public sealed class NamedPipeControlServer : IDisposable
                     return new IpcServerEnvelope { RequestId = req.RequestId, SavedSnapshot = saved, Snapshot = _engine.Snapshot };
                 }
 
+                case "getSnapshotFile":
+                    return new IpcServerEnvelope
+                    {
+                        RequestId = req.RequestId,
+                        SavedSnapshot = await _engine.GetSnapshotAsync(req.GuidArg).ConfigureAwait(false),
+                    };
+
+                case "importSnapshot":
+                    var imported = await _engine.ImportSnapshotAsync(req.SnapshotFile ?? throw new InvalidDataException("Snapshot fehlt.")).ConfigureAwait(false);
+                    return new IpcServerEnvelope { RequestId = req.RequestId, SavedSnapshot = imported, Snapshot = _engine.Snapshot };
+
                 case "renameSnapshot":
                 {
                     var renamed = await _engine.RenameSnapshotAsync(req.GuidArg, req.StringArg ?? "").ConfigureAwait(false);
@@ -483,7 +494,8 @@ public sealed class NamedPipeBackendClient : INxMixBackend
         Span<float> devPeaks,
         Span<float> specPre,
         Span<float> specPost,
-        out TelemetrySnapshotFrame meta)
+        out TelemetrySnapshotFrame meta,
+        Span<float> busChannelPeaks = default)
     {
         if (!_connected)
         {
@@ -491,10 +503,11 @@ public sealed class NamedPipeBackendClient : INxMixBackend
             inPeaks.Clear();
             outPeaks.Clear();
             busPeaks.Clear();
+            busChannelPeaks.Clear();
             devPeaks.Clear();
             return false;
         }
-        return _telemetry.TryRead(inPeaks, outPeaks, busPeaks, devPeaks, specPre, specPost, out meta);
+        return _telemetry.TryRead(inPeaks, outPeaks, busPeaks, devPeaks, specPre, specPost, out meta, busChannelPeaks);
     }
 
     public async Task<string?> ApplyMixerAsync(MixerSettings mixer)
@@ -585,6 +598,18 @@ public sealed class NamedPipeBackendClient : INxMixBackend
             ScopeArg = defaultScope,
         }).ConfigureAwait(false);
         return r.SavedSnapshot ?? new MixSnapshot { Name = name };
+    }
+
+    public async Task<MixSnapshot?> GetSnapshotAsync(Guid snapshotId)
+    {
+        var response = await SendRequestAsync(new IpcRequestEnvelope { Method = "getSnapshotFile", GuidArg = snapshotId }).ConfigureAwait(false);
+        return response.SavedSnapshot;
+    }
+
+    public async Task<MixSnapshot> ImportSnapshotAsync(MixSnapshot snapshot)
+    {
+        var response = await SendRequestAsync(new IpcRequestEnvelope { Method = "importSnapshot", SnapshotFile = snapshot }).ConfigureAwait(false);
+        return response.SavedSnapshot ?? throw new InvalidDataException("Der importierte Snapshot fehlt.");
     }
 
     public async Task<MixSnapshot?> RenameSnapshotAsync(Guid snapshotId, string newName)

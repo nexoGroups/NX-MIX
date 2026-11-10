@@ -68,6 +68,7 @@ public sealed record IpcRequestEnvelope
     public string Method { get; init; } = "";
     public MixerSettings? Mixer { get; init; }
     public SystemConfig? Config { get; init; }
+    public MixSnapshot? SnapshotFile { get; init; }
     public bool BoolArg { get; init; }
     public int IntArg { get; init; }
     public int IntArg2 { get; init; }

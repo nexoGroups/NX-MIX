@@ -17,7 +17,6 @@ internal sealed class DecksPage : Page
 
     readonly Button _newDeck = new("Neues Deck", ButtonStyle.Filled, Icon.Plus);
     readonly Button _dupDeck = new("Duplizieren", ButtonStyle.Gray, Icon.Copy);
-    readonly Button _renDeck = new("Umbenennen", ButtonStyle.Gray, Icon.Edit);
     readonly Button _delDeck = new("Löschen", ButtonStyle.DestructiveTinted, Icon.Trash);
     readonly Button _openOnMixer = new("Im Mixer öffnen", ButtonStyle.Tinted, Icon.Mixer);
     readonly Button _addSpacer = new("+ Trennlinie", ButtonStyle.Gray, Icon.Plus);
@@ -34,6 +33,10 @@ internal sealed class DecksPage : Page
 
     int _hotDeck = -1, _hotSlot = -1, _hotSlotBtn = -1, _hotCat = -1;
 
+    Guid? _dragItem, _dragDeck;
+    float _dragStartY;
+    int _dropIndex = -1;
+
     public override string Title => "Decks";
     public override Icon Icon => Icon.Decks;
     public override string? Subtitle => $"{_m.Decks.Decks.Count} eigene Fader-Decks  ·  Referenzbasiert ohne Signal-Verdopplung";
@@ -41,7 +44,7 @@ internal sealed class DecksPage : Page
     public DecksPage(AppModel m)
     {
         _m = m;
-        Add(_newDeck); Add(_dupDeck); Add(_renDeck); Add(_delDeck);
+        Add(_newDeck); Add(_dupDeck); Add(_delDeck);
         Add(_openOnMixer); Add(_addSpacer); Add(_topBarSwitch); Add(_densitySeg); Add(_catSeg);
 
         _newDeck.Clicked += () =>
@@ -60,14 +63,6 @@ internal sealed class DecksPage : Page
                 Layout();
                 Invalidate();
             }
-        };
-        _renDeck.Clicked += () =>
-        {
-            if (SelectedDeck is { } d && Root != null)
-                Root.BeginEdit(_renDeck.Bounds, d.Name, Theme.BodyMedium, s =>
-                {
-                    if (!string.IsNullOrWhiteSpace(s)) _m.UpdateDeck(d.Id, x => x with { Name = s.Trim() });
-                }, 32);
         };
         _delDeck.Clicked += () =>
         {
@@ -142,13 +137,17 @@ internal sealed class DecksPage : Page
         if (_catalogFilter is 0 or 2)
         {
             for (int i = 0; i < _m.InputCount; i++)
-                list.Add(new CatalogEntry(DeckItemKind.InputChannel, _m.Settings.Inputs[i].Id, $"IN {i + 1:00}", _m.DisplayName(true, i), Theme.Green));
+                if (_m.IsChannelVisible(_m.Settings.Inputs[i]))
+                    list.Add(new CatalogEntry(DeckItemKind.InputChannel, _m.Settings.Inputs[i].Id, $"IN {i + 1:00}", _m.DisplayName(true, i),
+                        ChannelColors.Get(_m.Settings.Inputs[i].ColorIndex) ?? Theme.Green));
         }
 
         if (_catalogFilter is 0 or 3)
         {
             for (int o = 0; o < _m.OutputCount; o++)
-                list.Add(new CatalogEntry(DeckItemKind.OutputChannel, _m.Settings.Outputs[o].Id, $"OUT {o + 1:00}", _m.DisplayName(false, o), Theme.AccentText));
+                if (_m.IsChannelVisible(_m.Settings.Outputs[o]))
+                    list.Add(new CatalogEntry(DeckItemKind.OutputChannel, _m.Settings.Outputs[o].Id, $"OUT {o + 1:00}", _m.DisplayName(false, o),
+                        ChannelColors.Get(_m.Settings.Outputs[o].ColorIndex) ?? Theme.AccentText));
         }
 
         if (_catalogFilter is 0 or 4)
@@ -227,15 +226,13 @@ internal sealed class DecksPage : Page
         float newW = Math.Min(124f, Math.Max(72f, _leftCard.W - 2 * pad - 48f));
         _newDeck.Bounds = new RectF(_leftCard.Right - pad - newW, _leftCard.Y + 11, newW, ch);
         float botY = _leftCard.Bottom - pad;
-        float halfL = Math.Max(40f, (_leftCard.W - 2 * pad - 6) / 2);
-        _delDeck.Bounds = new RectF(_leftCard.X + pad + halfL + 6, botY - ch, halfL, ch);
-        _renDeck.Bounds = new RectF(_leftCard.X + pad, botY - ch, halfL, ch);
+        _delDeck.Bounds = new RectF(_leftCard.X + pad, botY - ch, _leftCard.W - 2 * pad, ch);
         botY -= ch + 6;
         _dupDeck.Bounds = new RectF(_leftCard.X + pad, botY - ch, _leftCard.W - 2 * pad, ch);
         botY -= ch + 10;
 
         bool hasSel = SelectedDeck != null;
-        _dupDeck.Enabled = _renDeck.Enabled = _delDeck.Enabled = _openOnMixer.Enabled = _addSpacer.Enabled = _topBarSwitch.Enabled = _densitySeg.Enabled = hasSel;
+        _dupDeck.Enabled = _delDeck.Enabled = _openOnMixer.Enabled = _addSpacer.Enabled = _topBarSwitch.Enabled = _densitySeg.Enabled = hasSel;
 
         _deckListRect = RectF.FromLTRB(_leftCard.X + pad, _leftCard.Y + 50, _leftCard.Right - pad, Math.Max(_leftCard.Y + 60, botY));
         _deckScroll.Update(_deckListRect, _m.Decks.Decks.Count * (RowH + 4));
@@ -275,6 +272,23 @@ internal sealed class DecksPage : Page
         if (_slotScroll.Dragging) { _slotScroll.Drag(e.Y); Invalidate(); return; }
         if (_catScroll.Dragging) { _catScroll.Drag(e.Y); Invalidate(); return; }
 
+        if (_dragItem.HasValue)
+        {
+            bool deckDrag = !_dragDeck.HasValue;
+            var view = deckDrag ? _deckListRect : _slotListRect;
+            var scroll = deckDrag ? _deckScroll : _slotScroll;
+            int count = deckDrag ? _m.Decks.Decks.Count : SelectedDeck?.Items.Count ?? 0;
+            if (view.Contains(e.X, e.Y) && Math.Abs(e.Y - _dragStartY) >= 4)
+            {
+                if (e.Y < view.Y + 14) scroll.Wheel(0.25f);
+                if (e.Y > view.Bottom - 14) scroll.Wheel(-0.25f);
+                _dropIndex = Math.Clamp((int)((e.Y - view.Y + scroll.Offset + RowH / 2) / (RowH + 4)), 0, count);
+            }
+            else _dropIndex = -1;
+            Invalidate();
+            return;
+        }
+
         int hd = HitRow(_deckListRect, _deckScroll.Offset, _m.Decks.Decks.Count, e.X, e.Y);
         int hs = HitRow(_slotListRect, _slotScroll.Offset, SelectedDeck?.Items.Count ?? 0, e.X, e.Y);
         int hsb = hs >= 0 ? HitSlotAction(hs, e.X, e.Y) : -1;
@@ -298,9 +312,17 @@ internal sealed class DecksPage : Page
         int hd = HitRow(_deckListRect, _deckScroll.Offset, _m.Decks.Decks.Count, e.X, e.Y);
         if (hd >= 0 && hd < _m.Decks.Decks.Count)
         {
-            _selectedDeckId = _m.Decks.Decks[hd].Id;
+            var picked = _m.Decks.Decks[hd];
+            _selectedDeckId = picked.Id;
             Layout();
             Invalidate();
+            var row = DeckRowRect(hd);
+            if (e.X < row.X + 28) StartDrag(picked.Id, null, e.Y);
+            else if (DeckNameRect(row).Contains(e.X, e.Y))
+                Root?.BeginEdit(DeckNameRect(row), picked.Name, Theme.BodyMedium, name =>
+                {
+                    if (!string.IsNullOrWhiteSpace(name)) _m.UpdateDeck(picked.Id, d => d with { Name = name.Trim() });
+                }, 32);
             return;
         }
 
@@ -311,11 +333,17 @@ internal sealed class DecksPage : Page
             {
                 var slot = deck.Items[hs];
                 int btn = HitSlotAction(hs, e.X, e.Y);
-                if (btn == 0) _m.MoveDeckSlot(deck.Id, slot.ItemId, -1);
-                else if (btn == 1) _m.MoveDeckSlot(deck.Id, slot.ItemId, +1);
-                else if (btn == 2 && slot.Kind is DeckItemKind.DeviceMaster or DeckItemKind.VaioSlot)
-                    _m.ToggleDeckSlotExpanded(deck.Id, slot.ItemId);
+                if (btn == 0) StartDrag(slot.ItemId, deck.Id, e.Y);
+                else if (btn == 1 && CanTogglePair(deck, hs)) _m.ToggleDeckFaderPair(deck.Id, slot.ItemId);
+                else if (btn == 2) _m.ToggleDeckSlotExpanded(deck.Id, slot.ItemId);
                 else if (btn == 3) _m.RemoveDeckSlot(deck.Id, slot.ItemId);
+                else if (slot.Kind != DeckItemKind.Spacer)
+                {
+                    var nameRect = SlotNameRect(SlotRowRect(hs), slot, out _, out _);
+                    if (nameRect.Contains(e.X, e.Y))
+                        Root?.BeginEdit(nameRect, DescribeSlot(slot, out _, out _), Theme.BodyMedium, name =>
+                            _m.RenameDeckSlot(deck.Id, slot.ItemId, name), 40);
+                }
                 return;
             }
         }
@@ -333,6 +361,18 @@ internal sealed class DecksPage : Page
     public override void OnMouseUp(in MouseEvent e)
     {
         _deckScroll.Up(); _slotScroll.Up(); _catScroll.Up();
+        if (_dragItem is { } item && e.Button == 0 && _dropIndex >= 0)
+        {
+            var view = _dragDeck.HasValue ? _slotListRect : _deckListRect;
+            if (view.Contains(e.X, e.Y))
+            {
+                if (_dragDeck is { } deck) _m.MoveDeckSlot(deck, item, _dropIndex);
+                else _m.MoveDeck(item, _dropIndex);
+            }
+        }
+        _dragItem = _dragDeck = null;
+        _dropIndex = -1;
+        Invalidate();
     }
 
     public override bool OnMouseWheel(in MouseEvent e)
@@ -352,32 +392,74 @@ internal sealed class DecksPage : Page
 
     RectF SlotRowRect(int idx) => new(_slotListRect.X, _slotListRect.Y + idx * (RowH + 4) - _slotScroll.Offset, _slotListRect.W - (_slotScroll.Needed ? 10 : 0), RowH);
 
-    (RectF Up, RectF Down, RectF Exp, RectF Del) SlotActionRects(RectF r, bool canExpand)
+    RectF DeckRowRect(int index) => new(_deckListRect.X, _deckListRect.Y + index * (RowH + 4) - _deckScroll.Offset,
+        _deckListRect.W - (_deckScroll.Needed ? 10 : 0), RowH);
+    static RectF DeckNameRect(RectF r) => new(r.X + 29, r.Y, Math.Max(20, r.W - 97), r.H);
+
+    static bool CanExpand(DeckSlotItem slot) => slot.Kind is DeckItemKind.DeviceMaster or DeckItemKind.VaioSlot;
+
+    static bool CanTogglePair(UiDeckDefinition deck, int index)
     {
-        float bh = r.H - 10;
-        float x = r.Right - 6;
-        var del = new RectF(x - 28, r.CY - bh / 2, 28, bh); x = del.X - 4;
-        var down = new RectF(x - 28, r.CY - bh / 2, 28, bh); x = down.X - 4;
-        var up = new RectF(x - 28, r.CY - bh / 2, 28, bh); x = up.X - 6;
-        var exp = canExpand ? new RectF(x - 74, r.CY - bh / 2, 74, bh) : default;
-        return (up, down, exp, del);
+        var item = deck.Items[index];
+        if (item.FaderPairId.HasValue) return true;
+        if (item.Kind == DeckItemKind.Spacer || index + 1 >= deck.Items.Count) return false;
+        var next = deck.Items[index + 1];
+        return next.Kind != DeckItemKind.Spacer && !next.FaderPairId.HasValue && item.TargetId != next.TargetId;
+    }
+
+    static (RectF Pair, RectF Expand, RectF Delete) SlotActions(RectF row, bool canExpand)
+    {
+        float h = row.H - 10;
+        var delete = new RectF(row.Right - 32, row.Y + 5, 26, h);
+        var pair = new RectF(delete.X - 30, delete.Y, 26, h);
+        var expand = canExpand ? new RectF(pair.X - 30, pair.Y, 26, h) : default;
+        return (pair, expand, delete);
+    }
+
+    RectF SlotNameRect(RectF row, DeckSlotItem slot, out string badge, out Color4 color)
+    {
+        DescribeSlot(slot, out badge, out color);
+        var (pair, exp, _) = SlotActions(row, CanExpand(slot));
+        float left = row.X + 30;
+        float right = (CanExpand(slot) ? exp.X : pair.X) - 4;
+        return new RectF(left, row.Y + 13, Math.Max(16, right - left), row.H - 14);
     }
 
     int HitSlotAction(int idx, float x, float y)
     {
         if (SelectedDeck is not { } d || idx < 0 || idx >= d.Items.Count) return -1;
         var r = SlotRowRect(idx);
-        bool canExp = d.Items[idx].Kind is DeckItemKind.DeviceMaster or DeckItemKind.VaioSlot;
-        var (up, down, exp, del) = SlotActionRects(r, canExp);
-        if (up.Contains(x, y)) return 0;
-        if (down.Contains(x, y)) return 1;
+        var (pair, exp, del) = SlotActions(r, CanExpand(d.Items[idx]));
+        if (!r.Contains(x, y)) return -1;
+        if (x < r.X + 28) return 0;
+        if (pair.Contains(x, y)) return 1;
         if (!exp.IsEmpty && exp.Contains(x, y)) return 2;
         if (del.Contains(x, y)) return 3;
         return -1;
     }
 
+    void StartDrag(Guid item, Guid? deck, float y)
+    {
+        _dragItem = item;
+        _dragDeck = deck;
+        _dragStartY = y;
+    }
+
+    static void PaintHandle(Renderer g, RectF r)
+    {
+        for (int i = -1; i <= 1; i++)
+            g.FillPill(new RectF(r.X + 8, r.CY + i * 4 - 1, 12, 2), Theme.TextTertiary);
+    }
+
+    void PaintInsertion(Renderer g, RectF view, float offset, bool slots)
+    {
+        if (_dropIndex < 0 || _dragDeck.HasValue != slots) return;
+        float y = view.Y + _dropIndex * (RowH + 4) - offset - 2;
+        g.Line(view.X + 2, y, view.Right - 12, y, Theme.AccentText, 2);
+    }
+
     public override CursorKind CursorAt(float x, float y) =>
-        (_hotDeck >= 0 || _hotSlotBtn >= 0 || _hotCat >= 0) ? CursorKind.Hand : CursorKind.Arrow;
+        (_dragItem.HasValue || _hotDeck >= 0 || _hotSlot >= 0 || _hotCat >= 0) ? CursorKind.Hand : CursorKind.Arrow;
 
     public override void Paint(Renderer g)
     {
@@ -404,16 +486,18 @@ internal sealed class DecksPage : Page
             for (int i = 0; i < _m.Decks.Decks.Count; i++)
             {
                 var d = _m.Decks.Decks[i];
-                var r = new RectF(_deckListRect.X, _deckListRect.Y + i * (RowH + 4) - _deckScroll.Offset, _deckListRect.W - (_deckScroll.Needed ? 10 : 0), RowH);
+                var r = DeckRowRect(i);
                 if (r.Bottom < _deckListRect.Y || r.Y > _deckListRect.Bottom) continue;
                 bool sel = d.Id == _selectedDeckId;
                 bool hot = i == _hotDeck;
                 g.FillRound(r, Theme.RadiusControl, sel ? Theme.AccentSoft : hot ? Theme.ControlHover : Theme.Surface2);
                 if (sel) g.StrokeRound(r, Theme.RadiusControl, Theme.Accent.With(0.7f));
-                g.Text(d.Name, new RectF(r.X + 12, r.Y, r.W - 84, r.H), Theme.BodyMedium, Theme.Text);
+                PaintHandle(g, r);
+                g.Text(d.Name, DeckNameRect(r), Theme.BodyMedium, Theme.Text);
                 g.Text($"{d.Items.Count} Slots", new RectF(r.Right - 72, r.Y, 62, r.H), Theme.Caption, Theme.TextTertiary, HAlign.Right);
             }
         }
+        PaintInsertion(g, _deckListRect, _deckScroll.Offset, slots: false);
         g.PopClip();
         _deckScroll.Paint(g);
 
@@ -436,20 +520,24 @@ internal sealed class DecksPage : Page
                 if (r.Bottom < _slotListRect.Y || r.Y > _slotListRect.Bottom) continue;
                 g.FillRound(r, Theme.RadiusControl, i == _hotSlot ? Theme.ControlHover.With(0.55f) : Theme.Surface2);
 
-                string title = DescribeSlot(slot, out string badge, out var col);
-                float cw = Draw.Chip(g, r.X + 8, r.CY, badge, col, dot: false, Theme.MicroStrong);
-                bool canExp = slot.Kind is DeckItemKind.DeviceMaster or DeckItemKind.VaioSlot;
-                var (up, down, exp, del) = SlotActionRects(r, canExp);
-                float rightEdge = (canExp ? exp.X : up.X) - 8;
-                g.Text(title, new RectF(r.X + 14 + cw, r.Y, Math.Max(20, rightEdge - (r.X + 14 + cw)), r.H), Theme.BodyMedium, Theme.Text);
-
-                if (canExp)
-                    Draw.ButtonLook(g, exp, slot.ExpandedInline ? "▾ Kanäle" : "▸ Master", slot.ExpandedInline ? ButtonStyle.Tinted : ButtonStyle.Gray, true, i == _hotSlot && _hotSlotBtn == 2, font: Theme.MicroStrong);
-                Draw.ButtonLook(g, up, "", ButtonStyle.Gray, i > 0, i == _hotSlot && _hotSlotBtn == 0, icon: Icon.ChevronUp);
-                Draw.ButtonLook(g, down, "", ButtonStyle.Gray, i + 1 < deck.Items.Count, i == _hotSlot && _hotSlotBtn == 1, icon: Icon.ChevronDown);
+                PaintHandle(g, r);
+                var name = SlotNameRect(r, slot, out string badge, out var col);
+                string title = DescribeSlot(slot, out _, out _);
+                g.Text(badge, new RectF(name.X, r.Y + 3, name.W, 12), Theme.MicroStrong, col);
+                g.Text(title, name, Theme.CaptionStrong, Theme.Text);
+                var (pair, exp, del) = SlotActions(r, CanExpand(slot));
+                if (CanExpand(slot))
+                    Draw.ButtonLook(g, exp, "", ButtonStyle.Gray, true, i == _hotSlot && _hotSlotBtn == 2,
+                        icon: slot.ExpandedInline ? Icon.ChevronDown : Icon.ChevronRight);
+                Draw.ButtonLook(g, pair, "", slot.FaderPairId.HasValue ? ButtonStyle.Tinted : ButtonStyle.Gray,
+                    CanTogglePair(deck, i), i == _hotSlot && _hotSlotBtn == 1, icon: Icon.Link);
                 Draw.ButtonLook(g, del, "", ButtonStyle.DestructiveTinted, true, i == _hotSlot && _hotSlotBtn == 3, icon: Icon.Close);
+                if (slot.FaderPairId is { } linked && i + 1 < deck.Items.Count && deck.Items[i + 1].FaderPairId == linked)
+                    g.Line(r.X + 14, r.Bottom - 3, r.X + 14, r.Bottom + 7, Theme.AccentText, 2);
+
             }
         }
+        PaintInsertion(g, _slotListRect, _slotScroll.Offset, slots: true);
         g.PopClip();
         _slotScroll.Paint(g);
 
@@ -462,9 +550,9 @@ internal sealed class DecksPage : Page
             if (r.Bottom < _catListRect.Y || r.Y > _catListRect.Bottom) continue;
             bool hot = i == _hotCat;
             g.FillRound(r, Theme.RadiusControl, hot ? Theme.AccentSoft : Theme.Surface2);
-            float cw = Draw.Chip(g, r.X + 8, r.CY, entry.Badge, entry.Color, dot: false, Theme.MicroStrong);
-            g.Text(entry.Title, new RectF(r.X + 14 + cw, r.Y, Math.Max(20, r.W - cw - 52), r.H), Theme.Body, Theme.Text);
-            Icons.Draw(g, Icon.Plus, r.Right - 20, r.CY, 16, hot ? Theme.AccentText : Theme.TextSecondary);
+            float cw = Draw.Chip(g, r.X + 30, r.CY, entry.Badge, entry.Color, dot: false, Theme.MicroStrong);
+            g.Text(entry.Title, new RectF(r.X + 36 + cw, r.Y, Math.Max(20, r.W - cw - 42), r.H), Theme.Body, Theme.Text);
+            Icons.Draw(g, Icon.Plus, r.X + 15, r.CY, 16, hot ? Theme.AccentText : Theme.TextSecondary);
         }
         g.PopClip();
         _catScroll.Paint(g);

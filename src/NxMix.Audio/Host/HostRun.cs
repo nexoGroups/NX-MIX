@@ -86,14 +86,15 @@ internal sealed class HostRun
                 continue;
             }
             var probe = new StreamSpec(b.DeviceId ?? "", capture, b.Loopback)
-            { SampleRate = b.SampleRate, BufferFrames = b.BufferFrames, Exclusive = b.Exclusive };
+            { SampleRate = b.SampleRate, BufferFrames = b.BufferFrames, Exclusive = b.Exclusive, NativeOutputPort = b.NativeOutputPort };
             if (!byKey.TryGetValue(probe.Key, out StreamSpec? spec))
             {
                 spec = probe;
                 byKey[probe.Key] = spec;
                 _specs.Add(spec);
             }
-            if (spec.SampleRate != b.SampleRate || spec.BufferFrames != b.BufferFrames || spec.Exclusive != b.Exclusive)
+            if (spec.SampleRate != b.SampleRate || spec.BufferFrames != b.BufferFrames || spec.Exclusive != b.Exclusive ||
+                spec.NativeOutputPort != b.NativeOutputPort)
                 throw new ArgumentException("Alle Zuordnungen eines Geräts müssen dieselben Geräteeinstellungen verwenden.");
             spec.Add(b.DeviceFirstChannel, b.EngineFirstChannel, b.Count);
         }
@@ -118,7 +119,7 @@ internal sealed class HostRun
             else
             {
                 _masterWasapiSpec = _specs.FirstOrDefault(s =>
-                    !s.IsCapture &&
+                    !s.IsCapture && s.NativeOutputPort == 0 &&
                     string.Equals(s.DeviceId, pref, StringComparison.OrdinalIgnoreCase) &&
                     (s.SampleRate == null || s.SampleRate == EngineRate));
             }
@@ -133,7 +134,8 @@ internal sealed class HostRun
             }
             else
             {
-                _masterWasapiSpec = _specs.FirstOrDefault(s => !s.IsCapture && (s.SampleRate == null || s.SampleRate == EngineRate));
+                _masterWasapiSpec = _specs.FirstOrDefault(s => !s.IsCapture && s.NativeOutputPort == 0 &&
+                    (s.SampleRate == null || s.SampleRate == EngineRate));
             }
         }
 
